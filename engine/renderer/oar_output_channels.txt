@@ -1,0 +1,171 @@
+# OAR output channel order and speaker geometry, one section per target
+# layout, transcribed from the OAR fork's own table:
+# src/renderer/olr/object_audio_renderer/layout.c (g_speaker_layouts).
+#
+# That table is not linkable from here — its Bazel package is visible only
+# inside the oar repo — so this file is the one transcription of it, and
+# both sides of the FFI pin against this file instead of against each
+# other (ES-592):
+#
+#   engine/test/oar_output_channels_test.cc drives OAR's public render API
+#     and asserts a source at each row's angles lands on that row's output
+#     channel, so an OAR_COMMIT bump that reorders a layout or moves a
+#     speaker fails at the layer that defines the order.
+#   app/test/renderer/oar_output_channels_test.dart asserts SpeakerLayout
+#     and OarLayout carry the same order, geometry and oar_layout_t values.
+#
+# Section header: [<layout id>] <oar_layout_t value>
+# Channel row:    <OAR label> <app label> <azimuth> <elevation> <lfe|->
+#
+# The final [names] section is the glossary: one line per app label,
+# `<app label> <full name...>`, the name a tooltip shows for that
+# channel. It has no oar_layout_t value, and its rows run to the end of
+# the line because a full name has spaces. It covers exactly the app
+# labels the layout sections use.
+#
+# Azimuth is positive to the left, elevation positive up, both in degrees.
+# Row order is the output channel order. Layout ids match SpeakerLayout.id
+# in app/lib/renderer/speaker_layout.dart.
+#
+# The two label columns have different provenance. The OAR label is
+# transcribed from the fork's table with everything else in the row, and
+# the C++ test checks the row against OAR by rendering, not by name. The
+# app label is Eclipsa Studio's own name for that channel -- what the
+# meters, the routing matrix, the timeline and the 3D scene must all
+# call it (ES-552) -- so OAR does not define it and the C++ test ignores
+# it. Three Dart tables spell it out (SpeakerLayout.speakers[i].label,
+# standardChannelLabel, iamfChannelLabels); before this column they were
+# only checked against each other, so a rename could pass through all
+# three. One deliberate exception is not pinned here: a 1-channel file
+# reads "M" on the timeline, for DAW familiarity, where the scene's mono
+# layout says "C".
+#
+# The full names in [names] are the tooltip copy in channelFullName
+# (app/lib/waveform/multi_channel_waveform.dart), which is their only
+# other home -- so unlike the columns above, this section adds a copy
+# rather than replacing several. It earns that by making a channel's
+# whole identity one line to read and one line to change, and by
+# forcing every label a layout renders to have a name: without the
+# coverage check a layout could use a label channelFullName has never
+# heard of, and the tooltip would echo the short label back. Labels
+# outside these ten layouts (7.1.5.4's Tc/Lbf/Rbf/Lbr/Rbr, the
+# timeline's mono "M") stay in that function alone.
+
+[mono] 1
+M+000   C         0    0  -
+
+[stereo] 2
+M+030   L        30    0  -
+M-030   R       -30    0  -
+
+[3.1.2] 9
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+U+045   Ltf      45   30  -
+U-045   Rtf     -45   30  -
+
+[5.1] 3
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+110   Ls      110    0  -
+M-110   Rs     -110    0  -
+
+[5.1.2] 4
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+110   Ls      110    0  -
+M-110   Rs     -110    0  -
+U+030   Ltf      30   30  -
+U-030   Rtf     -30   30  -
+
+[5.1.4] 5
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+110   Ls      110    0  -
+M-110   Rs     -110    0  -
+U+030   Ltf      30   30  -
+U-030   Rtf     -30   30  -
+U+110   Ltr     110   30  -
+U-110   Rtr    -110   30  -
+
+[7.1] 6
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+090   Ls       90    0  -
+M-090   Rs      -90    0  -
+M+135   Lrs     135    0  -
+M-135   Rrs    -135    0  -
+
+[7.1.2] 7
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+090   Ls       90    0  -
+M-090   Rs      -90    0  -
+M+135   Lrs     135    0  -
+M-135   Rrs    -135    0  -
+U+045   Ltf      45   30  -
+U-045   Rtf     -45   30  -
+
+[7.1.4] 8
+M+030   L        30    0  -
+M-030   R       -30    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+090   Ls       90    0  -
+M-090   Rs      -90    0  -
+M+135   Lrs     135    0  -
+M-135   Rrs    -135    0  -
+U+045   Ltf      45   30  -
+U-045   Rtf     -45   30  -
+U+135   Ltr     135   30  -
+U-135   Rtr    -135   30  -
+
+[9.1.6] 10
+M+060   L        60    0  -
+M-060   R       -60    0  -
+M+000   C         0    0  -
+LFE1    LFE      45  -30  lfe
+M+135   Lrs     135    0  -
+M-135   Rrs    -135    0  -
+M+030   Lc       30    0  -
+M-030   Rc      -30    0  -
+M+090   Lss      90    0  -
+M-090   Rss     -90    0  -
+U+045   Ltf      45   30  -
+U-045   Rtf     -45   30  -
+U+135   Ltr     135   30  -
+U-135   Rtr    -135   30  -
+U+090   Ltss     90   30  -
+U-090   Rtss    -90   30  -
+
+[names]
+L      Left
+R      Right
+C      Center
+LFE    Low-frequency effects
+Ls     Left surround
+Rs     Right surround
+Lrs    Left rear surround
+Rrs    Right rear surround
+Lss    Left side surround
+Rss    Right side surround
+Lc     Left front center
+Rc     Right front center
+Ltf    Left top front
+Rtf    Right top front
+Ltr    Left top rear
+Rtr    Right top rear
+Ltss   Left top side
+Rtss   Right top side

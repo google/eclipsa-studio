@@ -1,0 +1,65 @@
+# The app's minimum macOS. Also MACOSX_DEPLOYMENT_TARGET in
+# Runner.xcodeproj, --macos_minimum_os in engine/.bazelrc and MIN_MACOS in
+# engine/deps/{ffmpeg,gpac}; the five move together.
+MACOS_MIN = '12.0'
+
+platform :osx, MACOS_MIN
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'ephemeral', 'Flutter-Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure \"flutter pub get\" is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Flutter-Generated.xcconfig, then run \"flutter pub get\""
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_macos_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  # Strip POD_CONFIGURATION_*=1 from the Pods project's GCC_PREPROCESSOR_DEFINITIONS.
+  # They're defined as an array at project level, then re-quoted by some pod
+  # xcconfigs (media_kit_video did this, historically) which collapses the
+  # array into one -D flag and triggers "macro redefined" warnings. The macros
+  # just mirror DEBUG=1 / NDEBUG, so dropping them is safe.
+  installer.pods_project.build_configurations.each do |config|
+    defs = config.build_settings['GCC_PREPROCESSOR_DEFINITIONS']
+    next unless defs.is_a?(Array)
+    config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] =
+      defs.reject { |d| d =~ /^POD_CONFIGURATION_\w+=1$/ }
+  end
+
+  installer.pods_project.targets.each do |target|
+    flutter_additional_macos_build_settings(target)
+    # The pods declare their own deployment targets (FlutterMacOS 10.15,
+    # FlutterAngle 10.14, the plugins 11.0). Xcode 27 refuses any target
+    # below 12.0, so every pod is built for the app's own minimum.
+    target.build_configurations.each do |config|
+      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = MACOS_MIN
+    end
+  end
+end

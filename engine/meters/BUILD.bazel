@@ -1,0 +1,83 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "meter_state",
+    hdrs = ["meter_state.h"],
+)
+
+cc_library(
+    name = "peak_meter",
+    hdrs = ["peak_meter.h"],
+    srcs = ["peak_meter.cc"],
+    deps = [
+        ":meter_state",
+        "//graph:audio_buffer",
+    ],
+)
+
+cc_library(
+    name = "rms_meter",
+    hdrs = ["rms_meter.h"],
+    srcs = ["rms_meter.cc"],
+    deps = [
+        ":meter_state",
+        "//graph:audio_buffer",
+    ],
+)
+
+cc_library(
+    name = "channel_stats",
+    hdrs = ["channel_stats.h"],
+    srcs = ["channel_stats.cc"],
+    deps = [
+        ":meter_state",
+        "//graph:audio_buffer",
+    ],
+)
+
+cc_library(
+    name = "bs1770_weights",
+    hdrs = ["bs1770_weights.h"],
+    srcs = ["bs1770_weights.cc"],
+)
+
+cc_library(
+    name = "loudness_meter",
+    hdrs = ["loudness_meter.h"],
+    srcs = ["loudness_meter.cc"],
+    deps = [
+        ":bs1770_weights",
+        ":meter_state",
+        "//:engine_log",
+        "//graph:audio_buffer",
+        "@loudness_ebur128//:ebur128_analyzer",
+    ],
+)
+
+cc_library(
+    name = "meters",
+    deps = [
+        ":bs1770_weights",
+        ":meter_state",
+        ":peak_meter",
+        ":rms_meter",
+        ":loudness_meter",
+        ":channel_stats",
+    ],
+)

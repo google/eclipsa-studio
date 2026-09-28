@@ -1,0 +1,169 @@
+; Module-definition file for the Windows build of eclipsa_studio_engine.dll.
+;
+; MSVC link.exe doesn't auto-export symbols (unlike GCC/Clang's default
+; visibility), and `windows_export_all_symbols` overflows MSVC's
+; 65535-symbol cap once iamf-tools / abseil / protobuf / oar are
+; pulled in. So we hand-curate the C FFI surface Dart consumes — this
+; list mirrors the lookupFunction<...>('eclipsa_studio_*' / 'adm2iamf_*')
+; calls in app/lib/ffi_bridge.dart, app/lib/playback/iamf_probe*.dart,
+; app/lib/waveform/peak_isolate.dart, and
+; app/lib/import/adm_import_bridge.dart, plus the loop transport pair
+; that's declared public in engine.h even though Dart hasn't wired
+; it yet.
+;
+; A new `extern "C"` entry point in engine/ needs its name added
+; here too — otherwise the symbol won't be in the .dll's export table
+; and Dart's lookupFunction will throw ArgumentError on first call.
+
+EXPORTS
+    ; ── Smoke / version ────────────────────────────────────────────
+    eclipsa_studio_add
+    eclipsa_studio_version
+    eclipsa_studio_api_version
+
+    ; ── Lifecycle ─────────────────────────────────────────────────
+    eclipsa_studio_engine_init
+    eclipsa_studio_engine_shutdown
+    eclipsa_studio_engine_reconfigure
+    eclipsa_studio_engine_set_export_paused
+    
+    ; ── Logging ───────────────────────────────────────────────────
+    eclipsa_studio_set_log_callback
+    eclipsa_studio_rt_log_drain
+
+    ; ── Elements ──────────────────────────────────────────────────
+    eclipsa_studio_element_add
+    eclipsa_studio_element_remove
+    eclipsa_studio_element_ids
+    eclipsa_studio_element_set_gain
+    eclipsa_studio_element_set_mute
+    eclipsa_studio_element_set_solo
+    eclipsa_studio_element_set_mix_excluded
+    eclipsa_studio_element_set_mix_gain
+    eclipsa_studio_element_set_input_routing
+    eclipsa_studio_element_set_object_position
+    eclipsa_studio_element_seed_mix_gain
+    eclipsa_studio_element_set_type
+    eclipsa_studio_element_set_rendering_config
+    eclipsa_studio_set_output_mix_gain
+    eclipsa_studio_seed_output_mix_gain
+    eclipsa_studio_set_monitor_dim
+    eclipsa_studio_commit_rendering_config
+
+    ; ── Transport ─────────────────────────────────────────────────
+    eclipsa_studio_transport_play
+    eclipsa_studio_transport_pause
+    eclipsa_studio_transport_seek
+    eclipsa_studio_transport_set_loop
+    eclipsa_studio_transport_clear_loop
+    eclipsa_studio_transport_get_position_frames
+    eclipsa_studio_transport_is_audio_thread_running
+
+    ; ── Playback (IAMF read-back) ─────────────────────────────────
+    eclipsa_studio_playback_open
+    eclipsa_studio_playback_open_result_free
+    eclipsa_studio_playback_close
+    eclipsa_studio_playback_status
+    eclipsa_studio_playback_use_stream_gains
+
+    ; ── Devices ───────────────────────────────────────────────────
+    eclipsa_studio_device_count
+    eclipsa_studio_device_name
+    eclipsa_studio_device_select
+    eclipsa_studio_device_channel_count
+    eclipsa_studio_device_supported_sample_rate_count
+    eclipsa_studio_device_supported_sample_rate
+    eclipsa_studio_device_supported_channel_count_count
+    eclipsa_studio_device_supported_channel_count
+    eclipsa_studio_device_max_channels
+    eclipsa_studio_device_is_default
+    eclipsa_studio_current_sample_rate
+    eclipsa_studio_current_buffer_size
+    eclipsa_studio_current_device_index
+    eclipsa_studio_last_device_error
+    eclipsa_studio_devices_refresh
+    eclipsa_studio_device_hardware_sample_rate
+    eclipsa_studio_device_channel_name
+    eclipsa_studio_string_free
+
+    ; ── Meters / waveform ─────────────────────────────────────────
+    eclipsa_studio_get_meter_state
+    eclipsa_studio_meter_reset
+    eclipsa_studio_meter_reset_levels
+    eclipsa_studio_meter_reset_clips
+    eclipsa_studio_get_frame_counter
+    eclipsa_studio_get_output_peaks
+    eclipsa_studio_get_output_rms
+    eclipsa_studio_get_output_clips
+    eclipsa_studio_set_channel_stats_enabled
+    eclipsa_studio_peaks_compute
+    eclipsa_studio_peaks_free
+    eclipsa_studio_peaks_level_data
+    eclipsa_studio_wav_probe_json
+
+    ; ── Monitoring / OAR ──────────────────────────────────────────
+    eclipsa_studio_monitoring_set_layout
+    eclipsa_studio_monitoring_set_routing
+    eclipsa_studio_monitoring_set_layout_and_routing
+    eclipsa_studio_monitoring_set_noise
+    eclipsa_studio_monitoring_get_channels
+    eclipsa_studio_set_bypass_oar
+    eclipsa_studio_oar_buffer_size
+
+    ; ── IAMF export ───────────────────────────────────────────────
+    eclipsa_studio_iamf_export_progress
+    eclipsa_studio_iamf_export_cancel
+    eclipsa_studio_iamf_push_export_begin
+    eclipsa_studio_iamf_push_export_add_element
+    eclipsa_studio_iamf_push_export_run
+    eclipsa_studio_iamf_push_export_element_clip_stats
+    eclipsa_studio_iamf_mux
+    eclipsa_studio_video_container_probe
+    eclipsa_studio_fs_volume_info
+    eclipsa_studio_still_video_encode
+
+    ; ── Offline mix renderer ──────────────────────────────────────
+    eclipsa_studio_mix_renderer_create
+    eclipsa_studio_mix_renderer_add_element
+    eclipsa_studio_mix_renderer_set_object_position
+    eclipsa_studio_mix_renderer_set_output_gain
+    eclipsa_studio_mix_renderer_measure
+    eclipsa_studio_mix_renderer_trace_len
+    eclipsa_studio_mix_renderer_copy_trace
+    eclipsa_studio_mix_renderer_loudness_range
+    eclipsa_studio_mix_renderer_element_clip_stats
+    eclipsa_studio_mix_renderer_destroy
+
+    ; ── SH decoder (visualization) ────────────────────────────────
+    eclipsa_studio_sh_decoder_create
+    eclipsa_studio_sh_decode
+    eclipsa_studio_sh_decoder_destroy
+
+    ; ── IAMF probe (Inspector) ────────────────────────────────────
+    eclipsa_studio_iamf_probe
+    eclipsa_studio_iamf_probe_free
+    eclipsa_studio_iamf_probe_json
+    eclipsa_studio_iamf_probe_json_free
+
+    ; ── Video decode (FFmpeg-in-engine; ffmpeg_video_ffi.dart) ─────
+    ; The FFmpeg backend links the vendored LGPL FFmpeg on both macOS and
+    ; Windows now (engine/BUILD.bazel's select + engine/video/README.md), so
+    ; //video:video_ffi is in the Windows build and these symbols must be
+    ; exported for Dart's lookupFunction to find them.
+    eclipsa_studio_video_open
+    eclipsa_studio_video_info
+    eclipsa_studio_video_frame_at_seconds
+    eclipsa_studio_video_frame_at_seconds_pixbuf
+    eclipsa_studio_video_release_pixbuf
+    eclipsa_studio_video_close
+
+    ; ── ADM import (adm2iamf flat C ABI; adm_import_bridge.dart) ─────
+    adm2iamf_probe_json
+    adm2iamf_string_free
+    adm2iamf_render_start
+    adm2iamf_render_progress
+    adm2iamf_render_state
+    adm2iamf_render_result_json
+    adm2iamf_render_cancel
+    adm2iamf_shutdown
+    adm2iamf_version

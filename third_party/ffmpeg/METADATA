@@ -1,0 +1,16 @@
+name: "ffmpeg"
+description: "FFmpeg (libav*) and dav1d — video decode for the FFmpeg-in-engine backend"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/FFmpeg/FFmpeg.git"
+  }
+  url {
+    type: GIT
+    value: "https://code.videolan.org/videolan/dav1d.git"
+  }
+  version: "n8.0 (FFmpeg) + 1.5.1 (dav1d)"
+  license_type: RESTRICTED
+  last_upgrade_date { year: 2026 month: 7 day: 1 }
+}

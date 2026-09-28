@@ -1,0 +1,12 @@
+name: "google_sans"
+description: "Google Sans — the face of the Eclipsa Audio wordmark; twelve glyph outlines transcribed into Dart, no font file shipped"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/googlefonts/googlesans"
+  }
+  version: "google/fonts main, ofl/googlesans, commit 5412d702 (font version 14.000), fetched 2026-09-21"
+  license_type: NOTICE
+  last_upgrade_date { year: 2026 month: 9 day: 21 }
+}

@@ -1,0 +1,16 @@
+name: "asio"
+description: "ASIO (Audio Stream Input/Output)"
+
+third_party {
+  url {
+    type: HOMEPAGE
+    value: "https://www.steinberg.net/asiosdk"
+  }
+  url {
+    type: ARCHIVE
+    value: "https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip"
+  }
+  version: "2.3.4"
+  license_type: BY_EXCEPTION_ONLY
+  last_upgrade_date { year: 2025 month: 10 day: 15 }
+}

@@ -1,0 +1,12 @@
+name: "angle"
+description: "ANGLE (libEGL, libGLESv2) — the GL translation layer under the 3D renderer"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://chromium.googlesource.com/angle/angle"
+  }
+  version: "2ce714730798496bbde12addb2187058f2847379"
+  license_type: NOTICE
+  last_upgrade_date { year: 2026 month: 9 day: 11 }
+}

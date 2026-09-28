@@ -1,0 +1,102 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//:__subpackages__"])
+
+# `render_progress`, `object_motion` and `channel_renderer` are public so
+# the parked binaural/ambisonic bakes in adm-lab (eclipsa-studio#569) keep
+# compiling against them.
+
+cc_library(
+    name = "render_progress",
+    hdrs = ["render_progress.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "object_motion",
+    srcs = ["object_motion.cc"],
+    hdrs = ["object_motion.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//adm_import/scene:bs2127",
+        "//adm_import/scene:layouts",
+        "//adm_import/scene:scene",
+    ],
+)
+
+cc_test(
+    name = "object_motion_test",
+    srcs = ["object_motion_test.cc"],
+    deps = [
+        ":object_motion",
+        "//adm_import/scene:scene",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "channel_renderer",
+    srcs = ["channel_renderer.cc"],
+    hdrs = ["channel_renderer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":object_motion",
+        ":render_progress",
+        "//adm_import/scene:layouts",
+        "//adm_import/scene:scene",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@oar//:oar",
+    ],
+)
+
+cc_library(
+    name = "image_spread",
+    srcs = ["image_spread.cc"],
+    hdrs = ["image_spread.h"],
+    deps = [
+        "//adm_import/scene:layouts",
+        "@oar//:oar",
+    ],
+)
+
+cc_test(
+    name = "image_spread_test",
+    srcs = ["image_spread_test.cc"],
+    deps = [
+        ":channel_renderer",
+        ":image_spread",
+        "//adm_import/scene:layouts",
+        "//adm_import/scene:scene",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "channel_renderer_test",
+    srcs = ["channel_renderer_test.cc"],
+    deps = [
+        ":channel_renderer",
+        ":render_progress",
+        "//adm_import/scene:layouts",
+        "//adm_import/scene:scene",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest_main",
+        "@oar//:oar",
+    ],
+)

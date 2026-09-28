@@ -1,0 +1,11 @@
+Steinberg ASIO® SDK (host interface) — Windows ASIO output backend
+
+ASIO is a trademark of Steinberg Media Technologies GmbH, registered in Europe and other countries.
+
+Eclipsa Studio's Windows build includes a compiled host-side subset of
+the Steinberg ASIO SDK 2.3.4 (the driver enumeration and IASIO host
+interface sources) to support ASIO audio output devices. The SDK is
+dual-licensed by Steinberg Media Technologies GmbH under the
+proprietary Steinberg ASIO License or the GNU General Public License
+v3; Eclipsa Studio uses it under the proprietary Steinberg ASIO
+License. The full license text follows.

@@ -1,0 +1,31 @@
+# Force LF for Flutter-regenerated plugin glue files.
+#
+# `flutter pub get` rewrites these every run. With core.autocrlf=true
+# (the Git-for-Windows default) the rewrite uses CRLF, and they pop up
+# as "modified" in `git status` forever despite zero content change.
+# `eol=lf` overrides autocrlf on a per-path basis so the working-copy
+# bytes match what's stored in the repo.
+
+app/linux/flutter/generated_plugin_registrant.cc  text eol=lf
+app/linux/flutter/generated_plugin_registrant.h   text eol=lf
+app/linux/flutter/generated_plugins.cmake         text eol=lf
+app/macos/Flutter/GeneratedPluginRegistrant.swift text eol=lf
+app/windows/flutter/generated_plugin_registrant.cc text eol=lf
+app/windows/flutter/generated_plugin_registrant.h  text eol=lf
+app/windows/flutter/generated_plugins.cmake        text eol=lf
+
+# Golden export textprotos are compared byte-for-byte against the app
+# builder's output (app/test/export/user_metadata_golden_test.dart)
+# and fed verbatim to the encoder by the engine round-trip tests — a
+# CRLF checkout would fail both spuriously.
+engine/test/fixtures/golden/*.textproto text eol=lf
+
+# The GPAC patches are checked out byte for byte: `git apply` matches
+# their context lines exactly against the GPAC checkout, and a copy that
+# autocrlf converted to CRLF (the Git-for-Windows default) does not apply.
+engine/deps/gpac/patches/*.patch  -text
+# Same for the oar, obr and iamf-tools patches that MODULE.bazel applies.
+# Bazel's patch reader tolerates CRLF, but a CRLF checkout would differ on
+# every line from a patch the sync scripts regenerate.
+engine/deps/oar/*.patch         -text
+engine/deps/iamf_tools/*.patch  -text

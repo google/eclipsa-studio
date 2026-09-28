@@ -1,0 +1,12 @@
+name: "fdk_aac"
+description: "Fraunhofer FDK AAC Codec Library, the AAC decoder linked into the audio engine through iamf-tools; no source is checked in, only our NOTICE"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://android.googlesource.com/platform/external/aac"
+  }
+  version: "ee76460efbdb147e26d804c798949c23f174460b"
+  license_type: BY_EXCEPTION_ONLY
+  last_upgrade_date { year: 2026 month: 9 day: 27 }
+}

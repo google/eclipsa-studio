@@ -1,0 +1,23 @@
+Fraunhofer FDK AAC Codec Library
+================================
+
+Eclipsa Studio's audio engine contains the AAC decoder of the Fraunhofer
+FDK AAC Codec Library, linked in through iamf-tools, which uses it to
+decode AAC-LC substreams of IAMF files. Eclipsa Studio never encodes AAC:
+its export codecs are LPCM and Opus.
+
+  Project:    Fraunhofer FDK AAC Codec Library for Android
+              https://android.googlesource.com/platform/external/aac
+  Version:    commit ee76460efbdb147e26d804c798949c23f174460b, unmodified
+              (the pin in iamf-tools' MODULE.bazel at the commit
+              engine/MODULE.bazel names)
+  Copyright:  © 1995 - 2018 Fraunhofer-Gesellschaft zur Förderung der
+              angewandten Forschung e.V.
+  License:    Software License for The Fraunhofer FDK AAC Codec Library
+              for Android (the full text follows)
+
+The complete source code of the FDK AAC Codec as built into Eclipsa
+Studio is the repository above at that commit; Eclipsa Studio carries no
+modifications to it. The library is statically linked into the audio
+engine (libeclipsa_studio_engine.dylib on macOS,
+eclipsa_studio_engine.dll on Windows).

@@ -1,0 +1,6 @@
+# Vendored build outputs — produced by build_gpac.sh, not checked in.
+# No trailing slash: must also match a symlink at this path (a
+# dir-only pattern let stray symlinks get committed and break the
+# CI runner's vendored dirs).
+/lib
+/include

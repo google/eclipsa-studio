@@ -1,0 +1,691 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Shared WAV generation helper — header-only, included by all test TUs.
+cc_library(
+    name = "test_wav_helper",
+    hdrs = ["test_wav_helper.h"],
+    deps = [
+        "//wav",
+    ],
+)
+
+# Output-level (post-OAR) test harness (ES-88) — header-only. Mirrors the
+# app's element-registration recipe and provides rendered-PCM
+# signal-integrity analysis (level / continuity / pitch).
+cc_library(
+    name = "test_output_helper",
+    hdrs = ["test_output_helper.h"],
+    deps = [
+        "//graph:audio_graph",
+        "//renderer:oar_renderer",
+    ],
+)
+
+cc_test(
+    name = "wav_reader_test",
+    size = "small",
+    srcs = ["wav_reader_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//io:wav_reader",
+        "//wav:fixture",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "wav_writer_test",
+    size = "small",
+    srcs = ["wav_writer_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//io:wav_reader",
+        "//wav",
+        "//io:wav_writer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "oar_fade_test",
+    size = "small",
+    srcs = ["oar_fade_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Limiter delay contract: the delay OAR reports must match what the
+# render path measurably exhibits, stay at the 5 ms design point across
+# rates, survive a layout rebuild, and the -1 dBFS ceiling must hold.
+cc_test(
+    name = "oar_limiter_delay_test",
+    size = "small",
+    srcs = ["oar_limiter_delay_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# THD characterization of the limiter through the production render
+# path: it must stay transparent (<= -120 dB) at 0.5..9 dB over the
+# ceiling. Catches limiter DSP changes in oar pin bumps.
+cc_test(
+    name = "oar_limiter_thd_test",
+    size = "small",
+    srcs = ["oar_limiter_thd_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Equivalence canary for the cartesian->polar conversion (ES-567): the one
+# deliberate user of cartesian-typed oar metadata in the repo. Pins that
+# in-renderer layout-mode conversion == the public helper + polar metadata,
+# bit for bit — the drift-killer for oar pin bumps on the conversion path.
+cc_test(
+    name = "oar_cart_conversion_canary_test",
+    size = "small",
+    srcs = ["oar_cart_conversion_canary_test.cc"],
+    deps = [
+        "@googletest//:gtest_main",
+        "@oar//:oar",
+    ],
+)
+
+# Pins OAR's output channel order and speaker geometry (ES-592): renders one
+# object at each speaker's nominal angles on every target layout and checks
+# it comes out of that speaker's channel alone. The expectations live in
+# renderer/oar_output_channels.txt, which the app's Dart pin reads too, so
+# an oar bump that reorders a layout fails here rather than silently
+# relabelling the meters.
+cc_test(
+    name = "oar_output_channels_test",
+    size = "small",
+    srcs = ["oar_output_channels_test.cc"],
+    data = ["//renderer:oar_output_channels.txt"],
+    deps = [
+        "//adm_import/scene:layouts",
+        "@googletest//:gtest_main",
+        "@oar//:oar",
+    ],
+)
+
+# Pins the OLR behavior behind the object-silence bug: object elements
+# render nothing on loudspeaker layouts until position metadata arrives,
+# and become audible once the engine pushes positions per callback.
+cc_test(
+    name = "oar_object_position_test",
+    size = "small",
+    srcs = ["oar_object_position_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Pins the offline-exclusive contract (ES-158): deferred rebuilds are
+# replayed on exit and raw reconfiguring-flag clears are ignored while
+# an export/loudness pass holds the mode.
+cc_test(
+    name = "oar_offline_exclusive_test",
+    size = "small",
+    srcs = ["oar_offline_exclusive_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Covers the reconfiguring/ack protocol against a simulated audio
+# thread: the acked rebuild path and the reap of deferred (ES-158)
+# teardowns are unreachable in the no-audio-thread tests.
+cc_test(
+    name = "oar_ack_protocol_test",
+    size = "small",
+    srcs = ["oar_ack_protocol_test.cc"],
+    deps = [
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Drift-killer for the OAR capability mapping (ES-330): valid ⇒ renderable
+# across every coded channel layout, expanded sub-layout, and
+# ambisonics order expressible in IAMF v1.x.
+cc_test(
+    name = "oar_capability_test",
+    size = "small",
+    srcs = ["oar_capability_test.cc"],
+    deps = [
+        "//renderer:oar_capability",
+        "@googletest//:gtest_main",
+        "@oar//:oar",
+    ],
+)
+
+cc_test(
+    name = "engine_log_test",
+    size = "small",
+    srcs = ["engine_log_test.cc"],
+    deps = [
+        "//:engine_log",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "transport_fade_test",
+    size = "small",
+    srcs = ["transport_fade_test.cc"],
+    deps = [
+        "//:transport_fade",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "dropout_detector_test",
+    size = "small",
+    srcs = ["dropout_detector_test.cc"],
+    deps = [
+        "//:dropout_detector",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "device_manager_test",
+    size = "small",
+    srcs = ["device_manager_test.cc"],
+    deps = [
+        "//io:device_manager",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "stream_layout_test",
+    size = "small",
+    srcs = ["stream_layout_test.cc"],
+    deps = [
+        "//io:stream_layout",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "audio_graph_test",
+    size = "small",
+    srcs = ["audio_graph_test.cc"],
+    deps = [
+        ":test_output_helper",
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Concurrency regression for issue ES-145 (loudness meter use-after-free on
+# a meter reset that races the audio thread). Run under --config=asan to
+# catch the heap-use-after-free; see the file header for details.
+cc_test(
+    name = "audio_graph_loudness_race_test",
+    size = "small",
+    srcs = ["audio_graph_loudness_race_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "//meters:loudness_meter",
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "dsp_test",
+    size = "small",
+    srcs = ["dsp_test.cc"],
+    deps = [
+        "//dsp:dsp",
+        "//graph:audio_buffer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "resampler_test",
+    size = "small",
+    srcs = ["resampler_test.cc"],
+    deps = [
+        "//dsp:resampler",
+        "//graph:audio_buffer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "meter_test",
+    size = "small",
+    srcs = ["meter_test.cc"],
+    deps = [
+        "//graph:audio_buffer",
+        "//meters:peak_meter",
+        "//meters:rms_meter",
+        "//meters:meter_state",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "loudness_meter_test",
+    size = "small",
+    srcs = ["loudness_meter_test.cc"],
+    deps = [
+        "//graph:audio_buffer",
+        "//meters:loudness_meter",
+        "//meters:meter_state",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "peak_compute_test",
+    size = "small",
+    srcs = ["peak_compute_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//waveform:peak_compute",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "wav_probe_ffi_test",
+    size = "small",
+    srcs = ["wav_probe_ffi_test.cc"],
+    deps = [
+        "//io:wav_probe_ffi",
+        "//wav:fixture",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_stream_reader_test",
+    size = "small",
+    srcs = ["iamf_stream_reader_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        "//graph:audio_buffer",
+        "//iamf:iamf_stream_reader",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "still_video_encoder_test",
+    size = "small",
+    srcs = ["still_video_encoder_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        "//iamf:iamf_muxer",
+        "//deps/gpac:libgpac",
+        "//video:still_video_encoder",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "video_rotation_test",
+    size = "small",
+    srcs = ["video_rotation_test.cc"],
+    deps = [
+        "//video:rotation",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "pcm_ring_test",
+    size = "small",
+    srcs = ["pcm_ring_test.cc"],
+    deps = [
+        "//graph:audio_buffer",
+        "//iamf:pcm_ring",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_playback_session_test",
+    size = "small",
+    srcs = ["iamf_playback_session_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        "//graph:audio_buffer",
+        "//iamf:iamf_playback_session",
+        "//iamf:iamf_ring_source",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_muxer_test",
+    size = "small",
+    srcs = ["iamf_muxer_test.cc"],
+    data = glob(["fixtures/*.iamf"]) + ["fixtures/stts_zero_tail_h264.mp4"],
+    deps = [
+        "//iamf:gpac_system",
+        "//iamf:iamf_muxer",
+        "//deps/gpac:libgpac",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "volume_info_test",
+    size = "small",
+    srcs = ["volume_info_test.cc"],
+    deps = [
+        "//io:volume_info",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_demuxer_test",
+    size = "small",
+    srcs = ["iamf_demuxer_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        "//iamf:iamf_demuxer",
+        "//iamf:iamf_playback_session",
+        "//deps/gpac:libgpac",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_gpac_limits_test",
+    size = "small",
+    srcs = ["iamf_gpac_limits_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        "//deps/gpac:libgpac",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "audio_graph_iamf_test",
+    # `medium`: the two KeepsBothRingsAlive tests run 40 seek
+    # iterations against wall-clock deadlines, and each iteration
+    # legitimately pays the ES-473 fade-out + post + refill cycle;
+    # under TSan/ASan a slow-but-passing run can crowd a small
+    # target's 60 s cap.
+    size = "medium",
+    srcs = ["audio_graph_iamf_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    deps = [
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "//meters:meter_state",
+        "//renderer:oar_capability",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Routing scatter + pink-noise injection. Drives the pure scatter helpers,
+# the process() wiring, and the engine FFI size-mismatch guard (engine_lib).
+cc_test(
+    name = "audio_graph_routing_test",
+    size = "small",
+    srcs = ["audio_graph_routing_test.cc"],
+    # The FFI cases bring the engine up on the real output device;
+    # keep the run inaudible (ES-348).
+    env = {"ECLIPSA_STUDIO_MUTE_OUTPUT": "1"},
+    deps = [
+        "//:engine_lib",
+        "//graph:audio_graph",
+        "//graph:routing_scatter",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Integration test for the Playback C FFI. Links the full engine_lib
+# (goes through g_graph / g_device / g_audio_thread globals) so
+# this exercises the same code path Dart uses at runtime.
+cc_test(
+    name = "playback_ffi_test",
+    size = "small",
+    srcs = ["playback_ffi_test.cc"],
+    data = glob(["fixtures/*.iamf"]),
+    # Plays the full-scale tone fixture through the real output device;
+    # keep the run inaudible (ES-348).
+    env = {"ECLIPSA_STUDIO_MUTE_OUTPUT": "1"},
+    deps = [
+        ":test_wav_helper",
+        "//:engine_lib",
+        "//:transport_fade",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Export -> decode -> rendered-PCM round trip over the multi_mix golden
+# (ES-285). Needs the exporter (real iamf-tools encode at test time) and
+# the full graph/OAR render path.
+cc_test(
+    name = "iamf_round_trip_test",
+    size = "medium",
+    srcs = ["iamf_round_trip_test.cc"],
+    data = glob(["fixtures/golden/*.textproto"]),
+    deps = [
+        ":test_output_helper",
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "//iamf:iamf_exporter",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cli_commands_test",
+    size = "small",
+    srcs = ["cli_commands_test.cc"],
+    data = glob([
+        "fixtures/*.iamf",
+        "fixtures/golden/*.textproto",
+    ]),
+    deps = [
+        ":test_wav_helper",
+        "//graph:audio_buffer",
+        "//io:wav_reader",
+        "//tools:cli_commands",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "element_bouncer_test",
+    size = "small",
+    srcs = ["element_bouncer_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//bounce:element_bouncer",
+        "//graph:audio_buffer",
+        "//io:wav_reader",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "element_stream_test",
+    size = "small",
+    srcs = ["element_stream_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//bounce:element_bouncer",
+        "//bounce:element_stream",
+        "//graph:audio_buffer",
+        "//io:wav_reader",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_push_export_test",
+    size = "medium",
+    srcs = ["iamf_push_export_test.cc"],
+    data = glob(["fixtures/golden/*.textproto"]),
+    deps = [
+        ":test_wav_helper",
+        "//iamf:iamf_exporter",
+        "@googletest//:gtest_main",
+        "@iamf_tools//iamf/cli/proto:user_metadata_cc_proto",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_encoder_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_encoder_interface",
+        "@protobuf",
+    ],
+)
+
+cc_test(
+    name = "iamf_loudness_agreement_test",
+    # `medium`: three full golden encodes + four measures; ~4 s
+    # fastbuild but longer under tsan, past a small target's 60 s
+    # budget headroom.
+    size = "medium",
+    srcs = ["iamf_loudness_agreement_test.cc"],
+    data = glob(["fixtures/golden/*.textproto"]),
+    deps = [
+        ":test_wav_helper",
+        "//iamf:iamf_exporter",
+        "//mix_renderer:offline_mix_renderer",
+        "@googletest//:gtest_main",
+        "@iamf_tools//iamf/cli:probe",
+    ],
+)
+
+cc_test(
+    name = "offline_mix_renderer_test",
+    # `medium`: the post-limiter and whole-program mix-gain pins render
+    # multi-second programs; ~20-26 s under tsan, too close to a small
+    # target's 60 s budget on the CI Mac mini.
+    size = "medium",
+    srcs = ["offline_mix_renderer_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//bounce:element_bouncer",
+        "//bounce:element_stream",
+        "//mix_renderer:offline_mix_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Offline-vs-offline exclusion gate (each OAR instance used by one thread):
+# concurrent OfflineMixRenderer instances under the asan/ubsan/tsan CI
+# sweeps. Parallelizing the app's measure pass is gated on this staying
+# green. "medium": the binaural renders multiply under tsan.
+cc_test(
+    name = "offline_mix_concurrency_test",
+    size = "medium",
+    srcs = ["offline_mix_concurrency_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//mix_renderer:offline_mix_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "mix_renderer_ffi_test",
+    size = "small",
+    srcs = ["mix_renderer_ffi_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//:engine_lib",
+        "//mix_renderer:offline_mix_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "iamf_export_ffi_test",
+    size = "medium",
+    srcs = ["iamf_export_ffi_test.cc"],
+    data = glob(["fixtures/golden/*.textproto"]),
+    deps = [
+        ":test_wav_helper",
+        "//:engine_lib",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "ffi_exports_lint_test",
+    size = "small",
+    srcs = ["ffi_exports_lint_test.cc"],
+    data = [
+        "//:eclipsa_studio_engine_exports.def",
+        "//:engine.h",
+        "//:engine_log.h",
+        "//adm_import/ffi:adm2iamf_ffi.h",
+        "//dsp:sh_decode.h",
+        "//iamf:iamf_probe_ffi.h",
+        "//io:wav_probe_ffi.h",
+        "//video:video_ffi.h",
+        "//waveform:peak_compute.h",
+    ],
+    deps = ["@googletest//:gtest_main"],
+)
+
+test_suite(
+    name = "all",
+    tests = [
+        ":wav_reader_test",
+        ":wav_writer_test",
+        ":cli_commands_test",
+        ":audio_graph_test",
+        ":audio_graph_iamf_test",
+        ":iamf_round_trip_test",
+        ":element_bouncer_test",
+        ":element_stream_test",
+        ":iamf_push_export_test",
+        ":dsp_test",
+        ":meter_test",
+        ":loudness_meter_test",
+        ":peak_compute_test",
+        ":iamf_stream_reader_test",
+        ":pcm_ring_test",
+        ":iamf_playback_session_test",
+        ":iamf_demuxer_test",
+        ":iamf_gpac_limits_test",
+        ":audio_graph_routing_test",
+        ":playback_ffi_test",
+        ":offline_mix_renderer_test",
+        ":offline_mix_concurrency_test",
+        ":oar_offline_exclusive_test",
+        ":oar_ack_protocol_test",
+        ":mix_renderer_ffi_test",
+        ":ffi_exports_lint_test",
+    ],
+)

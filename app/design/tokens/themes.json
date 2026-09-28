@@ -1,0 +1,33 @@
+{
+  "$description": "Theme registry, in the order Settings lists the themes. Four themes ship: Dark (id dark, first and the default), Light (light), Classic (classic) and High Contrast (high-contrast). `id` names the token file and the golden images; the theme preference stores the enum name (highContrast for High Contrast), and themeModeFromId accepts either. `label` is what Settings shows and may be renamed freely. `role` drives Material Brightness. A preference stored under any other name than an `id` or an `enumName` opens the default.",
+  "themes": [
+    {
+      "id": "dark",
+      "label": "Dark",
+      "role": "dark",
+      "enumName": "dark",
+      "tokens": "dark.tokens.json"
+    },
+    {
+      "id": "light",
+      "label": "Light",
+      "role": "light",
+      "enumName": "light",
+      "tokens": "light.tokens.json"
+    },
+    {
+      "id": "classic",
+      "label": "Classic",
+      "role": "dark",
+      "enumName": "classic",
+      "tokens": "classic.tokens.json"
+    },
+    {
+      "id": "high-contrast",
+      "label": "High Contrast",
+      "role": "highContrast",
+      "enumName": "highContrast",
+      "tokens": "high-contrast.tokens.json"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "fill": {
+    "solid": "extended-srgb:0.06275,0.06275,0.06275,1.00000"
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "name": "S",
+          "image-name": "s.svg",
+          "glass": true,
+          "fill": {
+            "solid": "extended-srgb:0.87843,0.37647,0.56471,1.00000"
+          }
+        },
+        {
+          "name": "E",
+          "image-name": "e.svg",
+          "glass": true,
+          "fill": {
+            "solid": "extended-srgb:0.89020,0.88235,0.94902,1.00000"
+          }
+        },
+        {
+          "name": "Field",
+          "image-name": "field.svg",
+          "glass": true,
+          "fill": {
+            "solid": "extended-srgb:0.39216,0.38824,0.41569,1.00000"
+          }
+        }
+      ],
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}

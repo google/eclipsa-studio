@@ -1,0 +1,12 @@
+name: "inter"
+description: "Inter — the UI typeface bundled with the app"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/rsms/inter"
+  }
+  version: "v4.1"
+  license_type: NOTICE
+  last_upgrade_date { year: 2026 month: 8 day: 28 }
+}

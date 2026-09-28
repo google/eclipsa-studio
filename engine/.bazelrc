@@ -1,0 +1,105 @@
+# Bazel 9 compatibility: cc_library moved to rules_cc
+build --incompatible_autoload_externally=+cc_library,+cc_binary,+cc_test,+cc_shared_library,+cc_import,+objc_library,+objc_import
+
+# Pick host-OS specific config (build:linux / build:macos / build:windows)
+# automatically. Toolchain flag syntax differs between Clang/GCC and MSVC,
+# so per-OS sections below split them.
+build --enable_platform_specific_config
+
+# Print failing tests' output inline. Without this a CI failure only
+# names the runner-local test.log path, which nobody can reach.
+test --test_output=errors
+
+# ─── Clang / GCC (macOS, Linux) ──────────────────────────────────────────
+# C++20 everywhere — required by iamf-tools (std::to_array, etc.)
+build:macos --cxxopt=-std=c++20
+build:macos --host_cxxopt=-std=c++20
+build:macos --copt=-Wall
+build:macos --copt=-Wextra
+build:macos --copt=-Wno-unused-parameter
+
+# macOS deployment target: matches app/macos/Runner.xcodeproj
+# (MACOSX_DEPLOYMENT_TARGET = 12.0), app/macos/Podfile and MIN_MACOS in
+# deps/ffmpeg/build_ffmpeg.sh and deps/gpac/build_gpac.sh; the five move
+# together. Required so std::filesystem::path (introduced in macOS 10.15)
+# and other modern libc++ symbols are available when compiling
+# iamf-tools.
+build:macos --macos_minimum_os=12.0
+build:macos --host_macos_minimum_os=12.0
+
+build:linux --cxxopt=-std=c++20
+build:linux --host_cxxopt=-std=c++20
+build:linux --copt=-Wall
+build:linux --copt=-Wextra
+build:linux --copt=-Wno-unused-parameter
+# oar/obr (pffft and friends) call libm directly; their own .bazelrc adds
+# this too, but rc files do not propagate from dependency modules.
+build:linux --linkopt=-lm
+
+# ─── MSVC (Windows) ──────────────────────────────────────────────────────
+# cl.exe uses `/std:c++20` (colon, not equals). `-Wextra` and friends are
+# GCC-only, so just go with /W3 here.
+build:windows --cxxopt=/std:c++20
+build:windows --host_cxxopt=/std:c++20
+build:windows --copt=/W3
+# Quiet noisy MSVC warnings that fire in third-party C/C++ deps.
+build:windows --copt=/wd4244  # conversion, possible loss of data
+build:windows --copt=/wd4267  # size_t -> smaller, possible loss of data
+build:windows --copt=/wd4305  # truncation from double to float
+# UTF-8 source + execution charset to match Unix toolchains.
+build:windows --copt=/utf-8
+# Materialize runfiles trees (off by default on Windows). Without this,
+# TEST_SRCDIR points at a runfiles dir holding only a MANIFEST, so
+# cc_test `data` deps (test/fixtures/*.iamf) are unreachable via the
+# path-probing fixture loaders. Needs Developer Mode (or admin) for
+# symlink creation.
+build:windows --enable_runfiles
+
+# AddressSanitizer (Clang/GCC only — MSVC's ASan story is different).
+build:asan --copt=-fsanitize=address
+build:asan --copt=-fno-omit-frame-pointer
+build:asan --copt=-g
+build:asan --copt=-DADDRESS_SANITIZER
+build:asan --linkopt=-fsanitize=address
+build:asan --strip=never
+# Give the instrumented build its own output tree. --copt/--linkopt/--strip
+# do NOT affect the output directory name, so without this every sanitizer
+# pass writes to plain `bazel-out/darwin_arm64-fastbuild/` and clobbers the
+# previous pass's objects and test binaries — the local action cache is keyed
+# on the output exec path, so each of CI's three passes then re-executed the
+# same ~1430 compile actions on every run, forever (~5 min/run of recompiling
+# unchanged third-party code), and left the tree a mixture of instrumented and
+# uninstrumented archives that broke sanitizer symbolization.
+#
+# `ubsan` deliberately has NO suffix of its own: CI runs
+# `--config=asan --config=ubsan`, and this keeps that combination in the
+# `-asan` tree. Do not add `build:ubsan --platform_suffix=...` — with both
+# set, last-flag-wins makes the output directory depend on --config order.
+build:asan --platform_suffix=asan
+
+# ThreadSanitizer
+build:tsan --copt=-fsanitize=thread
+build:tsan --copt=-fno-omit-frame-pointer
+build:tsan --copt=-g
+build:tsan --copt=-DTHREAD_SANITIZER
+build:tsan --linkopt=-fsanitize=thread
+build:tsan --strip=never
+# Own output tree — see the --platform_suffix rationale under `asan` above.
+build:tsan --platform_suffix=tsan
+# No TSAN_OPTIONS tuning: on the TSan v3 runtime our pinned toolchain
+# ships (ES-166), history_size is a no-op and second_deadlock_stack is
+# inert without detect_deadlocks — verified empirically. The CI
+# testlog-artifact upload is what preserves an intermittent report.
+
+# UndefinedBehaviorSanitizer. Composes with asan — CI runs
+# `--config=asan --config=ubsan` so one instrumented pass covers both
+# (tsan cannot combine with asan and stays a separate pass).
+# -fno-sanitize-recover makes every UB report fatal; the default merely
+# prints and continues, which a green test run would hide.
+build:ubsan --copt=-fsanitize=undefined
+build:ubsan --copt=-fno-sanitize-recover=all
+build:ubsan --copt=-fno-omit-frame-pointer
+build:ubsan --copt=-g
+build:ubsan --copt=-DUNDEFINED_BEHAVIOR_SANITIZER
+build:ubsan --linkopt=-fsanitize=undefined
+build:ubsan --strip=never

@@ -1,0 +1,78 @@
+---
+# Eclipsa Studio C++ — clang-tidy configuration
+# Based on Google C++ Style Guide with project-specific tuning.
+
+Checks: >
+  -*,
+  bugprone-*,
+  google-*,
+  modernize-*,
+  performance-*,
+  readability-identifier-naming,
+  readability-redundant-member-init,
+  readability-simplify-boolean-expr,
+  readability-container-size-empty,
+  readability-make-member-function-const,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -google-readability-todo,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -modernize-use-nodiscard,
+  -google-objc-function-naming,
+  -performance-unnecessary-value-param,
+
+CheckOptions:
+  # Types: CamelCase
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+
+  # Member variables: lower_case with trailing underscore
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: '_'
+
+  # Constants: CamelCase with k prefix
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: 'k'
+
+  # Enum constants: CamelCase with k prefix (enum class).
+  # Plain C enums in the FFI header use UPPER_CASE — suppress with NOLINT.
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantPrefix
+    value: 'k'
+
+  # Namespaces: lower_case
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+
+  # Local variables: lower_case
+  - key: readability-identifier-naming.LocalVariableCase
+    value: lower_case
+
+  # Parameters: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+
+  # Global variables: lower_case with g_ prefix
+  - key: readability-identifier-naming.GlobalVariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalVariablePrefix
+    value: 'g_'
+
+  # Macros: not enforced (include guard trailing underscore triggers
+  # false positives and we have no other macro naming to police).
+  # - key: readability-identifier-naming.MacroDefinitionCase
+  #   value: UPPER_CASE
+
+# Only check project headers (skip external and system headers).
+# Excludes eclipsa_studio_engine.h (C FFI header with C-style naming).
+HeaderFilterRegex: '.*/engine/(graph|io|dsp|meters|waveform|test)/.*\.h$|.*/engine/(audio_thread|engine|engine_log)\.h$'
+
+WarningsAsErrors: ''

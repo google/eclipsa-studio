@@ -1,0 +1,48 @@
+ANGLE (libEGL, libGLESv2) — GL translation layer for the 3D renderer
+====================================================================
+
+Eclipsa Studio's 3D renderer draws through OpenGL ES, which ANGLE
+translates to the platform's graphics API (Metal on macOS, Direct3D 11
+on Windows).
+
+  Project:    ANGLE — https://chromium.googlesource.com/angle/angle
+  Copyright:  © 2018 The ANGLE Project Authors
+  License:    BSD 3-Clause
+
+ANGLE ships beside the application as dynamically linked libraries:
+libEGL.framework and libGLESv2.framework in "Eclipsa Studio.app/Contents/
+Frameworks" on macOS, and libEGL.dll and libGLESv2.dll beside the
+application executable on Windows. No part of ANGLE is statically linked
+into Eclipsa Studio.
+
+The macOS binaries are the ones the flutter_angle package bundles. The
+Windows binaries are built from ANGLE at commit
+2ce714730798496bbde12addb2187058f2847379 (angle/angle main as of
+2026-07-17); the build configuration is recorded in
+engine/deps/angle/build_angle.ps1.
+
+The Windows build turns off ANGLE's Vulkan and WebGPU backends, its
+Vulkan GPU identification, its use of Abseil and its ASTC encoder, and
+statically links these third-party components into the two libraries:
+
+  xxHash (libEGL.dll and libGLESv2.dll)
+    Copyright (c) 2012-2021 Yann Collet
+    License: BSD 2-Clause
+
+  zlib, the Chromium copy at commit
+  8b3aa8a1cd7585c0c4c67351481227b046a662a0 (libGLESv2.dll)
+    Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
+    License: zlib
+    The Chromium copy adds SIMD checksum and inflate code and
+    compression helpers, copyright The Chromium Authors under the
+    Chromium BSD 3-Clause license, and a CRC folding implementation,
+    copyright Intel Corporation under the zlib license.
+
+  libc++ and the compiler-rt builtins from the LLVM toolchain the ANGLE
+  build uses, under the Apache License 2.0 with LLVM Exceptions. The
+  exception waives the attribution requirement for these runtime
+  components when they are embedded in compiled object code, so their
+  license text is not reproduced here.
+
+The full text of ANGLE's license follows, then xxHash's, zlib's and
+the Chromium license.

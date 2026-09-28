@@ -1,0 +1,9 @@
+bazel-bin
+bazel-out
+bazel-engine
+bazel-testlogs
+MODULE.bazel.lock
+compile_commands.json
+# Stamped by build.sh / build.ps1 (engine_version.h) — mirrors
+# app/lib/generated/.
+generated/

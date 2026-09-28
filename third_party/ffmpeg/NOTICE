@@ -1,0 +1,52 @@
+FFmpeg + dav1d
+==============
+
+Eclipsa Studio's FFmpeg-in-engine video backend (the "FFmpeg" option in
+Settings -> Video backend) decodes the reference video with FFmpeg, plus
+dav1d for AV1 (engine/video/, issue ES-249). Both are linked DYNAMICALLY and
+shipped as separate shared libraries alongside the audio engine — on macOS in
+"Eclipsa Studio.app/Contents/Frameworks" (libav*.dylib), on Windows beside
+eclipsa_studio_engine.dll (avcodec-*.dll and the other av*/dav1d DLLs); no
+part of FFmpeg or dav1d is statically linked into Eclipsa Studio.
+
+FFmpeg
+------
+  Project:    FFmpeg — https://ffmpeg.org  (https://github.com/FFmpeg/FFmpeg)
+  Version:    release n8.0
+  Copyright:  © the FFmpeg developers
+  License:    GNU Lesser General Public License, version 2.1 or later
+              (LGPL-2.1-or-later)
+
+  The bundled build is configured WITHOUT --enable-gpl and WITHOUT
+  --enable-nonfree, so it contains only LGPL-licensed code. It is a
+  decode-only build (encoders, muxers, avdevice, avfilter, postproc and
+  networking disabled) with autodetection off, carrying no external
+  dependency other than dav1d (below) and system frameworks. Shipped
+  libraries: libavutil, libavcodec, libavformat, libswscale, libswresample.
+
+dav1d
+-----
+  Project:    dav1d — https://code.videolan.org/videolan/dav1d
+  Version:    release 1.5.1
+  Copyright:  © VideoLAN and dav1d authors
+  License:    BSD 2-Clause (see LICENSE.dav1d.txt)
+
+  Linked into libavcodec as the AV1 decoder and shipped as libdav1d.dylib.
+
+Modifying / replacing the bundled libraries (LGPL v2.1 section 6)
+----------------------------------------------------------------
+In accordance with section 6 of the LGPL v2.1, you may modify the bundled
+FFmpeg libraries and use modified versions with Eclipsa Studio: replace the
+shipped FFmpeg shared libraries with your own build of interface-compatible
+libraries and the application will load them — the libav*.dylib files in
+"Eclipsa Studio.app/Contents/Frameworks" on macOS, or the av*-*.dll files
+beside eclipsa_studio_engine.dll on Windows. The corresponding source for the
+bundled build is FFmpeg at the release listed above
+(https://github.com/FFmpeg/FFmpeg) and dav1d at its release
+(https://code.videolan.org/videolan/dav1d); the exact build configuration is
+recorded in engine/deps/ffmpeg/build_ffmpeg.sh (macOS) and
+engine/deps/ffmpeg/build_ffmpeg.ps1 (Windows).
+
+The full text of the GNU Lesser General Public License, version 2.1, follows
+in LICENSE.LGPL-2.1.txt; the dav1d BSD 2-Clause license is in
+LICENSE.dav1d.txt.

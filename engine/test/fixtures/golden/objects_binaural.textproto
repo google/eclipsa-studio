@@ -1,0 +1,156 @@
+test_vector_metadata {
+  human_readable_description: "Eclipsa Studio export (objects_binaural)"
+  file_name_prefix: "objects_binaural"
+  is_valid: true
+  partition_mix_gain_parameter_blocks: false
+}
+ia_sequence_header_metadata {
+  primary_profile: PROFILE_VERSION_BASE_ADVANCED
+  additional_profile: PROFILE_VERSION_BASE_ADVANCED
+}
+codec_config_metadata {
+  codec_config_id: 200
+  codec_config {
+    codec_id: CODEC_ID_LPCM
+    num_samples_per_frame: 1024
+    audio_roll_distance: 0
+    decoder_config_lpcm {
+      sample_format_flags: LPCM_LITTLE_ENDIAN
+      sample_size: 24
+      sample_rate: 48000
+    }
+  }
+}
+audio_element_metadata {
+  audio_element_id: 300
+  audio_element_type: AUDIO_ELEMENT_OBJECT_BASED
+  reserved: 0
+  codec_config_id: 200
+  audio_substream_ids: [0]
+  objects_config {
+    num_objects: 1
+  }
+}
+audio_element_metadata {
+  audio_element_id: 301
+  audio_element_type: AUDIO_ELEMENT_OBJECT_BASED
+  reserved: 0
+  codec_config_id: 200
+  audio_substream_ids: [1]
+  objects_config {
+    num_objects: 2
+  }
+}
+mix_presentation_metadata {
+  mix_presentation_id: 400
+  annotations_language: ["en"]
+  localized_presentation_annotations: ["Main"]
+  sub_mixes {
+    audio_elements {
+      audio_element_id: 300
+      localized_element_annotations: ["MonoObj"]
+      rendering_config {
+        headphones_rendering_mode: HEADPHONES_RENDERING_MODE_BINAURAL_WORLD_LOCKED
+        binaural_filter_profile: BINAURAL_FILTER_PROFILE_DIRECT
+        rendering_config_param_definitions {
+          param_definition_type: PARAM_DEFINITION_TYPE_POLAR
+          polar_param_definition {
+            param_definition {
+              parameter_id: 100
+              parameter_rate: 48000
+              param_definition_mode: 1
+              reserved: 0
+            }
+            default_azimuth: 30
+            default_elevation: 10
+            default_distance: 64
+          }
+        }
+      }
+      element_mix_gain {
+        param_definition {
+          parameter_id: 101
+          parameter_rate: 48000
+          param_definition_mode: 1
+          reserved: 0
+        }
+        default_mix_gain: 0
+      }
+    }
+    audio_elements {
+      audio_element_id: 301
+      localized_element_annotations: ["DualObj"]
+      rendering_config {
+        headphones_rendering_mode: HEADPHONES_RENDERING_MODE_BINAURAL_WORLD_LOCKED
+        binaural_filter_profile: BINAURAL_FILTER_PROFILE_AMBIENT
+        rendering_config_param_definitions {
+          param_definition_type: PARAM_DEFINITION_TYPE_DUAL_POLAR
+          dual_polar_param_definition {
+            param_definition {
+              parameter_id: 102
+              parameter_rate: 48000
+              param_definition_mode: 1
+              reserved: 0
+            }
+            default_first_azimuth: 40
+            default_first_elevation: -5
+            default_first_distance: 127
+            default_second_azimuth: -20
+            default_second_elevation: -5
+            default_second_distance: 127
+          }
+        }
+      }
+      element_mix_gain {
+        param_definition {
+          parameter_id: 103
+          parameter_rate: 48000
+          param_definition_mode: 1
+          reserved: 0
+        }
+        default_mix_gain: 0
+      }
+    }
+    output_mix_gain {
+      param_definition {
+        parameter_id: 104
+        parameter_rate: 48000
+        param_definition_mode: 1
+        reserved: 0
+      }
+      default_mix_gain: 0
+    }
+    layouts {
+      loudness_layout {
+        layout_type: LAYOUT_TYPE_LOUDSPEAKERS_SS_CONVENTION
+        ss_layout {
+          sound_system: SOUND_SYSTEM_A_0_2_0
+          reserved: 0
+        }
+      }
+      loudness {
+        info_type_bit_masks: [LOUDNESS_INFO_TYPE_TRUE_PEAK]
+        integrated_loudness: -4608
+        digital_peak: -512
+        true_peak: -256
+      }
+    }
+  }
+}
+audio_frame_metadata {
+  wav_filename: "obj_mono.wav"
+  samples_to_trim_at_end: 0
+  samples_to_trim_at_start: 0
+  audio_element_id: 300
+  channel_metadatas: [{ channel_id: 0 channel_label: CHANNEL_LABEL_OBJECT_CHANNEL0 }]
+}
+audio_frame_metadata {
+  wav_filename: "obj_dual.wav"
+  samples_to_trim_at_end: 0
+  samples_to_trim_at_start: 0
+  audio_element_id: 301
+  channel_metadatas: [{ channel_id: 0 channel_label: CHANNEL_LABEL_OBJECT_CHANNEL0 }, { channel_id: 1 channel_label: CHANNEL_LABEL_OBJECT_CHANNEL1 }]
+}
+temporal_delimiter_metadata {
+  enable_temporal_delimiters: false
+}

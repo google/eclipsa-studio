@@ -1,0 +1,161 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+module(
+    name = "eclipsa_studio_engine",
+    version = "0.1.0",
+)
+
+bazel_dep(name = "platforms", version = "1.1.0")
+
+# The C++ toolchain on macOS. Listed before rules_cc so that its
+# registered toolchains win resolution over rules_cc's auto-configured
+# unix toolchain. rules_cc's toolchain lists only the Command Line Tools
+# SDK root among its builtin include directories, so from Xcode 27,
+# whose clang records MacOSX.sdk/SDKSettings.json as a dependency of
+# every compile, Bazel rejects each compile with "absolute path
+# inclusion(s) found". apple_support's toolchain treats /Applications
+# and /Library as builtin roots and passes -isysroot itself.
+bazel_dep(name = "apple_support", version = "2.8.3")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+bazel_dep(name = "googletest", version = "1.18.0")
+bazel_dep(name = "rules_license", version = "1.0.0")
+bazel_dep(name = "loudness_ebur128", version = "1.0.0")
+bazel_dep(name = "abseil-cpp", version = "20260526.0")
+bazel_dep(name = "eigen", version = "3.4.0.bcr.3")
+bazel_dep(name = "iamf_tools", version = "1.0.0")
+bazel_dep(name = "protobuf", version = "36.0.bcr.1")
+bazel_dep(name = "oar", version = "1.0.0")
+bazel_dep(name = "obr", version = "1.0.0")
+
+# protobuf 36 still declares abseil-cpp 20250814.1, whose compatibility
+# level differs from the 20260526.0 that iamf-tools and googletest 1.18
+# require, so Bzlmod refuses the resolution instead of picking the newer
+# one. iamf-tools declares the same override, but Bzlmod ignores
+# overrides from non-root modules, so the root repeats it.
+single_version_override(
+    module_name = "abseil-cpp",
+    version = "20260526.0",
+)
+
+# grpc-java 1.66.0 (pulled transitively via iamf-tools → googleapis) has a
+# broken MODULE.bazel that imports `com_envoyproxy_protoc_gen_validate` from
+# a grpc extension that no longer generates it. Force a newer grpc-java
+# whose MODULE.bazel uses the correct repo names.
+single_version_override(
+    module_name = "grpc-java",
+    version = "1.78.0.bcr.1",
+)
+
+# loudness_ebur128 is not yet on BCR — pin to same commit as iamf-tools uses.
+git_override(
+    module_name = "loudness_ebur128",
+    commit = "e9e73147637db60dc742cba8a611a37dd72b14b5",
+    remote = "https://github.com/google/loudness_ebur128.git",
+)
+
+# iamf-tools is not on BCR. Pinned to the public AOMediaCodec/iamf-tools
+# commit the Eclipsa Studio fork is based on, with the fork's
+# engine-facing changes applied as a patch: the `probe` and `probe_json`
+# libraries, the stream API (iamf/api/stream and the
+# iamf/include/iamf_tools/iamf_stream_* headers), public visibility on
+# the targets the engine links, and IAMF_TOOLS_DISABLE_BINAURAL_RENDERING
+# on renderer_factory so iamf-tools' copy of OBR does not collide with
+# @obr at link time. The fork's tests, test data and docs stay out of the
+# patch. engine/iamf/sync-iamf-tools.sh regenerates the patch from the
+# fork and updates IAMF_TOOLS_COMMIT; commit both together.
+IAMF_TOOLS_COMMIT = "901a86e19e32e20dbdf0268984ae75f3f481249c"
+
+git_override(
+    module_name = "iamf_tools",
+    commit = IAMF_TOOLS_COMMIT,
+    remote = "https://github.com/AOMediaCodec/iamf-tools.git",
+    patch_strip = 1,
+    patches = ["//deps/iamf_tools:iamf_tools.patch"],
+)
+
+# OAR (Open Audio Renderer), fetched from the public AOMediaCodec/oar with
+# the Eclipsa Studio fork's changes applied as patches: the
+# oar_get_limiter_env() API, the layout-anchored cartesian-to-polar
+# position conversion and its public helpers, the OLR azimuth wrapping
+# and EAR dangling-pointer fixes, the fork's tests, and the Bazel 8.5.1
+# wiring for the nested obr module (Bazel 8 reserves a top-level
+# `external` package, so obr's pffft build file moves to `third_party/`).
+# The limiter itself is upstream's. engine/renderer/sync-oar.sh
+# regenerates both patches from the fork and updates OAR_COMMIT; commit
+# them together.
+#
+# Both overrides below take this one commit: obr is a subdirectory of the
+# oar tree, so a split pin would build oar against a different revision of
+# its own nested renderer. Bump the constants, not the call sites.
+OAR_COMMIT = "3fea539e1bb49238c9a931468c7ddbc8ada232eb"
+
+OAR_REMOTE = "https://github.com/AOMediaCodec/oar.git"
+
+git_override(
+    module_name = "oar",
+    commit = OAR_COMMIT,
+    remote = OAR_REMOTE,
+    patch_strip = 1,
+    patches = ["//deps/oar:oar.patch"],
+)
+
+# obr lives inside the oar tree. oar's own MODULE.bazel wires it up with a
+# local_path_override, but Bzlmod ignores overrides declared by non-root
+# modules, so the root module (us) must repeat the override, scoped to the
+# nested module directory. obr.patch is the slice of oar.patch under that
+# directory with paths relative to it; Bazel applies it after strip_prefix.
+git_override(
+    module_name = "obr",
+    commit = OAR_COMMIT,
+    remote = OAR_REMOTE,
+    strip_prefix = "src/renderer/obr/obr_capi/obr",
+    patch_strip = 1,
+    patches = ["//deps/oar:obr.patch"],
+)
+
+# Single-header audio libraries (not Bazel modules, not on BCR) — pinned to
+# upstream GitHub commits with sha256. The //deps/* packages wrap
+# these with the single-TU implementation shims and platform link flags.
+http_archive = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_archive",
+)
+
+# libsamplerate 0.2.2 (BSD-2-Clause). Bandlimited-sinc sample-rate
+# converter backing dsp::Resampler — SINC_MEDIUM_QUALITY on the live
+# path, SINC_BEST_QUALITY for bounce/export. Chosen over miniaudio's
+# linear resampler per the issue #5 evaluation (miniaudio itself was
+# dropped when both device backends went native — ES-334 / ES-355).
+http_archive(
+    name = "libsamplerate",
+    build_file = "//deps/libsamplerate:libsamplerate.BUILD",
+    sha256 = "16e881487f184250deb4fcb60432d7556ab12cb58caea71ef23960aec6c0405a",
+    strip_prefix = "libsamplerate-0.2.2",
+    urls = ["https://github.com/libsndfile/libsamplerate/archive/refs/tags/0.2.2.tar.gz"],
+)
+
+# Steinberg ASIO SDK 2.3.4, host-side subset (Windows ASIO backend).
+# The SDK is not checked in: the Steinberg ASIO License does not allow
+# distributing it, so the build fetches Steinberg's own archive. The
+# versioned URL is what https://www.steinberg.net/asiosdk redirects to;
+# a new SDK release changes both the URL and the sha256. Licence and
+# trademark notice: third_party/asio/.
+http_archive(
+    name = "asio",
+    build_file = "//deps/asio:asio.BUILD",
+    sha256 = "d5ebf0c20dd2c5f43771fd0c1418f4b361bf52434ee670097cfa6b3a335e2eca",
+    strip_prefix = "ASIOSDK",
+    urls = ["https://download.steinberg.net/sdk_downloads/ASIO-SDK_2.3.4_2025-10-15.zip"],
+)

@@ -1,0 +1,5 @@
+# Vendored build outputs — produced by build_angle.ps1, not checked in.
+/bin
+# depot_tools + ANGLE checkout (multi-GB working tree kept for
+# incremental rebuilds).
+/work

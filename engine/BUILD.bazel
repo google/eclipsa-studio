@@ -1,0 +1,150 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Public C FFI header — consumed by Dart via dart:ffi and by the
+# cc_binary below as the entry point.
+cc_library(
+    name = "eclipsa_studio_engine_hdr",
+    hdrs = ["eclipsa_studio_engine.h"],
+)
+
+# Lightweight logging helpers shared across the engine.
+cc_library(
+    name = "engine_log",
+    hdrs = ["engine_log.h"],
+    srcs = ["engine_log.cc"],
+)
+
+# Throughput-aware dropout detection — pure logic, no platform deps,
+# unit-tested in //test:dropout_detector_test.
+cc_library(
+    name = "dropout_detector",
+    hdrs = ["dropout_detector.h"],
+    srcs = ["dropout_detector.cc"],
+)
+
+# Transport edge fades (ES-530) — pure gain-ramp math, header-only,
+# unit-tested per rate × buffer in //test:transport_fade_test.
+cc_library(
+    name = "transport_fade",
+    hdrs = ["transport_fade.h"],
+)
+
+# Real-time audio callback + output-device wiring.
+cc_library(
+    name = "audio_thread",
+    hdrs = ["audio_thread.h"],
+    srcs = ["audio_thread.cc"],
+    deps = [
+        ":dropout_detector",
+        ":engine_log",
+        ":transport_fade",
+        "//graph:audio_graph",
+        "//io:device_manager",
+    ],
+)
+
+# Top-level C++ Engine class — wraps the audio graph, transport, and
+# meter state. The public C FFI implementation in eclipsa_studio_engine.cc
+# calls into this.
+cc_library(
+    name = "engine_lib",
+    hdrs = ["engine.h"],
+    # generated/engine_version.h is stamped by build.sh / build.ps1 and
+    # gitignored; the glob keeps a bare `bazel build` working (engine.cc
+    # then falls back to the "dev" version string).
+    srcs = ["engine.cc"] + glob(
+        ["generated/engine_version.h"],
+        allow_empty = True,
+    ),
+    deps = [
+        ":audio_thread",
+        ":engine_log",
+        "//dsp:sh_decode",
+        "//graph:audio_graph",
+        "//iamf:iamf_exporter",
+        "//iamf:iamf_muxer",
+        "//iamf:iamf_playback_session",
+        "//iamf:iamf_probe_ffi",
+        "//io:device_manager",
+        "//io:volume_info",
+        "//io:wav_probe_ffi",
+        "//mix_renderer:offline_mix_renderer",
+        "//meters:meter_state",
+        "//renderer:oar_renderer",
+        "//video:still_video_encoder",
+        "//waveform:peak_compute",
+    ],
+    alwayslink = True,
+)
+
+# Shared library target — produces libeclipsa_studio_engine.{dylib,so,dll}
+# consumed by Dart FFI.
+cc_binary(
+    name = "eclipsa_studio_engine",
+    srcs = ["eclipsa_studio_engine.cc"],
+    deps = [
+        ":engine_lib",
+        ":eclipsa_studio_engine_hdr",
+        # ADM import: flat C ABI (adm2iamf_*); alwayslink so its symbols
+        # export from this dylib for Dart to look up. See adm_import/ffi.
+        "//adm_import/ffi",
+        "//dsp:sh_decode",
+    ] + select({
+        # FFmpeg-in-engine video decode (issue ES-249, step 5). alwayslink keeps
+        # the eclipsa_studio_video_* FFI symbols in the shared library for Dart. Built
+        # on macOS and Windows: each pulls in the vendored LGPL FFmpeg
+        # (//deps/ffmpeg — build_ffmpeg.sh @rpath dylibs on macOS,
+        # build_ffmpeg.ps1 DLLs + MSVC import libs on Windows). The Windows
+        # symbols also need listing in eclipsa_studio_engine_exports.def (MSVC doesn't
+        # auto-export). The //video targets are tagged `manual` so they stay out
+        # of `bazel test //...`, but this explicit dep still builds them.
+        "@platforms//os:osx": ["//video:video_ffi"],
+        "@platforms//os:windows": ["//video:video_ffi"],
+        "//conditions:default": [],
+    }),
+    linkshared = True,
+    # MSVC doesn't auto-export symbols the way GCC/Clang's default
+    # visibility does. Hand-curated .def file lists the C FFI entry
+    # points we want in the .dll's export table where Dart FFI's
+    # lookupFunction can find them. (`windows_export_all_symbols` is
+    # not viable here: transitive iamf-tools / abseil / protobuf /
+    # oar deps push the .obj count past MSVC's LNK1189 limit of
+    # 65535 exported symbols.) Ignored on macOS/Linux.
+    win_def_file = "eclipsa_studio_engine_exports.def",
+    linkopts = select({
+        "@platforms//os:osx": [
+            "-framework CoreAudio",
+            "-framework AudioUnit",
+            "-framework AudioToolbox",
+            "-framework Foundation",
+        ],
+        # MSVC link.exe — the WASAPI device backend brings in its
+        # system libs (ole32, avrt) via #pragma comment(lib, ...) so we
+        # don't need to spell them out here.
+        "@platforms//os:windows": [],
+        "//conditions:default": [
+            "-lpthread",
+            "-lm",
+            "-ldl",
+        ],
+    }),
+)
+
+# FFI-surface files consumed by //test:ffi_exports_lint_test.
+exports_files(["engine.h", "engine_log.h", "eclipsa_studio_engine_exports.def"])

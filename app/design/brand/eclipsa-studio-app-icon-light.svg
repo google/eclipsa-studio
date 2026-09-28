@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Eclipsa Studio">
+  <title>Eclipsa Studio</title>
+  <desc>App icon, light plate: the cube mark on a rounded plate.</desc>
+  <rect x="100" y="100" width="824" height="824" rx="185.4" fill="#F5F3EE"/>
+  <g transform="translate(-41.97 -37.62) scale(11.0794)">
+    <!-- the unlit field -->
+    <g fill="#64636A" transform="matrix(0.2511 0.1450 0.2511 -0.1450 24.8853 35.5000)">
+      <circle cx="11.931" cy="11.931" r="7.931"/>
+      <circle cx="30.966" cy="11.931" r="7.931"/>
+      <circle cx="50.000" cy="11.931" r="7.931"/>
+      <circle cx="69.034" cy="11.931" r="7.931"/>
+      <circle cx="88.069" cy="11.931" r="7.931"/>
+      <circle cx="11.931" cy="30.966" r="7.931"/>
+      <circle cx="30.966" cy="30.966" r="7.931"/>
+      <circle cx="50.000" cy="30.966" r="7.931"/>
+      <circle cx="69.034" cy="30.966" r="7.931"/>
+      <circle cx="88.069" cy="30.966" r="7.931"/>
+      <circle cx="11.931" cy="50.000" r="7.931"/>
+      <circle cx="30.966" cy="50.000" r="7.931"/>
+      <circle cx="50.000" cy="50.000" r="7.931"/>
+      <circle cx="69.034" cy="50.000" r="7.931"/>
+      <circle cx="88.069" cy="50.000" r="7.931"/>
+      <circle cx="11.931" cy="69.034" r="7.931"/>
+      <circle cx="30.966" cy="69.034" r="7.931"/>
+      <circle cx="50.000" cy="69.034" r="7.931"/>
+      <circle cx="69.034" cy="69.034" r="7.931"/>
+      <circle cx="88.069" cy="69.034" r="7.931"/>
+      <circle cx="11.931" cy="88.069" r="7.931"/>
+      <circle cx="30.966" cy="88.069" r="7.931"/>
+      <circle cx="50.000" cy="88.069" r="7.931"/>
+      <circle cx="69.034" cy="88.069" r="7.931"/>
+      <circle cx="88.069" cy="88.069" r="7.931"/>
+    </g>
+    <!-- the E -->
+    <g fill="#18181B" transform="matrix(0.2511 0.1450 0.0000 0.2900 24.8853 35.5000)">
+      <circle cx="11.931" cy="11.931" r="7.931"/>
+      <circle cx="30.966" cy="11.931" r="7.931"/>
+      <circle cx="50.000" cy="11.931" r="7.931"/>
+      <circle cx="69.034" cy="11.931" r="7.931"/>
+      <circle cx="88.069" cy="11.931" r="7.931"/>
+      <circle cx="11.931" cy="30.966" r="7.931"/>
+      <circle cx="11.931" cy="50.000" r="7.931"/>
+      <circle cx="30.966" cy="50.000" r="7.931"/>
+      <circle cx="50.000" cy="50.000" r="7.931"/>
+      <circle cx="69.034" cy="50.000" r="7.931"/>
+      <circle cx="11.931" cy="69.034" r="7.931"/>
+      <circle cx="11.931" cy="88.069" r="7.931"/>
+      <circle cx="30.966" cy="88.069" r="7.931"/>
+      <circle cx="50.000" cy="88.069" r="7.931"/>
+      <circle cx="69.034" cy="88.069" r="7.931"/>
+      <circle cx="88.069" cy="88.069" r="7.931"/>
+    </g>
+    <!-- the S -->
+    <g fill="#BE185D" transform="matrix(0.2511 -0.1450 0.0000 0.2900 50.0000 50.0000)">
+      <circle cx="11.931" cy="11.931" r="7.931"/>
+      <circle cx="30.966" cy="11.931" r="7.931"/>
+      <circle cx="50.000" cy="11.931" r="7.931"/>
+      <circle cx="69.034" cy="11.931" r="7.931"/>
+      <circle cx="88.069" cy="11.931" r="7.931"/>
+      <circle cx="11.931" cy="30.966" r="7.931"/>
+      <circle cx="11.931" cy="50.000" r="7.931"/>
+      <circle cx="30.966" cy="50.000" r="7.931"/>
+      <circle cx="50.000" cy="50.000" r="7.931"/>
+      <circle cx="69.034" cy="50.000" r="7.931"/>
+      <circle cx="88.069" cy="50.000" r="7.931"/>
+      <circle cx="88.069" cy="69.034" r="7.931"/>
+      <circle cx="11.931" cy="88.069" r="7.931"/>
+      <circle cx="30.966" cy="88.069" r="7.931"/>
+      <circle cx="50.000" cy="88.069" r="7.931"/>
+      <circle cx="69.034" cy="88.069" r="7.931"/>
+      <circle cx="88.069" cy="88.069" r="7.931"/>
+    </g>
+  </g>
+</svg>

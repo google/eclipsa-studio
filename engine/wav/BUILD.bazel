@@ -1,0 +1,110 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# In-house WAV library: reader/writer for RIFF/RF64/BW64. Serves the
+# engine in place of dr_wav; the io/ WavReader/WavWriter adapters sit on
+# top. Self-contained (zero dependencies) and UI/engine-agnostic so it
+# can be reused outside the engine.
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "wav",
+    srcs = [
+        "internal.h",
+        "reader.cc",
+        "writer.cc",
+    ],
+    hdrs = [
+        "convert.h",
+        "reader.h",
+        "result.h",
+        "types.h",
+        "writer.h",
+    ],
+)
+
+cc_library(
+    name = "fixture",
+    testonly = True,
+    hdrs = ["testing/fixture.h"],
+    deps = [":wav"],
+)
+
+cc_test(
+    name = "convert_test",
+    size = "small",
+    srcs = ["convert_test.cc"],
+    deps = [
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "reader_matrix_test",
+    size = "small",
+    srcs = ["reader_matrix_test.cc"],
+    deps = [
+        ":fixture",
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "reader_rt_alloc_test",
+    size = "small",
+    srcs = ["reader_rt_alloc_test.cc"],
+    deps = [
+        ":fixture",
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "reader_malformed_test",
+    size = "small",
+    srcs = ["reader_malformed_test.cc"],
+    deps = [
+        ":fixture",
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "writer_roundtrip_test",
+    size = "small",
+    srcs = ["writer_roundtrip_test.cc"],
+    deps = [
+        ":fixture",
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "writer_size_limit_test",
+    size = "small",
+    srcs = ["writer_size_limit_test.cc"],
+    deps = [
+        ":fixture",
+        ":wav",
+        "@googletest//:gtest_main",
+    ],
+)

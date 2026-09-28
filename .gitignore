@@ -1,0 +1,62 @@
+# Build
+build/
+dist/
+logs/
+
+# Node modules — no first-class JS tooling in Eclipsa Studio. If a
+# local npm install leaves this behind, keep it out of git.
+/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# C++ artifacts
+*.o
+*.a
+*.pcm
+
+# macOS debug symbol bundles (produced by Flutter release builds
+# next to the .app — heavy, not source, never committed).
+*.dSYM/
+*.dSYM.zip
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins-dependencies
+.packages
+
+# Flutter ephemeral (generated per-platform)
+**/Flutter/ephemeral/
+**/flutter/ephemeral/
+
+# CocoaPods
+**/Pods/
+
+# Signing certificates and keys
+certs/
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.xcuserdata
+
+# Claude Code (tracked content in .claude/ — CLAUDE.md, agents/, release/,
+# commands/ — is explicit; everything else is runtime state).
+.claude/settings.local.json
+.claude/*.lock
+
+# Node
+node_modules/
+
+# Open-source export tooling: the downloaded Copybara jar
+.publish/cache/
+
+# Eclipsa Studio session files
+*.esp
+
+# Local git worktrees (see `git worktree list`)
+.worktrees/

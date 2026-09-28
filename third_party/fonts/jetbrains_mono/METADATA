@@ -1,0 +1,12 @@
+name: "jetbrains_mono"
+description: "JetBrains Mono — the monospace typeface bundled with the app"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/JetBrains/JetBrainsMono"
+  }
+  version: "2.305"
+  license_type: NOTICE
+  last_upgrade_date { year: 2026 month: 8 day: 28 }
+}

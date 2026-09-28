@@ -1,0 +1,13 @@
+name: "gpac"
+description: "GPAC (libgpac) — IAMF-in-ISOBMFF muxing for Export to MP4"
+
+third_party {
+  url {
+    type: GIT
+    value: "https://github.com/gpac/gpac.git"
+  }
+  version: "9edee648038ff542530b7a9f0392801ae88ea915"
+  license_type: RESTRICTED
+  last_upgrade_date { year: 2026 month: 9 day: 17 }
+  local_modifications: "Built with the patches in engine/deps/gpac/patches/ applied; see engine/deps/gpac/patches/README.md."
+}

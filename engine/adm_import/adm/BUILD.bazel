@@ -1,0 +1,155 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# Public: the adm-lab analyser repo (audit CLI + viewer) depends on these
+# libraries via bazel module import — they are the single source of truth
+# for ADM parsing/vocabulary/audit classification.
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "xml",
+    srcs = ["xml.cc"],
+    hdrs = ["xml.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "adm_model",
+    srcs = ["adm_model.cc"],
+    hdrs = ["adm_model.h"],
+)
+
+cc_library(
+    name = "common_definitions",
+    srcs = ["common_definitions.cc"],
+    hdrs = ["common_definitions.h"],
+    deps = [
+        ":adm_model",
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "adm_parser",
+    srcs = ["adm_parser.cc"],
+    hdrs = ["adm_parser.h"],
+    deps = [
+        ":adm_model",
+        ":xml",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "adm_vocabulary",
+    srcs = ["adm_vocabulary.cc"],
+    hdrs = ["adm_vocabulary.h"],
+    deps = [
+        "@abseil-cpp//absl/base:no_destructor",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "adm_audit",
+    srcs = ["adm_audit.cc"],
+    hdrs = ["adm_audit.h"],
+    deps = [
+        ":adm_vocabulary",
+        ":json_escape",
+        ":xml",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "json_escape",
+    srcs = ["json_escape.cc"],
+    hdrs = ["json_escape.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "json_escape_test",
+    srcs = ["json_escape_test.cc"],
+    deps = [
+        ":json_escape",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "adm_vocabulary_test",
+    srcs = ["adm_vocabulary_test.cc"],
+    deps = [
+        ":adm_vocabulary",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "adm_audit_test",
+    srcs = ["adm_audit_test.cc"],
+    deps = [
+        ":adm_audit",
+        ":xml",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "xml_test",
+    srcs = ["xml_test.cc"],
+    deps = [
+        ":xml",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "adm_parser_test",
+    srcs = ["adm_parser_test.cc"],
+    deps = [
+        ":adm_model",
+        ":adm_parser",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "common_definitions_test",
+    srcs = ["common_definitions_test.cc"],
+    deps = [
+        ":adm_model",
+        ":common_definitions",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -1,0 +1,170 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Cross-platform read-only mmap helper: POSIX mmap on macOS/Linux,
+# CreateFileMappingW + MapViewOfFile on Windows. Used by the IAMF
+# probe and the streaming readers.
+cc_library(
+    name = "read_only_file_map",
+    hdrs = ["read_only_file_map.h"],
+    srcs = ["read_only_file_map.cc"],
+)
+
+# IAMF encode driver (ES-480): streams elements straight into the fork's
+# push-PCM encoder API. The engine calls into this from the FFI entry
+# points in engine.cc.
+cc_library(
+    name = "iamf_exporter",
+    hdrs = ["iamf_exporter.h"],
+    srcs = ["iamf_exporter.cc"],
+    deps = [
+        "//:engine_log",
+        "//bounce:element_stream",
+        "//graph:audio_buffer",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:string_view",
+        "@abseil-cpp//absl/types:span",
+        "@iamf_tools//iamf/cli/proto:audio_frame_cc_proto",
+        "@iamf_tools//iamf/cli/proto:user_metadata_cc_proto",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_encoder_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_encoder_interface",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_tools_encoder_api_types",
+        "@protobuf",
+    ],
+)
+
+# Serialized RAII bracket around gf_sys_init / gf_sys_close; every libgpac
+# user in the engine goes through it (see the header).
+cc_library(
+    name = "gpac_system",
+    hdrs = ["gpac_system.h"],
+    deps = ["//deps/gpac:libgpac"],
+)
+
+# In-process MP4 muxer: combines an exported .iamf with the session video
+# into a single IAMF-in-ISOBMFF .mp4 via libgpac. The engine calls into
+# this from the eclipsa_studio_iamf_mux FFI entry point in engine.cc.
+cc_library(
+    name = "iamf_muxer",
+    hdrs = ["iamf_muxer.h"],
+    srcs = ["iamf_muxer.cc"],
+    deps = [
+        ":gpac_system",
+        "//:engine_log",
+        "//deps/gpac:libgpac",
+    ],
+)
+
+# In-process MP4 demuxer: extracts the standalone IAMF bitstream from the
+# `iamf` track of an IAMF-in-ISOBMFF .mp4 (the inverse of iamf_muxer) via
+# libgpac. Feeds the playback session (open) and the probe FFI so QC can
+# open .mp4 deliverables directly.
+cc_library(
+    name = "iamf_demuxer",
+    hdrs = ["iamf_demuxer.h"],
+    srcs = ["iamf_demuxer.cc"],
+    deps = [
+        ":gpac_system",
+        "//:engine_log",
+        "//deps/gpac:libgpac",
+    ],
+)
+
+# FFI shim around iamf_tools::Probe() for the Playback source tab.
+# alwayslink keeps the extern "C" symbols in the dylib — Dart is the
+# only consumer, so nothing else in the engine references them.
+cc_library(
+    name = "iamf_probe_ffi",
+    hdrs = ["iamf_probe_ffi.h"],
+    srcs = ["iamf_probe_ffi.cc"],
+    deps = [
+        ":iamf_demuxer",
+        ":read_only_file_map",
+        "//:engine_log",
+        "//renderer:oar_capability",
+        "@abseil-cpp//absl/types:span",
+        "@iamf_tools//iamf/cli:probe",
+        "@iamf_tools//iamf/cli:probe_json",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_interface",
+    ],
+    alwayslink = True,
+)
+
+# WavReader-shaped wrapper around iamf_tools' Phase A streaming public
+# API (IamfStreamFactory::OpenFromBytes + IamfStreamInterface). Exposes a
+# single Audio Element from a .iamf file as a pull source the engine's
+# audio graph can consume. Multi-AE fan-out belongs in the higher-level
+# playback session that will land with the graph's Playback-mode opener.
+cc_library(
+    name = "iamf_stream_reader",
+    hdrs = ["iamf_stream_reader.h"],
+    srcs = ["iamf_stream_reader.cc"],
+    deps = [
+        ":read_only_file_map",
+        "//graph:audio_buffer",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_interface",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_tools_api_types",
+    ],
+)
+
+# SPSC PCM ring — self-contained; split out so its unit test doesn't
+# drag in libgpac/abseil/iamf_tools via the session target.
+cc_library(
+    name = "pcm_ring",
+    hdrs = ["pcm_ring.h"],
+    deps = ["//graph:audio_buffer"],
+)
+
+# Multi-AE playback coordinator. Owns one IamfStreamInterface, runs a
+# dedicated I/O thread that pumps temporal units into per-AE
+# `PcmRing` SPSC buffers; `IamfRingSource` reads those rings on the
+# audio thread.
+cc_library(
+    name = "iamf_playback_session",
+    hdrs = ["iamf_playback_session.h"],
+    srcs = ["iamf_playback_session.cc"],
+    deps = [
+        ":iamf_demuxer",
+        ":pcm_ring",
+        ":read_only_file_map",
+        "//:engine_log",
+        "@abseil-cpp//absl/time",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_interface",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_settings",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_tools_api_types",
+    ],
+)
+
+# WavReader-shaped per-slot view over one AE of a playback session.
+# Depends on the session for decoded samples and global seek/cursor.
+cc_library(
+    name = "iamf_ring_source",
+    hdrs = ["iamf_ring_source.h"],
+    srcs = ["iamf_ring_source.cc"],
+    deps = [
+        ":iamf_playback_session",
+        "//graph:audio_buffer",
+    ],
+)
+
+# FFI-surface files consumed by //test:ffi_exports_lint_test.
+exports_files(["iamf_probe_ffi.h"])

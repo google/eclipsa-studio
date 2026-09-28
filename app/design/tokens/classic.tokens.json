@@ -1,0 +1,426 @@
+{
+  "$description": "Classic. Meant to resemble classic field recording instruments: graphite-blue with matte chrome, wells sunk into the panel for the transport, the clock and the dropdown, a bar knob in the same well and a violet accent.",
+  "color": {
+    "background": {
+      "bgDeep": {
+        "$type": "color",
+        "$value": "#0B0E14",
+        "$description": "deepest (timeline, 3D scene)"
+      },
+      "bgBase": {
+        "$type": "color",
+        "$value": "#10141B",
+        "$description": "panels, sidebars"
+      },
+      "landingGroundTop": {
+        "$type": "color",
+        "$value": "#10141B",
+        "$description": "landing screen ground, top edge"
+      },
+      "landingGroundBottom": {
+        "$type": "color",
+        "$value": "#10141B",
+        "$description": "landing screen ground, bottom edge"
+      },
+      "bgSurface": {
+        "$type": "color",
+        "$value": "#151A22",
+        "$description": "cards, elevated panels"
+      },
+      "bgElevated": {
+        "$type": "color",
+        "$value": "#1A202A",
+        "$description": "dialogs, popovers"
+      },
+      "bgHover": {
+        "$type": "color",
+        "$value": "#222937",
+        "$description": "hover state"
+      },
+      "bgControls": {
+        "$type": "color",
+        "$value": "#0C0F15",
+        "$description": "buttons, inputs"
+      }
+    },
+    "border": {
+      "border": {
+        "$type": "color",
+        "$value": "#262D3A",
+        "$description": "default border"
+      },
+      "borderLight": {
+        "$type": "color",
+        "$value": "#202733",
+        "$description": "light separator"
+      },
+      "borderStrong": {
+        "$type": "color",
+        "$value": "#3A4658",
+        "$description": "strong border (focused)"
+      }
+    },
+    "accent": {
+      "purple": {
+        "$type": "color",
+        "$value": "#7C4DFF",
+        "$description": "primary accent"
+      },
+      "pink": {
+        "$type": "color",
+        "$value": "#E06090",
+        "$description": "secondary accent: the brand pink. The S on the cube, \"Studio\" in the wordmark and the playhead. 5.54:1 on bgBase, 5.25:1 on chromeBg"
+      },
+      "purpleLight": {
+        "$type": "color",
+        "$value": "#A98BFF",
+        "$description": "active state / highlight"
+      },
+      "purpleDim": {
+        "$type": "color",
+        "$value": "#7C4DFF2B",
+        "$description": "subtle accent bg"
+      },
+      "accentFg": {
+        "$type": "color",
+        "$value": "#FFFFFF",
+        "$description": "white over the purple→pink gradient"
+      },
+      "accentFill": {
+        "$type": "color",
+        "$value": "#7C4DFF",
+        "$description": "the fill of an affirmative AppButton"
+      },
+      "accentInk": {
+        "$type": "color",
+        "$value": "#FFFFFF",
+        "$description": "the label on accentFill; gated at 4.5:1 in contrast.json"
+      }
+    },
+    "elementType": {
+      "typeObject": {
+        "$type": "color",
+        "$value": "#34D399",
+        "$description": "emerald"
+      },
+      "typeChannel": {
+        "$type": "color",
+        "$value": "#FBBF24",
+        "$description": "amber"
+      },
+      "typeScene": {
+        "$type": "color",
+        "$value": "#818CF8",
+        "$description": "indigo"
+      }
+    },
+    "object3d": {
+      "objCyan": {
+        "$type": "color",
+        "$value": "#67E8F9"
+      },
+      "objGreen": {
+        "$type": "color",
+        "$value": "#6EE7B7"
+      },
+      "objAmber": {
+        "$type": "color",
+        "$value": "#FCD34D",
+        "$description": "Axes (X=red, Y=green, Z=blue) — soft-bright for dark bg"
+      }
+    },
+    "axis": {
+      "axisX": {
+        "$type": "color",
+        "$value": "#FF6B6B"
+      },
+      "axisY": {
+        "$type": "color",
+        "$value": "#5BE37A"
+      },
+      "axisZ": {
+        "$type": "color",
+        "$value": "#5B9BFF"
+      }
+    },
+    "overlay": {
+      "gizmoBg": {
+        "$type": "color",
+        "$value": "#00000099",
+        "$description": "60% black — contrast vs dark scene"
+      },
+      "pastEndScrim": {
+        "$type": "color",
+        "$value": "#FFFFFF14",
+        "$description": "8% white haze over dark tracks"
+      }
+    },
+    "indicator": {
+      "indicatorGreen": {
+        "$type": "color",
+        "$value": "#34D399",
+        "$description": "matches typeObject in dark"
+      }
+    },
+    "meter": {
+      "meterGreen": {
+        "$type": "color",
+        "$value": "#22C55E"
+      },
+      "meterYellow": {
+        "$type": "color",
+        "$value": "#EAB308"
+      },
+      "meterAmber": {
+        "$type": "color",
+        "$value": "#F97316"
+      },
+      "meterRed": {
+        "$type": "color",
+        "$value": "#EF4444",
+        "$description": "Correlation heatmap (−1 → 0 → +1)"
+      }
+    },
+    "correlation": {
+      "corrNeg": {
+        "$type": "color",
+        "$value": "#4A89E8",
+        "$description": "Diverging correlation scale (ρ): corrNeg → corrZero → corrPos maps −1 → 0 → +1. Decoupled from axis/meter colors so the heatmap can be tuned per theme without touching those."
+      },
+      "corrZero": {
+        "$type": "color",
+        "$value": "#E0E0E0"
+      },
+      "corrPos": {
+        "$type": "color",
+        "$value": "#E85C5C",
+        "$description": "Text: cool silver hierarchy"
+      }
+    },
+    "text": {
+      "textPrimary": {
+        "$type": "color",
+        "$value": "#E2E6EE",
+        "$description": "headings, primary"
+      },
+      "textSecondary": {
+        "$type": "color",
+        "$value": "#97A3BA",
+        "$description": "labels, descriptions"
+      },
+      "textTertiary": {
+        "$type": "color",
+        "$value": "#8190AA",
+        "$description": "inactive, disabled"
+      },
+      "textMuted": {
+        "$type": "color",
+        "$value": "#6B7A99",
+        "$description": "subtle labels"
+      },
+      "textGhost": {
+        "$type": "color",
+        "$value": "#38435A",
+        "$description": "barely visible (grid lines)"
+      }
+    },
+    "selection": {
+      "bgSelected": {
+        "$type": "color",
+        "$value": "#1C2140",
+        "$description": "selected row/card bg"
+      }
+    },
+    "value": {
+      "textValue": {
+        "$type": "color",
+        "$value": "#CBD1E2",
+        "$description": "numeric readouts"
+      },
+      "textValueDim": {
+        "$type": "color",
+        "$value": "#8A94AA",
+        "$description": "secondary values"
+      },
+      "textInactive": {
+        "$type": "color",
+        "$value": "#56647A",
+        "$description": "inactive controls"
+      }
+    },
+    "misc": {
+      "white": {
+        "$type": "color",
+        "$value": "#FFFFFF"
+      },
+      "errorRed": {
+        "$type": "color",
+        "$value": "#DC2626"
+      }
+    },
+    "chrome": {
+      "chromeBg": {
+        "$type": "color",
+        "$value": "#151A22",
+        "$description": "ground of the top bar"
+      },
+      "chromeHi": {
+        "$type": "color",
+        "$value": "#151A22",
+        "$description": "centre of the beveled chrome's radial gradient"
+      },
+      "chromeInk": {
+        "$type": "color",
+        "$value": "#97A3BA",
+        "$description": "text on the chrome ground: labels, the clock"
+      },
+      "chromeTabOn": {
+        "$type": "color",
+        "$value": "#E2E6EE",
+        "$description": "the active workspace tab"
+      },
+      "chromeTabOff": {
+        "$type": "color",
+        "$value": "#8190AA",
+        "$description": "an inactive workspace tab"
+      },
+      "chromeRim": {
+        "$type": "color",
+        "$value": "#202733",
+        "$description": "outer rim of a raised chrome button; the bar bottom line"
+      },
+      "chromeRimDark": {
+        "$type": "color",
+        "$value": "#080A0F",
+        "$description": "dark rim inside chromeRim; the bar bottom edge"
+      },
+      "chromeRimLight": {
+        "$type": "color",
+        "$value": "#2A3342",
+        "$description": "light rim inside chromeRimDark"
+      }
+    },
+    "control": {
+      "controlBg": {
+        "$type": "color",
+        "$value": "#0C0F15",
+        "$description": "fill of a dropdown's closed control and its open menu"
+      },
+      "controlFg": {
+        "$type": "color",
+        "$value": "#CBD1E2",
+        "$description": "label and caret of a dropdown's closed control"
+      }
+    },
+    "video": {
+      "videoBg": {
+        "$type": "color",
+        "$value": "#10141B",
+        "$description": "ground of the video strip"
+      },
+      "videoHi": {
+        "$type": "color",
+        "$value": "#10141B",
+        "$description": "centre of the video strip radial lift"
+      }
+    },
+    "statusbar": {
+      "statusbarBg": {
+        "$type": "color",
+        "$value": "#0B0E14",
+        "$description": "ground of the status bar"
+      },
+      "statusbarHi": {
+        "$type": "color",
+        "$value": "#0B0E14",
+        "$description": "bottom of the status bar gradient"
+      }
+    },
+    "timeline": {
+      "rulerTick": {
+        "$type": "color",
+        "$value": "#38435A",
+        "$description": "the time ruler's tick marks"
+      },
+      "rulerLabel": {
+        "$type": "color",
+        "$value": "#8190AA",
+        "$description": "the time ruler's labels"
+      },
+      "playhead": {
+        "$type": "color",
+        "$value": "#E06090",
+        "$description": "the playhead line and its head: the pink token"
+      },
+      "videoInk": {
+        "$type": "color",
+        "$value": "#67E8F9",
+        "$description": "the video lane's metadata chip ink"
+      },
+      "trackPanelBg": {
+        "$type": "color",
+        "$value": "#151A22",
+        "$description": "Elements track panel column ground"
+      },
+      "gutterBg": {
+        "$type": "color",
+        "$value": "#151A22",
+        "$description": "timeline scroll and zoom gutters"
+      }
+    }
+  },
+  "typography": {
+    "uiFamily": {
+      "$type": "fontFamily",
+      "$value": "Inter",
+      "$description": "UI text face"
+    },
+    "monoFamily": {
+      "$type": "fontFamily",
+      "$value": "JetBrains Mono",
+      "$description": "numeric readouts: time, dB, sample rates"
+    }
+  },
+  "shape": {
+    "radius": {
+      "$type": "dimension",
+      "$value": 8.0,
+      "$description": "large surfaces: dialogs, cards"
+    },
+    "radiusSm": {
+      "$type": "dimension",
+      "$value": 4.0,
+      "$description": "controls, chips, wells - the common one"
+    },
+    "radiusMd": {
+      "$type": "dimension",
+      "$value": 6.0,
+      "$description": "grouped panels"
+    },
+    "borderWidth": {
+      "$type": "dimension",
+      "$value": 1.0,
+      "$description": "hairline width used by the decoration builders"
+    },
+    "knobStyle": {
+      "$type": "knobStyle",
+      "$value": "bar",
+      "$description": "which knob drawing this theme uses"
+    },
+    "chromeStyle": {
+      "$type": "chromeStyle",
+      "$value": "recessed",
+      "$description": "which top chrome this theme draws"
+    },
+    "controlStyle": {
+      "$type": "controlStyle",
+      "$value": "well",
+      "$description": "which dropdown control this theme draws"
+    },
+    "cardStyle": {
+      "$type": "cardStyle",
+      "$value": "flat",
+      "$description": "which landing card this theme draws"
+    }
+  }
+}

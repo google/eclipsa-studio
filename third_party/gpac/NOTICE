@@ -1,0 +1,34 @@
+GPAC / libgpac
+==============
+
+Eclipsa Studio's "Export to MP4" feature uses GPAC (libgpac) to mux the
+IAMF audio bitstream together with the session video into a single
+IAMF-in-ISOBMFF .mp4 file (engine/iamf/iamf_muxer.cc).
+
+  Project:    GPAC — https://gpac.io  (https://github.com/gpac/gpac)
+  Version:    commit 9edee648038ff542530b7a9f0392801ae88ea915 (26.08-DEV)
+              plus the patches in engine/deps/gpac/patches/
+  Copyright:  © Telecom Paris and the GPAC authors
+  License:    GNU Lesser General Public License, version 2.1 or later
+              (LGPL-2.1-or-later)
+
+libgpac is linked DYNAMICALLY and shipped as a separate shared library
+(libgpac.dylib on macOS, libgpac.dll on Windows) alongside the audio
+engine. No part of GPAC is statically linked into Eclipsa Studio.
+
+In accordance with section 6 of the LGPL v2.1, you may modify libgpac and
+use a modified version with Eclipsa Studio: replace the bundled libgpac
+(libgpac.dylib in "Eclipsa Studio.app/Contents/Frameworks" on macOS,
+libgpac.dll beside the application executable on Windows) with your own
+build of an interface-compatible libgpac and the application will load it.
+The corresponding source for the bundled build is GPAC at the commit
+listed above, available from https://github.com/gpac/gpac, with the
+patches in engine/deps/gpac/patches/ applied (each is a git diff against
+that commit; engine/deps/gpac/patches/README.md says what each changes).
+The exact build configuration is recorded in
+engine/deps/gpac/build_gpac.sh (macOS) and engine/deps/gpac/build_gpac.ps1
+(Windows) — both a "--static-bin --use-curl=no" build, carrying no
+FFmpeg / curl / OpenSSL dependency.
+
+The full text of the GNU Lesser General Public License, version 2.1,
+follows.

@@ -1,0 +1,107 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Prebuilt, pinned LGPL FFmpeg (+ dav1d) for the FFmpeg-in-engine video
+# decoder — issue ES-249, step 5. Linked DYNAMICALLY and shipped as separate
+# shared libraries beside the audio engine (macOS: the app bundle's
+# Frameworks/ via build.sh embed_engine_libs; Windows: staged next to
+# eclipsa_studio_engine.dll via build.ps1 Build-Engine), mirroring how GPAC is
+# vendored (//deps/gpac).
+#
+# The shared libraries (lib/) and headers (include/) are NOT checked in — they
+# are produced by build_ffmpeg.sh (macOS: @rpath .dylibs) or build_ffmpeg.ps1
+# (Windows: version-suffixed .dll + stable-named MSVC import .lib), a
+# decode-only LGPL FFmpeg 8.0 plus libdav1d. See README.md for the recipe and
+# the LGPL rationale.
+#
+# All targets are `manual`: they are consumed only by the (also `manual`)
+# //video targets via the engine's per-OS select, so they should never be
+# built standalone by a `//...` wildcard on a checkout where the vendored
+# libraries may be absent. On a platform whose libraries aren't present these
+# labels are simply never pulled in.
+
+# One cc_import per av* library the engine links against.
+#
+#   * macOS links the `@rpath/libNAME.dylib` directly (dyld resolves it from
+#     Frameworks/ at runtime).
+#   * Windows links a STABLE-named MSVC import lib (avcodec.lib) synthesized by
+#     build_ffmpeg.ps1 from the DLL's export table; the versioned DLL
+#     (avcodec-62.dll) it names is provided at runtime — staged beside
+#     eclipsa_studio_engine.dll by build.ps1, so `system_provided = True` (Bazel does
+#     not manage or stage it).
+[
+    cc_import(
+        name = "%s_imported" % lib,
+        shared_library = select({
+            "@platforms//os:osx": "lib/lib%s.dylib" % lib,
+            "//conditions:default": None,
+        }),
+        interface_library = select({
+            "@platforms//os:windows": "lib/%s.lib" % lib,
+            "//conditions:default": None,
+        }),
+        system_provided = select({
+            "@platforms//os:windows": True,
+            "//conditions:default": False,
+        }),
+        tags = ["manual"],
+    )
+    for lib in [
+        "avutil",
+        "avcodec",
+        "avformat",
+        "swscale",
+        "swresample",
+    ]
+]
+
+# dav1d (BSD-2) is the AV1 decoder linked into libavcodec. macOS links and
+# ships libdav1d.dylib alongside; on Windows avcodec-*.dll imports libdav1d.dll
+# at runtime and the engine never links dav1d directly, so it is staged
+# (build.ps1) rather than a Bazel dep — hence this import is macOS-only, pulled
+# in only by the osx arm of the `ffmpeg` deps select below.
+cc_import(
+    name = "dav1d_imported",
+    shared_library = "lib/libdav1d.dylib",
+    tags = ["manual"],
+)
+
+# Wrapper carrying the public headers + include path (cc_import does not
+# propagate `includes` to dependents; cc_library does) and every import.
+cc_library(
+    name = "ffmpeg",
+    hdrs = glob([
+        "include/libavcodec/**/*.h",
+        "include/libavformat/**/*.h",
+        "include/libavutil/**/*.h",
+        "include/libswscale/**/*.h",
+        "include/libswresample/**/*.h",
+    ]),
+    includes = ["include"],
+    tags = ["manual"],
+    deps = [
+        ":avcodec_imported",
+        ":avformat_imported",
+        ":avutil_imported",
+        ":swresample_imported",
+        ":swscale_imported",
+    ] + select({
+        "@platforms//os:osx": [":dav1d_imported"],
+        "//conditions:default": [],
+    }),
+)

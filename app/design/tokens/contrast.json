@@ -1,0 +1,102 @@
+{
+  "$description": "WCAG contrast gate for the token generator. Every rule is checked for every theme; themes whose role is highContrast are held to at least `highContrastMin`. Failures fail the build.",
+  "highContrastMin": 4.5,
+  "rules": [
+    {
+      "fg": "textPrimary",
+      "bg": "bgBase",
+      "min": 4.5,
+      "note": "body text on the panel ground"
+    },
+    {
+      "fg": "textPrimary",
+      "bg": "landingGroundBottom",
+      "min": 4.5,
+      "note": "landing screen text on the darker end of its ground"
+    },
+    {
+      "fg": "textSecondary",
+      "bg": "landingGroundBottom",
+      "min": 4.5,
+      "note": "landing screen captions on the darker end of its ground"
+    },
+    {
+      "fg": "textPrimary",
+      "bg": "bgElevated",
+      "min": 4.5,
+      "note": "body text in dialogs"
+    },
+    {
+      "fg": "textSecondary",
+      "bg": "bgBase",
+      "min": 4.5,
+      "note": "labels and descriptions"
+    },
+    {
+      "fg": "textTertiary",
+      "bg": "bgBase",
+      "min": 3.0,
+      "note": "de-emphasised / large text only"
+    },
+    {
+      "fg": "textMuted",
+      "bg": "bgBase",
+      "min": 3.0,
+      "note": "subtle labels"
+    },
+    {
+      "fg": "textValue",
+      "bg": "bgSurface",
+      "min": 4.5,
+      "note": "numeric readouts"
+    },
+    {
+      "fg": "accentFg",
+      "bg": "purple",
+      "min": 4.5,
+      "note": "text over the accent fill"
+    },
+    {
+      "fg": "pink",
+      "bg": "bgBase",
+      "min": 3.0,
+      "note": "the brand mark's S and the wordmark's \"Studio\" — 3.0 is the WCAG threshold for a graphic that carries meaning, not the 4.5 used for text"
+    },
+    {
+      "fg": "chromeInk",
+      "bg": "chromeBg",
+      "min": 4.5,
+      "note": "type on the chrome bar and on Light's landing card"
+    },
+    {
+      "fg": "pink",
+      "bg": "chromeBg",
+      "min": 3.0,
+      "note": "the brand mark's S where it sits on the chrome bar; the E uses chromeInk there, which every theme already gates"
+    },
+    {
+      "fg": "accentInk",
+      "bg": "accentFill",
+      "min": 4.5,
+      "note": "the label of an affirmative AppButton"
+    },
+    {
+      "fg": "accentFill",
+      "bg": "bgElevated",
+      "min": 3.0,
+      "note": "an affirmative AppButton against the dialog ground it sits on"
+    },
+    {
+      "fg": "chromeTabOn",
+      "bg": "chromeBg",
+      "min": 4.5,
+      "note": "the active workspace tab's label on the chrome bar"
+    }
+  ],
+  "baselineNote": "Known failures recorded when each theme was introduced, so the gate could be switched on without changing a colour. Each is a WCAG failure that has not been fixed. The gate still fails if one regresses below its recorded value, and this list must only shrink. Dark has the one entry, accentFg/purple at 2.88, the lowest ratio the set has had: the theme never puts text on an accent fill, so accentFg stays inherited white while purple is the lighter #AA83F6. Light's entry, white on #9B6DFF at 3.49, went when the theme became Light (ES-751) and took a deepened blue accent, 5.64 under white; its textMuted/bgBase entry went earlier, when the body tokens became the light palette. Classic and High Contrast had entries until the 2026-09 remake moved Classic's purple to #7C4DFF (4.81 under white) and its textMuted to #6B7A99 (4.27 on bgBase), and High Contrast's textMuted to #A6A6A6 (8.63 on black).",
+  "baseline": {
+    "dark": {
+      "accentFg on purple": 2.88
+    }
+  }
+}

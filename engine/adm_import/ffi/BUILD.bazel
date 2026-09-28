@@ -1,0 +1,72 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//:__subpackages__"])
+
+# Flat C ABI over the ADM->bed converter (probe + threaded render job table).
+# `alwayslink` so the host shared library (//:eclipsa_studio_engine) picks up the
+# exported `extern "C"` adm2iamf_* symbols even though nothing in the engine
+# references them -- they are looked up from Dart by name. Unlike the standalone
+# converter repo, there is NO cc_binary(linkshared) here: these symbols ride
+# inside libeclipsa_studio_engine.dylib, the one dylib the Flutter app loads.
+cc_library(
+    name = "ffi",
+    srcs = ["adm2iamf_ffi.cc"],
+    hdrs = ["adm2iamf_ffi.h"],
+    alwayslink = True,
+    deps = [
+        "//adm_import/adm:adm_audit",
+        "//adm_import/adm:adm_model",
+        "//adm_import/adm:adm_parser",
+        "//adm_import/adm:common_definitions",
+        "//adm_import/adm:json_escape",
+        "//adm_import/adm:xml",
+        "//adm_import/convert",
+        "//adm_import/render:channel_renderer",
+        "//adm_import/render:image_spread",
+        "//adm_import/render:object_motion",
+        "//adm_import/render:render_progress",
+        "//adm_import/scene:adm_adapter",
+        "//adm_import/scene:layouts",
+        "//adm_import/scene:scene",
+        "//adm_import/wav:bw64_reader",
+        "@oar//:oar",
+        "//adm_import/wav:wav_writer",
+        "//wav",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "ffi_test",
+    srcs = ["ffi_test.cc"],
+    deps = [
+        ":ffi",
+        "//adm_import/convert",
+        "//adm_import/render:channel_renderer",
+        "//adm_import/render:image_spread",
+        "//adm_import/scene:layouts",
+        "//adm_import/wav:bwf_fixture",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# FFI-surface files consumed by //test:ffi_exports_lint_test.
+exports_files(["adm2iamf_ffi.h"])

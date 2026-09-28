@@ -1,0 +1,116 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "wav_reader",
+    hdrs = ["wav_reader.h"],
+    srcs = ["wav_reader.cc"],
+    deps = [
+        "//:engine_log",
+        "//graph:audio_buffer",
+        "//wav",
+    ],
+)
+
+cc_library(
+    name = "wav_writer",
+    hdrs = ["wav_writer.h"],
+    srcs = ["wav_writer.cc"],
+    deps = [
+        "//graph:audio_buffer",
+        "//wav",
+    ],
+)
+
+# WAV header probe for the Dart UI — flat C ABI over the shared wav
+# library, so UI acceptance always matches the engine's. alwayslink so
+# the exported symbol survives into the dylib.
+cc_library(
+    name = "wav_probe_ffi",
+    hdrs = ["wav_probe_ffi.h"],
+    srcs = ["wav_probe_ffi.cc"],
+    deps = ["//wav"],
+    alwayslink = True,
+)
+
+# Free space + identity of the volume holding a path (statvfs on POSIX,
+# GetDiskFreeSpaceEx on Windows), for the export dialog's disk-space
+# check. No engine dependencies.
+cc_library(
+    name = "volume_info",
+    hdrs = ["volume_info.h"],
+    srcs = ["volume_info.cc"],
+)
+
+# Pure stream-topology helpers for the CoreAudio backend; separate
+# target so tests exercise the mapping without audio hardware.
+cc_library(
+    name = "stream_layout",
+    hdrs = ["stream_layout.h"],
+)
+
+# Windows-only ASIO output backend (GitHub ES-101 step 3). The ASIO SDK
+# is an implementation dep so no SDK types propagate past asio_backend.h.
+cc_library(
+    name = "asio_backend",
+    hdrs = ["asio_backend.h"],
+    srcs = ["asio_backend.cc"],
+    implementation_deps = [
+        "//:engine_log",
+        "@asio//:asio",
+    ],
+    target_compatible_with = ["@platforms//os:windows"],
+)
+
+# Backend-neutral surface (device_manager.h) + shared logic, with the
+# platform backend chosen per OS: a native CoreAudio HAL backend on
+# macOS so multi-stream interfaces expose all outputs (issue ES-334), a
+# native WASAPI backend on Windows (ES-355) that also multiplexes in the
+# ASIO backend (ES-101). The WASAPI backend pulls its system libs (ole32,
+# avrt) via #pragma comment(lib, ...), so the Windows arm needs no
+# explicit linkopts.
+cc_library(
+    name = "device_manager",
+    hdrs = ["device_manager.h"],
+    srcs = [
+        "device_manager_common.cc",
+        "device_manager_internal.h",
+    ] + select(
+        {
+            "@platforms//os:osx": ["device_manager_coreaudio.cc"],
+            "@platforms//os:windows": ["device_manager_wasapi.cc"],
+        },
+        no_match_error = "No DeviceManager backend for this platform " +
+                         "(macOS and Windows only).",
+    ),
+    linkopts = select({
+        "@platforms//os:osx": [
+            "-framework CoreAudio",
+            "-framework CoreFoundation",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = ["//:engine_log"] + select({
+        "@platforms//os:osx": [":stream_layout"],
+        "@platforms//os:windows": [":asio_backend"],
+        "//conditions:default": [],
+    }),
+)
+
+# FFI-surface files consumed by //test:ffi_exports_lint_test.
+exports_files(["wav_probe_ffi.h"])

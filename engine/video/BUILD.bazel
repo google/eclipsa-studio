@@ -1,0 +1,97 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# FFmpeg-in-engine video decode (issue ES-249, step 5).
+#
+# `//video:video_ffi` is a dep of //:eclipsa_studio_engine on macOS and Windows, so
+# it builds as part of the engine (and its eclipsa_studio_video_* symbols are
+# exported to Dart). The targets stay tagged `manual` only so they aren't
+# built *standalone* by the `//...` wildcard in `bazel test //...` — they
+# still build transitively via the engine. Uses the vendored LGPL FFmpeg
+# (headers via @ffmpeg_sys, libs via //deps/ffmpeg). Hardware decode
+# and the zero-copy texture bridge are done on both OSes. See video/README.md.
+
+# Pure decode/seek/frame-pull core: FFmpeg demux + decode + swscale → RGBA.
+# The FFmpeg header search path is carried by //deps/ffmpeg (via the
+# hermetic @ffmpeg_sys headers), so no per-target copts are needed here.
+cc_library(
+    name = "video_decoder",
+    srcs = ["video_decoder.cc"],
+    hdrs = ["video_decoder.h"],
+    tags = ["manual"],
+    deps = [
+        ":rotation",
+        "//:engine_log",
+        "//deps/ffmpeg:ffmpeg",
+    ],
+)
+
+# Display-matrix angle to clockwise quarter turns (ES-796). Header-only and
+# FFmpeg-free, so it is not `manual` and its unit test runs under `//...`.
+cc_library(
+    name = "rotation",
+    hdrs = ["rotation.h"],
+)
+
+# extern "C" FFI shim Dart binds via dart:ffi. alwayslink keeps the symbols
+# in the shared library (Dart is the only consumer), mirroring iamf_probe_ffi.
+cc_library(
+    name = "video_ffi",
+    srcs = ["video_ffi.cc"],
+    hdrs = ["video_ffi.h"],
+    tags = ["manual"],
+    deps = [":video_decoder"],
+    alwayslink = True,
+)
+
+# Still image → H.264 video-only MP4 (ES-192): the video half of a
+# still-image MP4 export, muxed with IAMF audio by //iamf:iamf_muxer.
+# OS encoders only (VideoToolbox / Media Foundation) — the vendored
+# FFmpeg is a decode-only LGPL build with no encoders or muxers. The
+# stub keeps other platforms linking (returns unsupported). Not tagged
+# `manual`: no FFmpeg dep, so it is safe for `//...` and its unit test.
+cc_library(
+    name = "still_video_encoder",
+    srcs = select({
+        "@platforms//os:osx": ["still_video_encoder_mac.cc"],
+        "@platforms//os:windows": ["still_video_encoder_win.cc"],
+        "//conditions:default": ["still_video_encoder_stub.cc"],
+    }),
+    hdrs = ["still_video_encoder.h"],
+    linkopts = select({
+        "@platforms//os:osx": [
+            "-framework CoreFoundation",
+            "-framework CoreMedia",
+            "-framework CoreVideo",
+            "-framework VideoToolbox",
+        ],
+        # MSVC: mfplat/mfreadwrite/mfuuid/ole32 come in via
+        # #pragma comment(lib, ...) in the source, like the WASAPI backend.
+        "//conditions:default": [],
+    }),
+    deps = ["//:engine_log"] + select({
+        "@platforms//os:osx": [
+            "//deps/gpac:libgpac",
+            "//iamf:gpac_system",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# FFI-surface files consumed by //test:ffi_exports_lint_test.
+exports_files(["video_ffi.h"])

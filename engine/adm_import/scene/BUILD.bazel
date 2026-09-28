@@ -1,0 +1,113 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+package(default_visibility = ["//:__subpackages__"])
+
+# `layouts` and `scene` are public so the parked binaural/ambisonic bakes
+# in adm-lab (eclipsa-studio#569) keep compiling against them.
+
+cc_library(
+    name = "layouts",
+    srcs = ["layouts.cc"],
+    hdrs = ["layouts.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cube_grid",
+        "//adm_import/adm:adm_vocabulary",
+        "@abseil-cpp//absl/strings",
+        "@oar//:oar",
+    ],
+)
+
+cc_library(
+    name = "cube_grid",
+    srcs = ["cube_grid.cc"],
+    hdrs = ["cube_grid.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "scene",
+    hdrs = ["scene.h"],
+    visibility = ["//visibility:public"],
+    deps = [":layouts"],
+)
+
+cc_library(
+    name = "bs2127",
+    srcs = ["bs2127.cc"],
+    hdrs = ["bs2127.h"],
+)
+
+cc_library(
+    name = "adm_adapter",
+    srcs = ["adm_adapter.cc"],
+    hdrs = ["adm_adapter.h"],
+    deps = [
+        ":bs2127",
+        ":cube_grid",
+        ":layouts",
+        ":scene",
+        "//adm_import/adm:adm_model",
+        "//adm_import/adm:adm_vocabulary",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "bs2127_test",
+    srcs = ["bs2127_test.cc"],
+    deps = [
+        ":bs2127",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cube_grid_test",
+    srcs = ["cube_grid_test.cc"],
+    deps = [
+        ":cube_grid",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "layouts_test",
+    srcs = ["layouts_test.cc"],
+    deps = [
+        ":layouts",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "adm_adapter_test",
+    srcs = ["adm_adapter_test.cc"],
+    deps = [
+        ":adm_adapter",
+        ":scene",
+        "//adm_import/adm:adm_model",
+        "//adm_import/adm:adm_parser",
+        "@googletest//:gtest_main",
+    ],
+)
