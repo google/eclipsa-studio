@@ -34,7 +34,7 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "loudness_ebur128", version = "1.0.0")
 bazel_dep(name = "abseil-cpp", version = "20260526.0")
 bazel_dep(name = "eigen", version = "3.4.0.bcr.3")
-bazel_dep(name = "iamf_tools", version = "1.0.0")
+bazel_dep(name = "iamf_tools", version = "3.0.0")
 bazel_dep(name = "protobuf", version = "36.0.bcr.1")
 bazel_dep(name = "oar", version = "1.0.0")
 bazel_dep(name = "obr", version = "1.0.0")
@@ -47,15 +47,6 @@ bazel_dep(name = "obr", version = "1.0.0")
 single_version_override(
     module_name = "abseil-cpp",
     version = "20260526.0",
-)
-
-# grpc-java 1.66.0 (pulled transitively via iamf-tools → googleapis) has a
-# broken MODULE.bazel that imports `com_envoyproxy_protoc_gen_validate` from
-# a grpc extension that no longer generates it. Force a newer grpc-java
-# whose MODULE.bazel uses the correct repo names.
-single_version_override(
-    module_name = "grpc-java",
-    version = "1.78.0.bcr.1",
 )
 
 # loudness_ebur128 is not yet on BCR — pin to same commit as iamf-tools uses.
@@ -75,7 +66,7 @@ git_override(
 # @obr at link time. The fork's tests, test data and docs stay out of the
 # patch. engine/iamf/sync-iamf-tools.sh regenerates the patch from the
 # fork and updates IAMF_TOOLS_COMMIT; commit both together.
-IAMF_TOOLS_COMMIT = "901a86e19e32e20dbdf0268984ae75f3f481249c"
+IAMF_TOOLS_COMMIT = "a4f98a5dbec39c4f0493c47f0ec0708ca536f8b6"
 
 git_override(
     module_name = "iamf_tools",
