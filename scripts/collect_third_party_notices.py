@@ -257,10 +257,19 @@ def join_texts(files: list[str], texts: list[str]) -> str:
     )
 
 
-def collect() -> list[dict]:
+CODEC_DEP_NAMES = {
+    "aac": "Fraunhofer FDK AAC codec library",
+    "flac": "FLAC (libFLAC)",
+    "opus": "Opus (libopus)",
+}
+
+
+def collect(excluded: set[str] = frozenset()) -> list[dict]:
     base = bazel_output_base()
     components = []
     for name, label, repo_dir, files, *rest in ENGINE_DEPS:
+        if name in excluded:
+            continue
         # An optional fifth element lists notice files of ours, under
         # third_party/, placed before the upstream license files.
         ours = rest[0] if rest else []
@@ -328,13 +337,26 @@ def main() -> None:
                     help="fail if committed outputs differ from regenerated")
     ap.add_argument("--verify-bundle", metavar="APP",
                     help="verify every shipped framework is attributed")
+    ap.add_argument("--no-aac", action="store_true",
+                    help="omit Fraunhofer FDK AAC notice (when built with "
+                         "IAMF_TOOLS_DISABLE_AAC_{DECODER,ENCODER})")
+    ap.add_argument("--no-flac", action="store_true",
+                    help="omit FLAC notice (when built with "
+                         "IAMF_TOOLS_DISABLE_FLAC_{DECODER,ENCODER})")
+    ap.add_argument("--no-opus", action="store_true",
+                    help="omit Opus notice (when built with "
+                         "IAMF_TOOLS_DISABLE_OPUS_{DECODER,ENCODER})")
     args = ap.parse_args()
 
     if args.verify_bundle:
         verify_bundle(Path(args.verify_bundle))
         return
 
-    components = collect()
+    excluded = {
+        dep_name for codec, dep_name in CODEC_DEP_NAMES.items()
+        if getattr(args, f"no_{codec}")
+    }
+    components = collect(excluded)
     txt, js = render_txt(components), render_json(components)
 
     if args.check:
