@@ -36,6 +36,7 @@
 #   ./build.sh run --no-lint                 # ... release + skip linting
 #   ./build.sh test-iamf FILE.iamf           # ... release + auto-open an IAMF for QC
 #   ./build.sh package                       # build + sign + notarize (DMG)
+#   ./build.sh package --no-sign             # build unsigned .app bundle (for CI signing stage)
 #   ./build.sh package --no-notarize         # build + sign (skip notarize)
 #   ./build.sh package upload                # build + sign + notarize + upload
 #   ./build.sh package gh-release            # ... + draft GitHub release (DMG + notes)
@@ -1040,12 +1041,14 @@ case "${1:-}" in
 
   package)
     # ── Parse flags ───────────────────────────────────────────────────────
+    NO_SIGN=false
     NO_NOTARIZE=false
     DO_UPLOAD=false
     DO_GH_RELEASE=false
     shift
     for arg in "$@"; do
       case "$arg" in
+        --no-sign)     NO_SIGN=true ;;
         --no-notarize) NO_NOTARIZE=true ;;
         --no-lint)     ;;  # handled globally
         --allow-dirty) ;;  # handled globally
@@ -1062,10 +1065,12 @@ case "${1:-}" in
     command -v xcrun    >/dev/null || die "xcrun not found (Xcode required)"
     command -v python3  >/dev/null || die "python3 not found in PATH (third-party notices gates)"
 
-    [ -n "$DEVELOPER_ID_APP" ] \
-      || die "DEVELOPER_ID_APP is not set: export the Developer ID Application identity to sign with."
-    security find-identity -v -p codesigning | grep -q -F "$DEVELOPER_ID_APP" \
-      || die "Signing identity not found in the keychain: $DEVELOPER_ID_APP"
+    if ! $NO_SIGN; then
+      [ -n "$DEVELOPER_ID_APP" ] \
+        || die "DEVELOPER_ID_APP is not set: export the Developer ID Application identity to sign with."
+      security find-identity -v -p codesigning | grep -q -F "$DEVELOPER_ID_APP" \
+        || die "Signing identity not found in the keychain: $DEVELOPER_ID_APP"
+    fi
 
     if $DO_UPLOAD; then
       command -v rclone >/dev/null || die "rclone not found — brew install rclone"
@@ -1126,9 +1131,16 @@ and commit the result."
     generate_releases_json
     flutter clean
     flutter pub get
-    flutter build macos --release \
-      --build-name="$BUILD_NAME" \
-      --build-number="$BUILD_NUMBER"
+    if $NO_SIGN; then
+      flutter build macos --release --config-only \
+        --build-name="$BUILD_NAME" \
+        --build-number="$BUILD_NUMBER"
+      flutter_build_release
+    else
+      flutter build macos --release \
+        --build-name="$BUILD_NAME" \
+        --build-number="$BUILD_NUMBER"
+    fi
 
     APP_PATH="build/macos/Build/Products/Release/${APP_NAME}.app"
     ENTITLEMENTS="macos/Runner/Release.entitlements"
@@ -1150,6 +1162,13 @@ and commit the result."
 
     # ── Path hygiene (ES-374) ──────────────────────────────────────────────
     check_path_leaks "$APP_PATH/Contents/Frameworks"
+
+    if $NO_SIGN; then
+      info "Skipping signing, DMG, and notarization (--no-sign)."
+      echo ""
+      echo "Ready (unsigned): app/${APP_PATH}"
+      exit 0
+    fi
 
     # ── Sign ─────────────────────────────────────────────────────────────
     info "Signing embedded dylibs…"
@@ -1320,6 +1339,7 @@ and commit the result."
     echo "  test-session [path]          Build + run with test session"
     echo "  test-iamf [path]             Build + run, auto-open an IAMF for QC (release)"
     echo "  package                      Build, sign, notarize (version from git tag)"
+    echo "  package --no-sign            Build unsigned .app bundle (for CI signing stage)"
     echo "  package --no-notarize        Build, sign (skip notarize)"
     echo "  package upload               ... + upload to Google Drive"
     echo "  package gh-release           ... + draft GitHub release (DMG + notes)"
