@@ -92,6 +92,7 @@ cc_test(
     srcs = ["channel_renderer_test.cc"],
     deps = [
         ":channel_renderer",
+        ":object_motion",
         ":render_progress",
         "//adm_import/scene:layouts",
         "//adm_import/scene:scene",

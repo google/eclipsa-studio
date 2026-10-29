@@ -56,17 +56,26 @@ JSON_OUT = REPO / "app/assets/third_party_notices.json"
 TXT_OUT = REPO / "third_party/THIRD_PARTY_NOTICES.txt"
 
 # ── C++ engine dependencies (statically linked into libeclipsa_studio_engine) ──
+# Display names of the codec libraries, keyed by codec: --no-<codec>
+# leaves that entry out of the notices. ENGINE_DEPS takes the names of
+# those entries from here, so renaming one keeps its flag working.
+CODEC_DEP_NAMES = {
+    "aac": "Fraunhofer FDK AAC codec library",
+    "flac": "FLAC (libFLAC)",
+    "opus": "Opus (libopus)",
+}
+
 # (display name, license label, bazel external dir, license files)
 ENGINE_DEPS = [
     ("iamf-tools", "BSD 3-Clause", "iamf_tools+", ["LICENSE"]),
     # Our NOTICE (source commit, what is linked) precedes upstream's
     # license text, which section 2 of that license requires in full.
-    ("Fraunhofer FDK AAC codec library", "FDK AAC license (see NOTICE)",
+    (CODEC_DEP_NAMES["aac"], "FDK AAC license (see NOTICE)",
      "iamf_tools++_repo_rules+fdk_aac", ["NOTICE"],
      ["third_party/fdk_aac/NOTICE"]),
-    ("FLAC (libFLAC)", "BSD 3-Clause (Xiph)",
+    (CODEC_DEP_NAMES["flac"], "BSD 3-Clause (Xiph)",
      "flac+", ["COPYING.Xiph"]),
-    ("Opus (libopus)", "BSD 3-Clause",
+    (CODEC_DEP_NAMES["opus"], "BSD 3-Clause",
      "opus+", ["COPYING"]),
     ("loudness_ebur128", "Apache License 2.0",
      "loudness_ebur128+", ["LICENSE"]),
@@ -255,13 +264,6 @@ def join_texts(files: list[str], texts: list[str]) -> str:
     return "\n\n".join(
         f"---- {n} ----\n\n{t}" for n, t in zip(names, texts)
     )
-
-
-CODEC_DEP_NAMES = {
-    "aac": "Fraunhofer FDK AAC codec library",
-    "flac": "FLAC (libFLAC)",
-    "opus": "Opus (libopus)",
-}
 
 
 def collect(excluded: set[str] = frozenset()) -> list[dict]:

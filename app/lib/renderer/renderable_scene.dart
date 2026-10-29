@@ -29,7 +29,17 @@ class RenderableScene {
   final double cameraDistance;
 
   final List<RenderableObject> objects;
+
+  /// One source per channel of each channel-based element.
+  final List<RenderableSource> sources;
+
+  /// The loudspeakers of the monitoring target; empty on the binaural
+  /// target.
   final List<RenderableSpeaker> speakers;
+
+  /// Headphones on the listener's head while the binaural target is
+  /// monitored; null on a loudspeaker target.
+  final RenderableHeadphones? headphones;
 
   /// SH coefficients from the scene encoder (for Mollweide overlay).
   final List<double>? shCoeffs;
@@ -49,7 +59,9 @@ class RenderableScene {
     this.cameraElRad = 0.4,
     this.cameraDistance = 4.0,
     this.objects = const [],
+    this.sources = const [],
     this.speakers = const [],
+    this.headphones,
     this.shCoeffs,
     this.shOrder = 3,
     this.showAxes = true,
@@ -87,10 +99,27 @@ class RenderableObject {
   });
 }
 
-/// A loudspeaker in the scene.
+/// One channel of a channel-based element: a sphere at the position the
+/// monitoring render takes the channel from.
+class RenderableSource {
+  final Vector3 position;
+  final Color color;
+  final double radius;
+
+  /// Channel level (linear 0..1+).
+  final double level;
+
+  const RenderableSource({
+    required this.position,
+    required this.color,
+    required this.radius,
+    this.level = 0.0,
+  });
+}
+
+/// A loudspeaker of the monitoring target.
 class RenderableSpeaker {
   final Vector3 position;
-  final Vector3 lookAtOrigin;
   final Color color;
   final String label;
   final double width;
@@ -102,12 +131,56 @@ class RenderableSpeaker {
 
   const RenderableSpeaker({
     required this.position,
-    required this.lookAtOrigin,
     required this.color,
     required this.label,
     this.width = 0.08,
     this.height = 0.12,
     this.depth = 0.06,
     this.level = 0.0,
+  });
+}
+
+/// Headphones at the listener's head, drawn on the binaural monitoring
+/// target. The earcups carry the levels of the monitoring render's two
+/// output channels.
+class RenderableHeadphones {
+  /// Radius of the listener's head, which the scene does not draw. The
+  /// headphones sit on it. It is the distance below which OBR renders an
+  /// object inside the head (OAR specification 1.0.0, section 4.2.3).
+  static const double headRadius = 0.1;
+
+  /// Earcup thickness along the X axis.
+  static const double cupDepth = 0.03;
+
+  /// Earcup radius, about the X axis.
+  static const double cupRadius = 0.045;
+
+  /// Earcup centres sit at ±[cupOffset] on the visualizer X axis, the
+  /// inner faces on the head; audio left is -X.
+  static const double cupOffset = headRadius + cupDepth / 2;
+
+  /// Radius of the headband's tube, which runs over the top of the head.
+  static const double bandTube = 0.008;
+
+  /// Headband color.
+  final Color bandColor;
+
+  /// Left earcup color, tinted from [leftLevel].
+  final Color leftColor;
+
+  /// Right earcup color, tinted from [rightLevel].
+  final Color rightColor;
+
+  /// Meter level (linear 0..1+) of the left and right output channels,
+  /// which the earcup colors show.
+  final double leftLevel;
+  final double rightLevel;
+
+  const RenderableHeadphones({
+    required this.bandColor,
+    required this.leftColor,
+    required this.rightColor,
+    this.leftLevel = 0.0,
+    this.rightLevel = 0.0,
   });
 }

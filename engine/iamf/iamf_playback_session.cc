@@ -17,7 +17,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/time/time.h"
 #include "engine_log.h"
@@ -28,6 +31,7 @@
 
 using iamf_tools::api::AudioElementDescriptor;
 using iamf_tools::api::AudioElementKind;
+using iamf_tools::api::IamfByteRange;
 using iamf_tools::api::IamfStatus;
 using iamf_tools::api::IamfStreamFactory;
 using iamf_tools::api::IamfStreamSettings;
@@ -98,23 +102,33 @@ bool IamfPlaybackSession::open(const char* path) {
   if (!map_file(path)) return false;
   const auto t_map = clock::now();
 
-  // IAMF-in-ISOBMFF (.mp4/.mov) deliverables: demux the `iamf` track into a
-  // standalone bitstream and play it from memory. The mmap was only needed
-  // to sniff the container — libgpac reopens the path itself, so release it
-  // before handing off to the in-memory path (which owns its own copy).
+  // IAMF-in-ISOBMFF (.mp4/.mov) deliverables: read the `iamf` track's
+  // samples in place from a mapping of the MP4. The sniffing map is not
+  // needed after this point; IamfMp4Source maps the file itself. A track
+  // whose sample data is stored in another file is demuxed into memory;
+  // any other failure is reported as it is.
   if (eclipsa_studio::IamfDemuxer::IsIsoBmff(mapped_bytes_, mapped_len_)) {
     unmap_file();
+    auto source = std::make_unique<eclipsa_studio::IamfMp4Source>();
+    std::string source_err;
+    bool sample_data_external = false;
+    if (source->open(path, &source_err, &sample_data_external)) {
+      return open_mp4_source(std::move(source), t0);
+    }
+    if (!sample_data_external) {
+      set_error(source_err.c_str());
+      return false;
+    }
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+                  "session open: %s; demuxing the track into memory",
+                  source_err.c_str());
+    engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf", buf);
     std::vector<uint8_t> iamf_bytes;
-    // The QC-open probe demuxed this same file moments ago and stashed the
-    // result; reuse it instead of re-parsing the container (ES-215). Falls
-    // through to a fresh demux when there's no matching stash (a direct open
-    // with no preceding probe — tests, CLI).
-    if (!eclipsa_studio::TakeIamfDemux(path, &iamf_bytes)) {
-      eclipsa_studio::IamfDemuxer demuxer;
-      if (!demuxer.DemuxToBytes(path, &iamf_bytes)) {
-        set_error(demuxer.last_error());
-        return false;
-      }
+    eclipsa_studio::IamfDemuxer demuxer;
+    if (!demuxer.DemuxToBytes(path, &iamf_bytes)) {
+      set_error(demuxer.last_error());
+      return false;
     }
     return open_from_memory(iamf_bytes.data(), iamf_bytes.size());
   }
@@ -149,6 +163,48 @@ bool IamfPlaybackSession::open(const char* path) {
                 static_cast<double>(mapped_len_) / (1024.0 * 1024.0),
                 ms(clock::now() - t0).count(), ms(t_map - t0).count(),
                 ms(t_open - t_map).count(), ms(clock::now() - t_open).count());
+  engine_log(ECLIPSA_STUDIO_LOG_INFO, "iamf", buf);
+  return true;
+}
+
+bool IamfPlaybackSession::open_mp4_source(
+    std::unique_ptr<eclipsa_studio::IamfMp4Source> source,
+    std::chrono::steady_clock::time_point t0) {
+  using clock = std::chrono::steady_clock;
+  const auto t_index = clock::now();
+  std::vector<IamfByteRange> ranges;
+  ranges.reserve(source->segments().size());
+  for (const auto& segment : source->segments()) {
+    ranges.push_back({segment.data(), segment.size()});
+  }
+  IamfStreamSettings settings;
+  settings.lazy_temporal_unit_scan = true;
+  IamfStatus status = IamfStreamFactory::OpenFromSegments(
+      ranges.data(), ranges.size(), settings, stream_);
+  if (!status.ok()) {
+    set_error(status.error_message);
+    stream_.reset();
+    return false;
+  }
+  const auto t_open = clock::now();
+  if (!configure_from_open_stream()) {
+    stream_.reset();
+    return false;
+  }
+  // The stream reads the ranges for its whole life; close() resets it
+  // before releasing the source.
+  mp4_source_ = std::move(source);
+  start_io_thread();
+
+  using ms = std::chrono::duration<double, std::milli>;
+  char buf[224];
+  std::snprintf(
+      buf, sizeof(buf),
+      "session open (mp4, in place): %.1f MB in %zu ranges in "
+      "%.1f ms (index+map=%.1f, factory=%.1f, configure=%.1f)",
+      static_cast<double>(mp4_source_->size_bytes()) / (1024.0 * 1024.0),
+      ranges.size(), ms(clock::now() - t0).count(), ms(t_index - t0).count(),
+      ms(t_open - t_index).count(), ms(clock::now() - t_open).count());
   engine_log(ECLIPSA_STUDIO_LOG_INFO, "iamf", buf);
   return true;
 }
@@ -194,10 +250,13 @@ bool IamfPlaybackSession::configure_from_open_stream() {
   seek_target_.store(0, std::memory_order_relaxed);
   seek_request_count_.store(0, std::memory_order_relaxed);
   seeks_applied_.store(0, std::memory_order_relaxed);
+  seeks_served_from_rings_.store(0, std::memory_order_relaxed);
   seek_observed_count_ = 0;
   scan_completion_logged_ = false;
   scan_override_active_ = false;
   partial_tu_logged_ = false;
+  rings_aligned_ = true;
+  pump_at_end_ = false;
   {
     std::lock_guard<std::mutex> lk(error_mu_);
     last_error_.clear();
@@ -245,6 +304,8 @@ bool IamfPlaybackSession::configure_from_open_stream() {
 void IamfPlaybackSession::close() {
   stop_io_thread();
   stream_.reset();
+  // After the stream, which reads the source's ranges.
+  mp4_source_.reset();
   unmap_file();
   owned_bytes_.clear();
   mapped_bytes_ = nullptr;
@@ -394,7 +455,23 @@ void IamfPlaybackSession::io_loop() {
         seek_request_count_.load(std::memory_order_acquire);
     if (cur_seek_count != seek_observed_count_) {
       const uint64_t target = seek_target_.load(std::memory_order_acquire);
+      // A seek the stream can answer without repositioning: to a frame
+      // the rings still hold, or to the end once the duration is known.
+      // Neither calls IamfStream::Seek, which waits for the lazy scan.
+      if (seek_to_end(target) || seek_within_rings(target)) {
+        seek_observed_count_ = cur_seek_count;
+        // After the floors, as in the stream-seek path below (ES-473).
+        seeks_applied_.store(cur_seek_count, std::memory_order_release);
+        continue;
+      }
       const IamfStatus seek_status = stream_->Seek(target);
+      // A target at or past the end reaches the stream only while the
+      // duration is unknown; Seek waited for the scan, so it is known now.
+      if (!seek_status.ok() && seek_to_end(target)) {
+        seek_observed_count_ = cur_seek_count;
+        seeks_applied_.store(cur_seek_count, std::memory_order_release);
+        continue;
+      }
       if (!seek_status.ok()) {
         // Seek failed — the upstream stream may be in an unknown
         // state. Halt the pump path: log, record the error, mark
@@ -421,6 +498,8 @@ void IamfPlaybackSession::io_loop() {
       }
       pump_cursor_.store(target, std::memory_order_release);
       io_eof_.store(false, std::memory_order_release);
+      pump_at_end_ = false;
+      rings_aligned_ = true;
       // Publish the discard floor so the audio thread skips any
       // still-buffered pre-seek frames on its next read. Each ring
       // gets its current head as the discard target — the consumer
@@ -540,6 +619,7 @@ void IamfPlaybackSession::io_loop() {
     }
     if (tu_.frames_produced == 0) {
       io_eof_.store(true, std::memory_order_release);
+      pump_at_end_ = true;
       for (auto& r : rings_) r->mark_eof();
       continue;
     }
@@ -625,6 +705,10 @@ void IamfPlaybackSession::io_loop() {
                                      std::memory_order_release);
       }
     }
+    // An AE that got no frames fell behind the others, so its ring no
+    // longer maps to the file timeline; seeks go to the stream until the
+    // next stream seek realigns the rings.
+    if (produced_ae < real_ae) rings_aligned_ = false;
     // A TU that fed some AEs but not all (and not a whole-stream EOF,
     // which `frames_produced == 0` already handled above) leaves the
     // empty AEs' rings unwritten while the others advance — the most
@@ -653,6 +737,67 @@ void IamfPlaybackSession::io_loop() {
   }
 }
 
+bool IamfPlaybackSession::seek_within_rings(uint64_t target) {
+  // Not after a pump error: a stream seek is what restarts the pump. At the
+  // end of the stream the rings still hold valid frames.
+  if ((io_eof_.load(std::memory_order_acquire) && !pump_at_end_) ||
+      !rings_aligned_) {
+    return false;
+  }
+  // The next frame the pump writes is file frame `cursor`, at each ring's
+  // head, so file frame `target` sits `back` frames behind every head.
+  const uint64_t cursor = pump_cursor_.load(std::memory_order_relaxed);
+  if (target > cursor) return false;
+  const uint64_t back = cursor - target;
+  // The graph posts IAMF seeks only while its ring reads are held (the
+  // priming mute, or paused), so the buffered counts below cannot shrink
+  // before the floors are published. A caller that reads while seeking
+  // (seek_to_frame() from a test) can race past a floor; the ring then
+  // ignores it and playback resumes at most one read after `target`.
+  for (uint32_t i = 0; i < rings_.size(); ++i) {
+    if (ae_info_[i].num_channels == 0) continue;  // never written
+    if (rings_[i]->buffered_frames() < back) return false;
+  }
+  for (uint32_t i = 0; i < rings_.size(); ++i) {
+    PcmRing& ring = *rings_[i];
+    const uint64_t head = ring.head_pos();
+    ring.publish_discard_to(ae_info_[i].num_channels == 0 ? head : head - back);
+    // The seek poster cleared EOF; nothing more comes after the end.
+    if (pump_at_end_) {
+      ring.mark_eof();
+    } else {
+      ring.clear_eof();
+    }
+  }
+  partial_tu_logged_ = false;
+  seeks_served_from_rings_.fetch_add(1, std::memory_order_relaxed);
+  char msg[128];
+  std::snprintf(msg, sizeof(msg),
+                "io_loop: seek to %llu served from the rings (%llu frames "
+                "back from the pump)",
+                static_cast<unsigned long long>(target),
+                static_cast<unsigned long long>(back));
+  engine_log(ECLIPSA_STUDIO_LOG_DEBUG, "iamf", msg);
+  return true;
+}
+
+bool IamfPlaybackSession::seek_to_end(uint64_t target) {
+  // IamfStream::Seek rejects a position at or past the last sample, but
+  // the transport can put the playhead exactly at the end. Treat that as
+  // end of stream: nothing to play, and no error (ES-921).
+  if (!stream_->IsTotalSamplesReady()) return false;
+  const uint64_t total = stream_->GetTotalSamples();
+  if (total == 0 || target < total) return false;
+  pump_cursor_.store(total, std::memory_order_release);
+  io_eof_.store(true, std::memory_order_release);
+  pump_at_end_ = true;
+  for (auto& r : rings_) {
+    r->publish_discard_to(r->head_pos());
+    r->mark_eof();
+  }
+  return true;
+}
+
 bool IamfPlaybackSession::map_file(const char* path) {
   std::string err;
   if (!file_map_.open(path, &err)) {
@@ -671,8 +816,8 @@ bool IamfPlaybackSession::map_file(const char* path) {
 void IamfPlaybackSession::unmap_file() {
   file_map_.close();
   // Drop the borrowed view so it can't dangle past the unmap — the MP4
-  // path sniffs the mmap, unmaps it, then demuxes from the path and hands
-  // owned bytes to open_from_memory.
+  // path sniffs the mmap, unmaps it, then reads the track through
+  // IamfMp4Source (or demuxes it into owned bytes for open_from_memory).
   mapped_bytes_ = nullptr;
   mapped_len_ = 0;
 }

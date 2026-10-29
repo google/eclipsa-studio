@@ -15,14 +15,17 @@
 // Regression test for issue ES-145 — loudness meter use-after-free on a
 // meter reset that races the audio thread.
 //
-// The mix-bus loudness meter rebuilds its EbuR128Analyzer on reset()/
-// reconfigure() (the analyzer has no in-place reset, so the unique_ptr is
-// reassigned and the live object freed). That runs on the control thread
-// while the audio thread may be inside LoudnessMeter::process(), called
-// from AudioGraph::process(). Before the fence (AudioGraph's
-// loudness_reconfiguring_/loudness_ack_ handshake), the control thread
-// could free the analyzer while the audio thread dereferenced it —
-// `c0000005` / heap-use-after-free in EbuR128Analyzer::Process.
+// When ES-145 was found, the audio thread ran the EbuR128Analyzer itself,
+// and reset()/reconfigure() rebuilt it (the analyzer has no in-place
+// reset, so the unique_ptr is reassigned and the live object freed) on
+// the control thread while the audio thread could be inside it. Before
+// the fence (AudioGraph's loudness_reconfiguring_/loudness_ack_
+// handshake), the control thread could free the analyzer while the audio
+// thread dereferenced it — `c0000005` / heap-use-after-free in
+// EbuR128Analyzer::Process. Since ES-905 the analyzer runs on the meter's
+// own thread, and the audio thread only copies blocks into the meter's
+// ring with LiveLoudnessMeter::push(); reset()/reconfigure() reallocate
+// that ring, so the same fence keeps push() out of it.
 //
 // This test drives AudioGraph::process() in a tight loop on a second
 // thread (standing in for the device callback) while the main thread
@@ -30,24 +33,20 @@
 // report. set_audio_running(true) engages the fence (it would otherwise
 // short-circuit with no callback thread registered).
 //
-// Run under AddressSanitizer to catch the regression:
-//   bazel test --config=asan //test:audio_graph_loudness_race_test
-// Without the fence ASAN faults inside EbuR128Analyzer::Process on the
-// process() thread — exactly the ES-145 stack (GetSampleFromOrigin ←
-// ProcessImpl ← Process ← LoudnessMeter::process ← AudioGraph::process).
-// It surfaces as container-overflow or heap-use-after-free depending on
-// timing (the control thread reallocates the analyzer's internal vectors
-// and frees the object while the audio thread reads it). With the fence:
-// clean.
+// Under AddressSanitizer this test caught ES-145: without the fence ASan
+// faulted inside EbuR128Analyzer::Process on the process() thread (the
+// ES-145 stack: GetSampleFromOrigin ← ProcessImpl ← Process ←
+// LoudnessMeter::process ← AudioGraph::process), as container-overflow or
+// heap-use-after-free depending on timing. Since ES-905, reset() rewinds
+// the meter's ring over the same storage and frees nothing, so a missing
+// fence is a data race on the ring's configuration and contents, which
+// ThreadSanitizer reports and ASan does not:
+//   bazel test --config=tsan //test:audio_graph_loudness_race_test
 //
-// NOTE: under --config=tsan this also surfaces the *benign* peak/rms
-// meter-state POD races that reset_meters() shares with the audio thread
-// (flagged benign and out of scope for ES-145), so ASAN — which targets the
-// actual use-after-free — is the intended sanitizer. The production FFI
-// path no longer has those races: eclipsa_studio_meter_reset pauses and waits
-// for callback quiescence before calling reset_meters() (ES-281); this test
-// still sees them only because it calls reset_meters() directly, below
-// that barrier.
+// This test calls reset_meters() directly, below the barrier the
+// production FFI path holds: eclipsa_studio_meter_reset pauses and waits
+// for callback quiescence before calling it (ES-281), because the peak and
+// RMS meter resets share state with the audio thread.
 
 #include <atomic>
 #include <cstdint>
@@ -58,8 +57,9 @@
 
 #include "graph/audio_graph.h"
 #include "gtest/gtest.h"
-#include "meters/loudness_meter.h"
+#include "meters/live_loudness_meter.h"
 #include "renderer/oar_renderer.h"
+#include "test/alloc_counter.h"
 #include "test/test_wav_helper.h"
 
 namespace {
@@ -104,7 +104,8 @@ TEST(AudioGraphLoudnessRaceTest, ResetMetersDuringProcessIsUseAfterFreeFree) {
     std::this_thread::yield();
   }
 
-  // Hammer the reset path; each reset frees and rebuilds the analyzer.
+  // Hammer the reset path; each reset rebuilds the analyzer and rewinds
+  // the meter's ring.
   for (int i = 0; i < 1000; ++i) {
     graph->reset_meters();
   }
@@ -125,6 +126,13 @@ TEST(AudioGraphLoudnessRaceTest, ResetMetersDuringProcessIsUseAfterFreeFree) {
 
 constexpr uint32_t kStereo = 2;  // ck_oar_layout_stereo, 2 channels
 constexpr uint32_t k714 = 8;     // ck_oar_layout_714, 12 channels
+
+// Blocks of 512 frames the layout tests process before reading the
+// loudness: 60 blocks are 640 ms, more than one 400 ms gating block.
+// 30720 frames also fit the meter's 32768-frame ring, so no block is
+// dropped while the test thread outruns the meter thread; the drain
+// before each read then feeds every block.
+constexpr int kMeteredBlocks = 60;
 
 // A graph with one 12-channel 7.1.4 element, so process() renders
 // through OAR and feeds the loudness meter.
@@ -147,7 +155,7 @@ std::unique_ptr<AudioGraph> MakeGraphWith714Element(const std::string& name) {
 TEST(AudioGraphLoudnessLayoutTest, DeferredSwitchResyncsMeterOnRelease) {
   auto graph = MakeGraphWith714Element("loudness_deferred_714.wav");
   ASSERT_TRUE(graph->set_monitoring_layout(k714));
-  const LoudnessMeter* meter = graph->mix_loudness_meter();
+  const LiveLoudnessMeter* meter = graph->mix_loudness_meter();
   ASSERT_NE(meter, nullptr);
   ASSERT_EQ(meter->num_channels(), 12u);
 
@@ -168,7 +176,13 @@ TEST(AudioGraphLoudnessLayoutTest, DeferredSwitchResyncsMeterOnRelease) {
   // produces a momentary reading, and no block was skipped.
   constexpr uint32_t kFrames = 512, kChannels = 2;
   std::vector<float> out(static_cast<size_t>(kFrames) * kChannels);
-  for (int i = 0; i < 60; ++i) graph->process(out.data(), kFrames, kChannels);
+  for (int i = 0; i < kMeteredBlocks; ++i) {
+    // The element's disk-thread ring serves each block, as the time
+    // between device callbacks would allow.
+    ASSERT_TRUE(graph->wait_for_wav_streams(kFrames));
+    graph->process(out.data(), kFrames, kChannels);
+  }
+  graph->drain_loudness_meter();
   EXPECT_EQ(meter->mismatched_blocks(), 0u);
   EXPECT_GT(graph->meter_state()->loudness.lufs_momentary, -70.0f);
 }
@@ -184,7 +198,13 @@ TEST(AudioGraphLoudnessLayoutTest, DeferredElementRebuildKeepsIntegrated) {
   // gating block, so the integrated reading is established.
   constexpr uint32_t kFrames = 512, kChannels = 2;
   std::vector<float> out(static_cast<size_t>(kFrames) * kChannels);
-  for (int i = 0; i < 60; ++i) graph->process(out.data(), kFrames, kChannels);
+  for (int i = 0; i < kMeteredBlocks; ++i) {
+    // The element's disk-thread ring serves each block, as the time
+    // between device callbacks would allow.
+    ASSERT_TRUE(graph->wait_for_wav_streams(kFrames));
+    graph->process(out.data(), kFrames, kChannels);
+  }
+  graph->drain_loudness_meter();
   const float integrated = graph->meter_state()->loudness.lufs_integrated;
   ASSERT_GT(integrated, -120.0f);
   ASSERT_NE(integrated, 0.0f);
@@ -211,7 +231,13 @@ TEST(AudioGraphLoudnessLayoutTest, ResyncIfStaleIsNoOpWhenMeterMatches) {
 
   constexpr uint32_t kFrames = 512, kChannels = 2;
   std::vector<float> out(static_cast<size_t>(kFrames) * kChannels);
-  for (int i = 0; i < 60; ++i) graph->process(out.data(), kFrames, kChannels);
+  for (int i = 0; i < kMeteredBlocks; ++i) {
+    // The element's disk-thread ring serves each block, as the time
+    // between device callbacks would allow.
+    ASSERT_TRUE(graph->wait_for_wav_streams(kFrames));
+    graph->process(out.data(), kFrames, kChannels);
+  }
+  graph->drain_loudness_meter();
   const float integrated = graph->meter_state()->loudness.lufs_integrated;
   ASSERT_GT(integrated, -120.0f);
   ASSERT_NE(integrated, 0.0f);
@@ -232,7 +258,7 @@ TEST(AudioGraphLoudnessLayoutTest, ResyncIfStaleIsNoOpWhenMeterMatches) {
 // skipped until resync_loudness_meter_if_stale() reconfigures the meter.
 TEST(AudioGraphLoudnessLayoutTest, ResyncIfStaleReconfiguresStaleMeter) {
   auto graph = MakeGraphWith714Element("loudness_resync_stale_714.wav");
-  const LoudnessMeter* meter = graph->mix_loudness_meter();
+  const LiveLoudnessMeter* meter = graph->mix_loudness_meter();
   ASSERT_EQ(meter->num_channels(), 2u);  // init() configures stereo
 
   // Bypass AudioGraph: the meter is not told about the new layout.
@@ -256,7 +282,7 @@ TEST(AudioGraphLoudnessLayoutTest, ResyncIfStaleReconfiguresStaleMeter) {
 // Layout switches while a callback thread runs process() in a tight loop.
 // The loudness fence is held from before the OAR rebuild until the meter
 // is reconfigured, so the meter never receives a block whose channel count
-// differs from its configuration; LoudnessMeter::process() counts any
+// differs from its configuration; LiveLoudnessMeter::push() counts any
 // such block it skips. Before the fix the window between the OAR rebuild
 // and the meter reconfigure was a few microseconds per switch, so this
 // test does not reliably reproduce the old failure; it checks that 100
@@ -304,6 +330,42 @@ TEST(AudioGraphLoudnessLayoutTest, SwitchesDuringProcessNeverMismatchMeter) {
 
   EXPECT_EQ(graph->mix_loudness_meter()->mismatched_blocks(), 0u);
   EXPECT_EQ(graph->mix_loudness_meter()->num_channels(), 12u);
+}
+
+// ── No allocation on the audio thread (ES-905) ────────────────────────────
+//
+// process() renders a 7.1.4 element to stereo and hands every block to the
+// loudness meter. 4 s of blocks complete 40 of the analyzer's 100 ms
+// steps. When the analyzer ran inside process(), each step appended to its
+// history vectors there; the meter thread does that now, and process()
+// allocates nothing. Counted through the sanitizer malloc hooks, so this
+// runs in the asan and tsan builds and is skipped in the others.
+TEST(AudioGraphLoudnessAllocTest, ProcessDoesNotAllocateWhileMetering) {
+  if (!alloc_counter::kAvailable) {
+    GTEST_SKIP() << "allocation counts need an asan or tsan build";
+  }
+  auto graph = MakeGraphWith714Element("loudness_alloc_714.wav");
+  constexpr uint32_t kFrames = 512, kChannels = 2;
+  std::vector<float> out(static_cast<size_t>(kFrames) * kChannels);
+  // Warm-up: the disk thread fills the element's ring beyond the first
+  // chunk WavStream::open() read on this thread. process() itself
+  // allocates nothing from the first call.
+  for (int i = 0; i < 8; ++i) graph->process(out.data(), kFrames, kChannels);
+
+  const bool probe_counted = alloc_counter::Start();
+  for (int i = 0; i < 375; ++i) {
+    graph->process(out.data(), kFrames, kChannels);
+    // About twice real time (1024 frames, 21 ms of audio, per 10 ms), so
+    // the meter thread keeps the ring from filling.
+    if (i % 2 == 1) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  const uint64_t allocations = alloc_counter::Stop();
+
+  graph->drain_loudness_meter();
+  EXPECT_TRUE(probe_counted);
+  EXPECT_EQ(allocations, 0u);
+  // The element's 1 s sine reached the meter.
+  EXPECT_GT(graph->meter_state()->loudness.lufs_integrated, -70.0f);
 }
 
 }  // namespace

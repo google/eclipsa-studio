@@ -57,8 +57,10 @@ class WavWriter {
   uint32_t write(const AudioBuffer& buffer, uint32_t frames);
 
   /// Finalize and close the file. Called automatically by the
-  /// destructor if not called explicitly.
-  void close();
+  /// destructor if not called explicitly. Returns false when writing the
+  /// pad byte, patching the header or closing the file fails, and true
+  /// otherwise, including when no file is open.
+  bool close();
 
   bool is_open() const { return open_; }
   uint64_t frames_written() const { return frames_written_; }

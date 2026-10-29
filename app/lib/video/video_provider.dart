@@ -166,9 +166,10 @@ class VideoNotifier extends Notifier<VideoState> {
 
   WindowController? _popoutWindow;
 
-  /// Whether the pop-out has registered its channel handler. Set by its
-  /// first 'requestSync' and cleared when it closes; [_sendToPopout] drops
-  /// everything but 'close' until then (ES-786).
+  /// Whether the pop-out has opened its file and asked for the playhead.
+  /// Set by its first 'requestSync' and cleared when it closes;
+  /// [_sendToPopout] drops everything but 'close' and 'appearance' until
+  /// then (ES-786).
   bool _popoutReady = false;
 
   /// Guards [shutdown] so it runs once — it is invoked both from
@@ -444,11 +445,15 @@ class VideoNotifier extends Notifier<VideoState> {
       _popoutWindow = null;
       _popoutReady = false;
     } on Object catch (e) {
-      // A pop-out still starting has no handler yet, and no backend.
-      if (_popoutReady) {
-        Log.w(LogCat.video, 'Pop-out shutdown before quit failed', e);
+      // A pop-out still starting has not registered its handler yet, so
+      // it rejects the call; that is expected. Any other failure, a
+      // timeout included, is a pop-out with a handler that did not
+      // confirm its backend stopped. One whose file failed to load has a
+      // handler and a backend.
+      if (isUnregisteredPopoutRejection('shutdownForQuit', e)) {
+        Log.d(LogCat.video, 'Pop-out had no handler at quit: $e');
       } else {
-        Log.d(LogCat.video, 'Pop-out not ready at quit: $e');
+        Log.w(LogCat.video, 'Pop-out shutdown before quit failed', e);
       }
     }
   }
@@ -787,7 +792,7 @@ class VideoNotifier extends Notifier<VideoState> {
       // Listen for 'closed' / 'requestSync' before the window exists. The
       // pop-out sends 'requestSync' once, after opening the file; if it
       // arrived before this handler, the pop-out would never be marked
-      // ready and every later message would be dropped.
+      // ready and every later transport message would be dropped.
       _popoutChannel.setMethodCallHandler(_handlePopoutCall);
       _popoutWindow = await WindowController.create(
         WindowConfiguration(arguments: args),
@@ -909,8 +914,8 @@ class VideoNotifier extends Notifier<VideoState> {
       _popoutChannel.invokeMethod<void>(method, arguments).catchError((
         Object e,
       ) {
-        if (isClosingPopoutRejection(method, e)) {
-          Log.d(LogCat.video, 'Pop-out closed before $method arrived');
+        if (isUnregisteredPopoutRejection(method, e)) {
+          Log.d(LogCat.video, 'Pop-out had no handler for $method');
         } else {
           Log.w(LogCat.video, 'Pop-out channel error ($method)', e);
         }
@@ -920,20 +925,28 @@ class VideoNotifier extends Notifier<VideoState> {
 }
 
 /// Whether a message for the pop-out is dropped rather than sent. Until
-/// the pop-out has registered its channel handler (its first
-/// 'requestSync', whose reply carries the playhead and appearance), a
-/// message would be rejected, so only 'close' goes through (ES-786).
+/// the pop-out has opened its file and sent its first 'requestSync',
+/// whose reply carries the playhead and appearance, transport messages
+/// are dropped (ES-786). 'close' always goes through. 'appearance' does
+/// too: a pop-out whose file fails to load never sends 'requestSync',
+/// and it still has to follow the main window's theme and font size. An
+/// 'appearance' that arrives before the pop-out registers its handler is
+/// rejected; the pop-out starts in the theme and font size it read from
+/// the preferences file in main(), and a successful load also gets them
+/// in the 'requestSync' reply.
 @visibleForTesting
 bool dropPopoutMessage(String method, {required bool ready}) =>
-    !ready && method != 'close';
+    !ready && method != 'close' && method != appearanceMethod;
 
 /// Whether [error] is the rejection of a message that reached the pop-out
-/// after it unregistered its handler while closing. A per-tick 'sync' or a
-/// 'seek' can race the close; that is expected and logged at debug. A
-/// rejected 'close' is not: it leaves an orphan window (see
-/// `_closePopoutWindow`), so it stays a warning (ES-786).
+/// while it had no handler registered: after it unregistered while
+/// closing, or, for 'appearance' and 'shutdownForQuit', before it
+/// registered at launch. A per-tick 'sync' or a 'seek' can race the
+/// close; that is expected and logged at debug. A rejected 'close' is
+/// not: it leaves an orphan window (see `_closePopoutWindow`), so it stays
+/// a warning (ES-786).
 @visibleForTesting
-bool isClosingPopoutRejection(String method, Object error) =>
+bool isUnregisteredPopoutRejection(String method, Object error) =>
     method != 'close' &&
     error is WindowChannelException &&
     error.code == 'CHANNEL_UNREGISTERED';

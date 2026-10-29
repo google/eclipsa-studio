@@ -14,9 +14,11 @@
 
 #include "adm_import/scene/adm_adapter.h"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "adm_import/adm/adm_model.h"
@@ -623,6 +625,70 @@ TEST(AdmAdapter, ObjectKeyframesKeepAuthoredCoordinateSystem) {
 TEST(AdmAdapter, FailsWhenNoBedReachable) {
   adm::Model empty;
   EXPECT_FALSE(BuildSceneFromAdm(empty).ok());
+}
+
+// A bed of kChannels channels, each with its own channel format and chna
+// row. Each channel ref used to scan the channel formats, and the chna
+// rows with a channel id built per row, so the scene build was quadratic
+// in the channel count (ES-849).
+TEST(AdmAdapter, LargeBedBuildsInLinearTime) {
+  constexpr int kChannels = 20000;
+  adm::Model model;
+  adm::AudioObject obj;
+  obj.id = "AO_1";
+  obj.pack_format_id_refs = {"AP_1"};
+  model.objects.push_back(std::move(obj));
+  adm::AudioPackFormat pack;
+  pack.id = "AP_1";
+  pack.type = adm::TypeDefinition::kDirectSpeakers;
+  for (int i = 0; i < kChannels; ++i) {
+    const std::string n = std::to_string(i);
+    pack.channel_format_id_refs.push_back("AC_" + n);
+    adm::AudioChannelFormat ch;
+    ch.id = "AC_" + n;
+    ch.type = adm::TypeDefinition::kDirectSpeakers;
+    adm::AudioBlockFormat block;
+    block.speaker_label = "M+030";
+    ch.blocks.push_back(std::move(block));
+    model.channels.push_back(std::move(ch));
+    adm::ChnaEntry row;
+    row.track_index = static_cast<uint16_t>(i + 1);
+    row.uid = "ATU_" + n;
+    row.track_ref = "AT_" + n + "_01";
+    row.pack_ref = "AP_1";
+    model.chna.push_back(std::move(row));
+  }
+  model.packs.push_back(std::move(pack));
+
+  const auto start = std::chrono::steady_clock::now();
+  auto scene = BuildSceneFromAdm(model);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  ASSERT_TRUE(scene.ok()) << scene.status();
+  ASSERT_EQ(scene->sources.size(), size_t{kChannels});
+  EXPECT_EQ(scene->sources.front().track_index, 1);
+  EXPECT_EQ(scene->sources.back().track_index, kChannels);
+  EXPECT_LT(elapsed, std::chrono::seconds(5));
+}
+
+// A programme that references kContents contents. Each content ref used
+// to scan every content (ES-849).
+TEST(AdmAdapter, ManyContentsResolveInLinearTime) {
+  constexpr int kContents = 80000;
+  adm::Model model = BuildModel();  // APR_1 -> ACO_1 -> AO_1, a 4-channel bed.
+  ASSERT_EQ(model.programmes.size(), 1u);
+  for (int i = 0; i < kContents; ++i) {
+    adm::AudioContent content;
+    content.id = "ACO_X" + std::to_string(i);
+    model.programmes[0].content_id_refs.push_back(content.id);
+    model.contents.push_back(std::move(content));
+  }
+
+  const auto start = std::chrono::steady_clock::now();
+  auto scene = BuildSceneFromAdm(model);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  ASSERT_TRUE(scene.ok()) << scene.status();
+  EXPECT_EQ(scene->sources.size(), 4u);
+  EXPECT_LT(elapsed, std::chrono::seconds(5));
 }
 
 }  // namespace

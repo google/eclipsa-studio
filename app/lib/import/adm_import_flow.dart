@@ -36,6 +36,7 @@ import '../widgets/dialog_shell.dart';
 import '../widgets/eyebrow_label.dart';
 import '../widgets/ok_dialog.dart';
 import '../widgets/youtube_support_badge.dart';
+import '../workspace/workspace_actions.dart' show startCreatorSessionWithWav;
 import '../workspace/workspace_close.dart';
 import '../workspace/workspace_mode.dart';
 import 'adm_import_bridge.dart';
@@ -73,9 +74,22 @@ final admImportBridgeProvider = Provider<AdmImportBridge>((ref) {
 /// progress/cancel) → verify channel count → dirty-guard → new session seeded
 /// with the element → save. The render runs on a native worker thread, so
 /// nothing here blocks the UI, and the current session is only replaced *after*
-/// a successful render.
+/// a successful render. A WAV without ADM metadata leaves the dialog through
+/// "Open as Plain WAV" instead, into the landing card's plain-WAV path (ES-1008).
 
-class _AdmImportConfig {
+/// What the config dialog closes with: an import to run, or opening a WAV
+/// without ADM metadata as a plain WAV (ES-1008).
+sealed class _AdmDialogResult {
+  const _AdmDialogResult();
+}
+
+/// The file has no ADM metadata, and the user chose to open it the way the
+/// landing card opens a dropped plain WAV.
+class _OpenAsPlainWav extends _AdmDialogResult {
+  const _OpenAsPlainWav();
+}
+
+class _AdmImportConfig extends _AdmDialogResult {
   const _AdmImportConfig({
     required this.target,
     required this.profile,
@@ -142,11 +156,29 @@ Future<void> startImportAdmFlow(
   // A click outside the panel does not close it (ES-612, app-wide since
   // ES-639): it would discard the folder and name and abandon the import.
   // Esc cancels, as the Cancel button does.
-  final cfg = await showAppDialog<_AdmImportConfig>(
+  final result = await showAppDialog<_AdmDialogResult>(
     context: context,
-    builder: (_) => _AdmImportConfigDialog(inPath: inPath, probing: probing),
+    builder: (_) => AdmImportConfigDialog(inPath: inPath, probing: probing),
   );
-  if (cfg == null) return;
+  final _AdmImportConfig cfg;
+  switch (result) {
+    case null:
+      return;
+    case _OpenAsPlainWav():
+      // Nothing has switched yet, so the plain-WAV path runs its own
+      // checks, format dialog and dirty-guard from here, as for a dropped
+      // WAV.
+      Log.i(
+        LogCat.app,
+        'ADM import: opening ${p.basename(inPath)} as plain WAV',
+      );
+      if (context.mounted) {
+        await startCreatorSessionWithWav(context, ref, inPath);
+      }
+      return;
+    case final _AdmImportConfig config:
+      cfg = config;
+  }
   // Import is only enabled once the probe has landed, so this is already
   // complete; awaiting it here keeps the flow's one reader of the probe map
   // (the summary below) off the dialog's state.
@@ -315,21 +347,20 @@ String _uniqueWavPath(String dir, String base) {
 /// warnings it lists, or the reason the file could not be read.
 ///
 /// One record rather than a raw future of JSON, because the dialog opens
-/// before the probe finishes and has to render all three outcomes — reading,
-/// read, unreadable — without re-deriving them per frame.
+/// before the probe finishes and has to render every outcome — reading,
+/// read, unreadable, no ADM metadata — without re-deriving them per frame.
+///
+/// `plainWav` is true for a WAV without ADM metadata (ES-1008): `data` then
+/// holds its format and an empty scene, and the dialog offers to open the
+/// file as a plain WAV in place of the import.
 typedef AdmProbeOutcome = ({
   Map<String, dynamic>? probe,
   AdmProbeData? data,
   List<AdmImportWarning> warnings,
   String? error,
+  bool plainWav,
 });
 
-/// Probes [path] off the UI isolate, decodes it, and logs its warnings.
-///
-/// Never throws and never rejects: every failure comes back as [error], the
-/// one string the dialog shows in place of the preview. The caller starts
-/// this and shows the dialog immediately, so an error raised here has no
-/// dialog to interrupt.
 /// Runs [body] with the live renderer held offline-exclusive, the way the
 /// export dialog and the Loudness Report run their passes. The ADM probe
 /// and the bed render each drive a private OAR instance (a helper isolate,
@@ -360,9 +391,23 @@ Future<R> holdRendererForImport<R>(
   }
 }
 
+const _kUnreadable = 'Could not read the ADM metadata.';
+
+AdmProbeOutcome _probeFailed(String error) => (
+  probe: null,
+  data: null,
+  warnings: const <AdmImportWarning>[],
+  error: error,
+  plainWav: false,
+);
+
+/// Probes [path] off the UI isolate, decodes it, and logs its warnings.
+///
+/// Never throws and never rejects: every failure comes back as `error`, the
+/// one string the dialog shows in place of the preview. The caller starts
+/// this and shows the dialog immediately, so an error raised here has no
+/// dialog to interrupt.
 Future<AdmProbeOutcome> _probeAdm(String path) async {
-  const noWarnings = <AdmImportWarning>[];
-  const unreadable = 'Could not read the ADM metadata.';
   String json;
   try {
     json = await AdmImportBridge.probeJsonAsync(path);
@@ -370,20 +415,31 @@ Future<AdmProbeOutcome> _probeAdm(String path) async {
     // The probe runs in a helper isolate (re-opens the dylib); a spawn/load
     // failure rejects the future.
     Log.w(LogCat.app, 'ADM probe isolate failed for $path', e);
-    return (probe: null, data: null, warnings: noWarnings, error: unreadable);
+    return _probeFailed(_kUnreadable);
   }
+  return decodeAdmProbe(path, json);
+}
+
+/// Decodes the probe's [json] for [path] and logs its warnings. Never
+/// throws: invalid JSON and a failed probe come back as `error`.
+@visibleForTesting
+AdmProbeOutcome decodeAdmProbe(String path, String json) {
   final Map<String, dynamic> probe;
   try {
     probe = jsonDecode(json) as Map<String, dynamic>;
   } on FormatException catch (e) {
     Log.w(LogCat.app, 'ADM probe returned invalid JSON', e);
-    return (probe: null, data: null, warnings: noWarnings, error: unreadable);
+    return _probeFailed(_kUnreadable);
   }
   if (probe['ok'] != true) {
     final err = probe['error'] as String? ?? 'Unknown error.';
     Log.w(LogCat.app, 'ADM probe failed for $path: $err');
-    return (probe: null, data: null, warnings: noWarnings, error: err);
+    return _probeFailed(err);
   }
+  // A WAV without an axml chunk probes as ok with `adm: null`, its format,
+  // an empty scene and no warnings. The render would fail on it (ES-1008).
+  final plainWav = probe['adm'] == null;
+  if (plainWav) Log.i(LogCat.app, 'ADM probe: $path has no ADM metadata');
 
   // Import warnings (non-spec metadata, fallbacks, dropped channels): every
   // entry goes to the log, at its own severity — informational notices like
@@ -410,6 +466,7 @@ Future<AdmProbeOutcome> _probeAdm(String path) async {
     data: AdmProbeData.decode(probe),
     warnings: warnings,
     error: null,
+    plainWav: plainWav,
   );
 }
 
@@ -498,8 +555,15 @@ const double _kDialogW = 1000;
 const double _kPreviewPaneW = 574;
 const double _kFlowPaneW = 354;
 
-class _AdmImportConfigDialog extends ConsumerStatefulWidget {
-  const _AdmImportConfigDialog({required this.inPath, required this.probing});
+/// The Import ADM dialog. It closes with an `_AdmImportConfig` from Import,
+/// with `_OpenAsPlainWav` for a WAV without ADM metadata, or with null.
+@visibleForTesting
+class AdmImportConfigDialog extends ConsumerStatefulWidget {
+  const AdmImportConfigDialog({
+    super.key,
+    required this.inPath,
+    required this.probing,
+  });
   final String inPath;
 
   /// The probe, still running when the dialog opens. Everything the dialog
@@ -509,12 +573,11 @@ class _AdmImportConfigDialog extends ConsumerStatefulWidget {
   final Future<AdmProbeOutcome> probing;
 
   @override
-  ConsumerState<_AdmImportConfigDialog> createState() =>
+  ConsumerState<AdmImportConfigDialog> createState() =>
       _AdmImportConfigDialogState();
 }
 
-class _AdmImportConfigDialogState
-    extends ConsumerState<_AdmImportConfigDialog> {
+class _AdmImportConfigDialogState extends ConsumerState<AdmImportConfigDialog> {
   String? _destDir;
   late final TextEditingController _nameCtl;
 
@@ -622,7 +685,10 @@ class _AdmImportConfigDialogState
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
     final name = _nameCtl.text.trim();
-    final data = _probed?.data;
+    // A WAV without ADM metadata has a format but no scene (ES-1008): the
+    // preview pane says so in place of the preview, and Import stays off.
+    final plainWav = _probed?.plainWav ?? false;
+    final data = plainWav ? null : _probed?.data;
     // Import waits for the probe: it is what says the file is readable, and
     // pressing it before the preview exists would commit to a render with
     // nothing seen. The folder and name can be filled in meanwhile.
@@ -660,7 +726,12 @@ class _AdmImportConfigDialogState
           SizedBox(
             width: _kPreviewPaneW,
             child: data == null
-                ? _ProbePanePlaceholder(error: _probed?.error)
+                ? _ProbePanePlaceholder(
+                    error: _probed?.error,
+                    onOpenAsPlainWav: plainWav
+                        ? () => Navigator.pop(context, const _OpenAsPlainWav())
+                        : null,
+                  )
                 : Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -685,7 +756,7 @@ class _AdmImportConfigDialogState
           const SizedBox(width: T.gapXl),
           SizedBox(
             width: _kFlowPaneW,
-            child: _importFlowColumn(name, canImport),
+            child: _importFlowColumn(name, canImport, plainWav),
           ),
         ],
       ),
@@ -694,7 +765,7 @@ class _AdmImportConfigDialogState
 
   /// The import flow itself (profile → bed (fixed) → folder → name →
   /// report). The report takes the column's leftover height.
-  Widget _importFlowColumn(String name, bool canImport) {
+  Widget _importFlowColumn(String name, bool canImport, bool plainWav) {
     const target = kAdmRenderTarget;
     // The bed WAV tracks the ADM source name (+ suffix), not the session name,
     // and is de-duped in the chosen folder exactly as the import is, so the
@@ -711,33 +782,46 @@ class _AdmImportConfigDialogState
     final fileSpecs = data == null ? '' : admFileSpecs(data);
     final creates = canImport ? 'Creates:\n$name.esp\n$wavName.wav' : null;
     final warnings = _probed?.warnings ?? const <AdmImportWarning>[];
+    final fileSection = [
+      // The file being imported, as a section of this column rather
+      // than in the dialog's subtitle slot: a subtitle spans the whole
+      // dialog and pushes the preview down a row for a line that only
+      // needs one column's width.
+      EyebrowLabel(plainWav ? 'File' : 'ADM file'),
+      const SizedBox(height: T.gapPair),
+      // Name and numbers on separate rows: run together they wrap at
+      // whatever point the name happens to end, so the numbers start
+      // mid-line and a longer name moves them. The full name is on
+      // hover for when it elides.
+      Tooltip(
+        message: fileName,
+        child: Text(
+          fileName,
+          style: T.styleBody,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+      const SizedBox(height: 2),
+      // Held, not hidden, while the probe runs: the numbers land a second
+      // or two after the dialog opens, and letting the row appear then
+      // would shift every section under it down a line.
+      Text(fileSpecs.isEmpty ? '—' : fileSpecs, style: T.styleBodySecondary),
+    ];
+    // A WAV without ADM metadata has nothing to import (ES-1008). Open as
+    // Plain WAV would drop a profile, folder or name chosen here, and the
+    // plain-WAV path asks for what it needs, so the column shows the file
+    // alone.
+    if (plainWav) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: fileSection,
+      );
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // The file being imported, as a section of this column rather
-        // than in the dialog's subtitle slot: a subtitle spans the whole
-        // dialog and pushes the preview down a row for a line that only
-        // needs one column's width.
-        const EyebrowLabel('ADM file'),
-        const SizedBox(height: T.gapPair),
-        // Name and numbers on separate rows: run together they wrap at
-        // whatever point the name happens to end, so the numbers start
-        // mid-line and a longer name moves them. The full name is on
-        // hover for when it elides.
-        Tooltip(
-          message: fileName,
-          child: Text(
-            fileName,
-            style: T.styleBody,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        const SizedBox(height: 2),
-        // Held, not hidden, while the probe runs: the numbers land a second
-        // or two after the dialog opens, and letting the row appear then
-        // would shift every section under it down a line.
-        Text(fileSpecs.isEmpty ? '—' : fileSpecs, style: T.styleBodySecondary),
+        ...fileSection,
         const SizedBox(height: T.gapSection),
         const EyebrowLabel('IAMF profile'),
         const SizedBox(height: T.gapPair),
@@ -880,16 +964,25 @@ class _AdmImportConfigDialogState
 /// dialog is already open by then, and popping it to raise a modal would
 /// flash. The Import button stays disabled, so this message is what the
 /// column has to say.
+///
+/// A WAV without ADM metadata lands here as well (ES-1008), with the action
+/// that opens it as a plain WAV.
 class _ProbePanePlaceholder extends ConsumerWidget {
-  const _ProbePanePlaceholder({this.error});
+  const _ProbePanePlaceholder({this.error, this.onOpenAsPlainWav});
 
-  /// Why the file could not be read. Null while the probe is still running.
+  /// Why the file could not be read. Null while the probe is still running
+  /// and for a WAV without ADM metadata.
   final String? error;
+
+  /// Set when the file is a WAV without ADM metadata: the pane says so and
+  /// offers this action.
+  final VoidCallback? onOpenAsPlainWav;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
+    final plainWav = onOpenAsPlainWav != null;
     final failed = error != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -908,7 +1001,9 @@ class _ProbePanePlaceholder extends ConsumerWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (failed)
+                  if (plainWav)
+                    Icon(Icons.info_outline, color: T.textSecondary, size: 28)
+                  else if (failed)
                     Icon(Icons.error_outline, color: T.errorRed, size: 28)
                   else
                     const SizedBox(
@@ -920,10 +1015,26 @@ class _ProbePanePlaceholder extends ConsumerWidget {
                   // The file's name is already in the flow column, so this
                   // says only what is happening to it.
                   Text(
-                    error ?? 'Reading ADM metadata…',
+                    plainWav
+                        ? 'This WAV file has no ADM metadata.'
+                        : error ?? 'Reading ADM metadata…',
                     style: T.styleBody,
                     textAlign: TextAlign.center,
                   ),
+                  if (plainWav) ...[
+                    const SizedBox(height: T.gapPair),
+                    Text(
+                      'Open as Plain WAV starts a new session with the file '
+                      'as its first element.',
+                      style: T.styleBodySecondary,
+                      textAlign: TextAlign.center,
+                    ),
+                    const SizedBox(height: T.gapSection),
+                    AppButton(
+                      label: 'Open as Plain WAV',
+                      onPressed: onOpenAsPlainWav,
+                    ),
+                  ],
                 ],
               ),
             ),

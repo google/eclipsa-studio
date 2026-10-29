@@ -41,6 +41,7 @@ EXPORTS
     eclipsa_studio_element_set_mix_excluded
     eclipsa_studio_element_set_mix_gain
     eclipsa_studio_element_set_input_routing
+    eclipsa_studio_element_set_channel_order
     eclipsa_studio_element_set_object_position
     eclipsa_studio_element_seed_mix_gain
     eclipsa_studio_element_set_type
@@ -48,6 +49,7 @@ EXPORTS
     eclipsa_studio_set_output_mix_gain
     eclipsa_studio_seed_output_mix_gain
     eclipsa_studio_set_monitor_dim
+    eclipsa_studio_set_output_solo_mute
     eclipsa_studio_commit_rendering_config
 
     ; ── Transport ─────────────────────────────────────────────────
@@ -126,6 +128,7 @@ EXPORTS
     eclipsa_studio_mix_renderer_create
     eclipsa_studio_mix_renderer_add_element
     eclipsa_studio_mix_renderer_set_object_position
+    eclipsa_studio_mix_renderer_set_element_channel_order
     eclipsa_studio_mix_renderer_set_output_gain
     eclipsa_studio_mix_renderer_measure
     eclipsa_studio_mix_renderer_trace_len
@@ -133,6 +136,15 @@ EXPORTS
     eclipsa_studio_mix_renderer_loudness_range
     eclipsa_studio_mix_renderer_element_clip_stats
     eclipsa_studio_mix_renderer_destroy
+    eclipsa_studio_iamf_measurer_create
+    eclipsa_studio_iamf_measurer_include_element
+    eclipsa_studio_iamf_measurer_set_output_gain
+    eclipsa_studio_iamf_measurer_measure
+    eclipsa_studio_iamf_measurer_trace_len
+    eclipsa_studio_iamf_measurer_copy_trace
+    eclipsa_studio_iamf_measurer_loudness_range
+    eclipsa_studio_iamf_measurer_last_error
+    eclipsa_studio_iamf_measurer_destroy
 
     ; ── SH decoder (visualization) ────────────────────────────────
     eclipsa_studio_sh_decoder_create

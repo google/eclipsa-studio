@@ -25,13 +25,17 @@ import '../loudness/programme_loudness.dart';
 import '../meters/meter_provider.dart';
 import '../meters/multichannel_meter_painter.dart';
 import '../models/audio_element_enums.dart';
+import '../session/session_provider.dart';
 import '../state.dart';
 import '../theme.dart';
 import '../util/monitoring_tooltips.dart';
+import '../util/text_width.dart';
 import '../widgets/ae_type_badge.dart';
 import '../widgets/app_button.dart';
 import '../widgets/app_dialog.dart';
+import '../widgets/console_chip.dart';
 import '../widgets/console_widgets.dart';
+import '../widgets/gain_knob.dart';
 import '../widgets/inline_edit_field.dart';
 import '../widgets/remove_x_button.dart';
 import '../widgets/solo_mute_button.dart';
@@ -110,20 +114,18 @@ class MixView extends ConsumerWidget {
           Container(height: 1, color: T.border),
           _HeaderBar(mix: mix),
           Container(height: 1, color: T.border),
-          // Console area
+          // Console area, at the full width so the strips start at the
+          // left edge: the Column centres a child narrower than itself,
+          // and the strips' scroll view is as wide as the strips.
           Expanded(
-            child: Row(
-              children: [
-                Expanded(
-                  child: _ChannelStripArea(
-                    mix: mix,
-                    subMix: sub,
-                    subMixIndex: subIdx,
-                    elements: elements,
-                  ),
-                ),
-                _MasterStrip(mix: mix, subMix: sub, subMixIndex: subIdx),
-              ],
+            child: SizedBox(
+              width: double.infinity,
+              child: _ChannelStripArea(
+                mix: mix,
+                subMix: sub,
+                subMixIndex: subIdx,
+                elements: elements,
+              ),
             ),
           ),
           Container(height: 1, color: T.border),
@@ -158,6 +160,28 @@ class MixView extends ConsumerWidget {
 // Tab Bar
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The "+" that adds a mix presentation or a layout: a plain
+/// [ConsoleChip], a button beside the selected chips it adds to.
+class _AddChip extends StatelessWidget {
+  final String tooltip;
+  final VoidCallback onTap;
+
+  const _AddChip({required this.tooltip, required this.onTap});
+
+  @override
+  // The chip announces [tooltip] as its label, so the tooltip itself
+  // is left out of the semantics.
+  Widget build(BuildContext context) => Tooltip(
+    message: tooltip,
+    excludeFromSemantics: true,
+    child: ConsoleChip(
+      onTap: onTap,
+      semanticLabel: tooltip,
+      child: const Icon(Icons.add),
+    ),
+  );
+}
+
 class _MixTabBar extends ConsumerWidget {
   final List<Mix> mixes;
   final int activeMix;
@@ -175,7 +199,8 @@ class _MixTabBar extends ConsumerWidget {
           ...mixes.asMap().entries.map(
             (e) => _buildTab(context, ref, e.key, e.value),
           ),
-          GestureDetector(
+          _AddChip(
+            tooltip: 'Add mix presentation',
             onTap: () {
               final idx = ref
                   .read(mixesNotifierProvider.notifier)
@@ -183,13 +208,6 @@ class _MixTabBar extends ConsumerWidget {
               ref.read(activeMixProvider.notifier).set(idx);
               ref.read(activeSubMixProvider.notifier).set(0);
             },
-            child: Padding(
-              padding: const EdgeInsets.only(left: 4, top: 2),
-              child: Text(
-                '+',
-                style: TextStyle(fontSize: T.fontTitle, color: T.textTertiary),
-              ),
-            ),
           ),
         ],
       ),
@@ -204,48 +222,52 @@ class _MixTabBar extends ConsumerWidget {
     // Never offer delete on the last remaining mix presentation.
     final canDelete = mixes.length > 1;
 
-    // IntrinsicWidth keeps the tab sized to its label (clamped by the
-    // constraints) while the Expanded text pushes the ✕ to the tab's
-    // right edge; the fixed-height Row vertically centers both.
+    void select() {
+      // A tap on the active tab keeps its sub-mix, as in the top bar's
+      // mix switch.
+      if (index == ref.read(activeMixProvider)) return;
+      ref.read(activeMixProvider.notifier).set(index);
+      ref.read(activeSubMixProvider.notifier).set(0);
+    }
+
+    // A ConsoleChip, selected for the active mix presentation, as the
+    // Renderer view draws the active monitoring target. The grab cursor
+    // is the app's cue for drag to reorder (elements list, settings
+    // layouts). IntrinsicWidth keeps the tab sized to its label
+    // (clamped by the constraints) while the Expanded text pushes the ✕
+    // to the tab's right edge.
     final tabCore = IntrinsicWidth(
-      child: Container(
+      child: ConstrainedBox(
         constraints: const BoxConstraints(minWidth: 100, maxWidth: 180),
-        height: 26,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: active ? T.bgSelected : Colors.transparent,
-          borderRadius: BorderRadius.circular(T.radiusSm),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                mix.name,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: T.fontBodyL,
-                  color: active ? T.purpleLight : T.textTertiary,
+        child: ConsoleChip(
+          selected: active,
+          onTap: select,
+          semanticLabel: mix.name,
+          mouseCursor: SystemMouseCursors.grab,
+          alignment: Alignment.centerLeft,
+          child: Row(
+            children: [
+              Expanded(child: Text(mix.name)),
+              // ✕ on the active tab only — delete lives next to the
+              // thing it deletes, without cluttering every tab (ES-180).
+              if (active && canDelete) ...[
+                const SizedBox(width: 4),
+                RemoveXButton(
+                  // Full tab height for an easy target.
+                  height: ConsoleChip.height,
+                  color: ConsoleChip.ink(selected: true),
+                  onTap: () => _confirmDeleteMix(context, ref, mix),
                 ),
-              ),
-            ),
-            // ✕ on the active tab only — delete lives next to the thing
-            // it deletes, without cluttering every tab (ES-180).
-            if (active && canDelete) ...[
-              const SizedBox(width: 4),
-              RemoveXButton(
-                // Full tab height for an easy target.
-                height: 26,
-                onTap: () => _confirmDeleteMix(context, ref, mix),
-              ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
 
     return Padding(
       key: ValueKey(mix.id),
-      // No vertical offset: the 36 px bar row centers the 26 px pill,
+      // No vertical offset: the 36 px bar row centers the 24 px chip,
       // keeping it level with the layouts bar's chips below (ES-314).
       padding: const EdgeInsets.only(right: 6),
       child: Draggable<int>(
@@ -259,24 +281,13 @@ class _MixTabBar extends ConsumerWidget {
           onWillAcceptWithDetails: (d) => d.data != index,
           onAcceptWithDetails: (d) => _moveTab(ref, d.data, index),
           builder: (context, candidates, _) => Container(
-            decoration: candidates.isNotEmpty
+            foregroundDecoration: candidates.isNotEmpty
                 ? BoxDecoration(
                     borderRadius: BorderRadius.circular(T.radiusSm),
                     border: Border.all(color: T.purple, width: 1),
                   )
                 : null,
-            child: GestureDetector(
-              onTap: () {
-                ref.read(activeMixProvider.notifier).set(index);
-                ref.read(activeSubMixProvider.notifier).set(0);
-              },
-              // Grab cursor + tooltip: the app's standard cue for
-              // drag-to-reorder (elements list, settings layouts).
-              child: MouseRegion(
-                cursor: SystemMouseCursors.grab,
-                child: Tooltip(message: 'Drag to reorder', child: tabCore),
-              ),
-            ),
+            child: Tooltip(message: 'Drag to reorder', child: tabCore),
           ),
         ),
       ),
@@ -308,7 +319,11 @@ class _MixTabBar extends ConsumerWidget {
 /// mix and re-points the active selection at the previous tab (sub-mix
 /// index reset to 0). Shared logic formerly on the header bar's Delete
 /// button; now reached from the tab ✕ (ES-180).
+///
+/// Another session can be opened from the native menu while the dialog
+/// is up; Delete then only closes the dialog.
 void _confirmDeleteMix(BuildContext context, WidgetRef ref, Mix mix) {
+  final sameSession = ref.read(sessionProvider.notifier).sessionGuard();
   showAppDialog(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -329,16 +344,41 @@ void _confirmDeleteMix(BuildContext context, WidgetRef ref, Mix mix) {
           role: AppButtonRole.destructive,
           onPressed: () {
             Navigator.pop(ctx);
+            if (!sameSession()) return;
             final mixes = ref.read(mixesNotifierProvider);
             final i = mixes.indexWhere((m) => m.id == mix.id);
             ref.read(mixesNotifierProvider.notifier).removeMix(mix.id);
             ref.read(activeMixProvider.notifier).set(i > 0 ? i - 1 : 0);
             ref.read(activeSubMixProvider.notifier).set(0);
+            // Deleting the mix at index 0 leaves both indices as they
+            // were, so AppShell's index listeners do not push the mix
+            // that took its place.
+            final engine = ref.read(eclipsaStudioEngineProvider);
+            final sub = activeSubMixOf(
+              ref.read(mixesNotifierProvider),
+              ref.read(activeMixProvider),
+              ref.read(activeSubMixProvider),
+            );
+            if (engine != null && sub != null) {
+              pushSubMixSettings(engine, sub, ref.read(elementsProvider));
+            }
           },
         ),
       ],
     ),
   );
+}
+
+/// Whether the mix presentation with [mixId] is the active one and
+/// [subMixIndex] is its active sub-mix, read at call time. Only edits to
+/// the active sub-mix go to the engine at once.
+bool _isActiveSubMix(WidgetRef ref, int mixId, int subMixIndex) {
+  final activeMixIdx = ref.read(activeMixProvider);
+  final mixes = ref.read(mixesNotifierProvider);
+  return activeMixIdx >= 0 &&
+      activeMixIdx < mixes.length &&
+      mixes[activeMixIdx].id == mixId &&
+      ref.read(activeSubMixProvider) == subMixIndex;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -358,7 +398,8 @@ class _HeaderBar extends ConsumerWidget {
       child: Row(
         children: [
           // Name
-          Text('NAME  ', style: T.styleLabel),
+          Text('NAME', style: T.styleSectionLabel),
+          const SizedBox(width: T.gapSm),
           _InlineEdit(
             value: mix.name,
             width: 160,
@@ -368,7 +409,8 @@ class _HeaderBar extends ConsumerWidget {
           ),
           const SizedBox(width: 16),
           // Language
-          Text('LANG  ', style: T.styleLabel),
+          Text('LANG', style: T.styleSectionLabel),
+          const SizedBox(width: T.gapSm),
           ConsoleSelector<String>(
             value: mix.language,
             items: _languages.map((l) => (l, l)).toList(),
@@ -499,14 +541,7 @@ class _ChannelStrip extends ConsumerWidget {
         s.headphonesMode != settings.headphonesMode ||
         s.binauralProfile != settings.binauralProfile;
     if (includedChanged || mixGainChanged || renderingChanged) {
-      final activeMixIdx = ref.read(activeMixProvider);
-      final mixes = ref.read(mixesNotifierProvider);
-      final isActive =
-          activeMixIdx >= 0 &&
-          activeMixIdx < mixes.length &&
-          mixes[activeMixIdx].id == mixId &&
-          ref.read(activeSubMixProvider) == subMixIndex;
-      if (isActive) {
+      if (_isActiveSubMix(ref, mixId, subMixIndex)) {
         final engine = ref.read(eclipsaStudioEngineProvider);
         if (includedChanged) {
           engine?.setElementMixExcluded(element.id, !s.included);
@@ -535,10 +570,12 @@ class _ChannelStrip extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final color = Color(element.color);
     final metrics = ref.watch(animatedMetricsProvider);
-    final engineOrder = ref.watch(engineOrderProvider);
-    final meterIdx = engineOrder.indexOf(element.id);
+    // The tick loop builds the meter rows in elementsProvider order,
+    // not in engine slot order.
+    final meterIdx = ref
+        .watch(elementsProvider)
+        .indexWhere((e) => e.id == element.id);
     final channelLevels =
         meterIdx >= 0 && meterIdx < metrics.sidebarMeters.length
         ? metrics.sidebarMeters[meterIdx]
@@ -600,31 +637,20 @@ class _ChannelStrip extends ConsumerWidget {
               children: [
                 Row(
                   children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: color,
-                      ),
-                    ),
-                    const SizedBox(width: T.gapPair),
-                    Expanded(
-                      child: Text(
-                        element.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: T.fontBody,
-                          color: T.textValue,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
+                    Expanded(child: _CardName(element.name)),
                     RemoveXButton(onTap: () => _removeFromMix(ref)),
                   ],
                 ),
                 const SizedBox(height: 4),
-                AeTypeBadge(type: element.type, layout: element.layout),
+                // The strip is narrow enough that "Channel · Binaural"
+                // ellipsizes; the tooltip carries the full line.
+                Tooltip(
+                  message: '${element.type} · ${element.layout}',
+                  child: AeTypeBadge(
+                    type: element.type,
+                    layout: element.layout,
+                  ),
+                ),
               ],
             ),
           ),
@@ -800,8 +826,9 @@ class _ChannelStrip extends ConsumerWidget {
     final layout = el.layout.toLowerCase();
     if (layout.contains('mono') || layout.contains('object')) return 1;
     if (layout.contains('stereo') || layout.contains('binaural')) return 2;
+    if (layout.contains('10.2.9.3')) return 24;
     if (layout.contains('9.1.6')) return 16;
-    if (layout.contains('7.1.5.4')) return 16;
+    if (layout.contains('7.1.5.4')) return 17;
     if (layout.contains('7.1.4')) return 12;
     if (layout.contains('7.1.2')) return 10;
     if (layout.contains('7.1')) return 8;
@@ -814,6 +841,62 @@ class _ChannelStrip extends ConsumerWidget {
     if (layout.contains('2oa')) return 9;
     if (layout.contains('1oa')) return 4;
     return 2;
+  }
+}
+
+/// Element name in a channel strip's top row, ellipsized to the row.
+/// When the name does not fit, hovering it shows the full name.
+///
+/// The strip rebuilds on every meter tick, so the name's width is
+/// measured once and kept until the name, its style or the text scale
+/// changes.
+class _CardName extends StatefulWidget {
+  final String name;
+
+  const _CardName(this.name);
+
+  @override
+  State<_CardName> createState() => _CardNameState();
+}
+
+class _CardNameState extends State<_CardName> {
+  String? _name;
+  TextStyle? _style;
+  TextScaler? _scaler;
+  double _width = 0;
+
+  double _measure(TextStyle style) {
+    final merged = DefaultTextStyle.of(context).style.merge(style);
+    final scaler = MediaQuery.textScalerOf(context);
+    if (widget.name != _name || merged != _style || scaler != _scaler) {
+      _name = widget.name;
+      _style = merged;
+      _scaler = scaler;
+      _width = widestTextWidth(context, [widget.name], style);
+    }
+    return _width;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      fontSize: T.fontBody,
+      color: T.textValue,
+      fontWeight: FontWeight.w500,
+    );
+    final width = _measure(style);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final text = Text(
+          widget.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+        if (width <= constraints.maxWidth) return text;
+        return Tooltip(message: widget.name, child: text);
+      },
+    );
   }
 }
 
@@ -858,7 +941,7 @@ class _AddElementStrip extends ConsumerWidget {
                         height: 8,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: Color(el.color),
+                          color: aeTypeColor(el.type),
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -923,14 +1006,20 @@ class _AddElementStrip extends ConsumerWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Master Strip
+// Output Mix Gain
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _MasterStrip extends ConsumerWidget {
+/// The sub-mix's output mix gain, at the left of the LAYOUTS bar (ES-1006).
+/// IAMF applies it to the mix of the sub-mix's rendered elements, after
+/// their element mix gains and before loudness normalization and the
+/// limiter, and stores it in the sub-mix ahead of the layouts and their
+/// loudness. The Mix view draws no output meter: the engine meters only
+/// the monitoring render, which the Renderer view's output meter shows.
+class _OutputMixGainField extends ConsumerWidget {
   final Mix mix;
   final SubMix subMix;
   final int subMixIndex;
-  const _MasterStrip({
+  const _OutputMixGainField({
     required this.mix,
     required this.subMix,
     required this.subMixIndex,
@@ -948,90 +1037,33 @@ class _MasterStrip extends ConsumerWidget {
               m.updateSubMix(subMixIndex, (s) => s.copyWith(outputMixGain: v)),
         );
 
-    final activeMixIdx = ref.read(activeMixProvider);
-    final mixes = ref.read(mixesNotifierProvider);
-    final isActive =
-        activeMixIdx >= 0 &&
-        activeMixIdx < mixes.length &&
-        mixes[activeMixIdx].id == mix.id &&
-        ref.read(activeSubMixProvider) == subMixIndex;
-    if (isActive) {
+    if (_isActiveSubMix(ref, mix.id, subMixIndex)) {
       ref.read(eclipsaStudioEngineProvider)?.setOutputMixGain(v);
     }
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final metrics = ref.watch(animatedMetricsProvider);
-    final outputLevels = metrics.meters.length >= 2
-        ? metrics.meters.sublist(0, 2)
-        : List.filled(2, 0.0);
-    final outputPeaks = metrics.meterPeakHolds.length >= 2
-        ? metrics.meterPeakHolds.sublist(0, 2)
-        : null;
-    final outputClips = metrics.outputClips.length >= 2
-        ? metrics.outputClips.sublist(0, 2)
-        : null;
-
-    return Container(
-      width: 90,
-      decoration: BoxDecoration(
-        color: T.bgSurface,
-        border: Border(left: BorderSide(color: T.border)),
-      ),
-      child: Column(
+    // The knob and its value field, as the Elements view pairs a
+    // track's source gain knob with its readout.
+    return Tooltip(
+      message:
+          'Gain applied to the mix of all elements in this mix '
+          'presentation, written into the IAMF file. Drag the knob or click '
+          'the value to type a gain from −60 to +12 dB; double-click the '
+          'knob for 0 dB. The loudness figures on the layouts are measured '
+          'with it applied.',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            padding: const EdgeInsets.fromLTRB(8, 8, 8, 4),
-            child: Text(
-              'MASTER',
-              style: TextStyle(
-                fontSize: T.fontSmall,
-                color: T.textMuted,
-                letterSpacing: 0.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+          GainKnob(
+            gainDb: subMix.outputMixGain,
+            onChanged: (v) => _setOutputMixGain(ref, v),
+            size: 28,
           ),
-          Container(height: 1, color: T.border),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    flex: 3,
-                    child: MultichannelMeter(
-                      levels: outputLevels,
-                      peaks: outputPeaks,
-                      clipped: outputClips,
-                      onClipClear: () =>
-                          ref.read(clipClearEpochProvider.notifier).bump(),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  SizedBox(
-                    width: 28,
-                    child: Tooltip(
-                      message:
-                          'Output mix gain — written into IAMF metadata\n'
-                          'as the master gain for this mix presentation.',
-                      child: _VerticalFader(
-                        value: subMix.outputMixGain,
-                        min: -60,
-                        max: 12,
-                        defaultValue: 0,
-                        onChanged: (v) => _setOutputMixGain(ref, v),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Container(height: 1, color: T.border),
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+          const SizedBox(width: T.gapPair),
+          SizedBox(
+            width: 72,
             child: _EditableGainValue(
               value: subMix.outputMixGain,
               onChanged: (v) => _setOutputMixGain(ref, v),
@@ -1323,10 +1355,11 @@ class _EditableGainValueState extends ConsumerState<_EditableGainValue> {
 // Layouts Bar
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One layout chip of the LAYOUTS bar, with a tooltip that says what
-/// its figures are: the Loudness Report's measurement for this layout,
-/// which the export writes into the IAMF file. [child] is the chip's
-/// row (label, figures, remove button), built by the bar.
+/// One layout chip of the LAYOUTS bar, a plain [ConsoleChip], with a
+/// tooltip that says what its figures are: the Loudness Report's
+/// measurement for this layout, which the export writes into the IAMF
+/// file. [child] is the chip's row (label, figures, remove button),
+/// built by the bar.
 class _LayoutChip extends StatelessWidget {
   final String label;
   final ProgrammeLoudness? loudness;
@@ -1362,37 +1395,40 @@ class _LayoutChip extends StatelessWidget {
         : 'Integrated loudness and true peak for $label, measured for '
               'monitoring only; the layout was not tagged when the '
               'report ran.';
-    return Tooltip(
-      message: message,
-      child: Container(
-        margin: const EdgeInsets.only(right: 6),
-        height: 22,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        decoration: BoxDecoration(
-          color: T.purpleDim,
-          borderRadius: BorderRadius.circular(T.radiusSm),
-        ),
-        child: child,
+    // Plain: a tagged layout is a label in the theme's button face; the
+    // selected drawing marks the active tab and monitoring target.
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: Tooltip(
+        message: message,
+        child: ConsoleChip(child: child),
       ),
     );
   }
 }
 
-/// A layout's integrated loudness and true peak on its chip: mono,
-/// dimmed when stale, an em dash for a layout the last report did not
-/// cover.
+/// A layout's integrated loudness and true peak on its chip: mono, in
+/// the plain chip's ink, an em dash for a layout the last report did
+/// not cover. Figures from a report the session has changed since, such
+/// as after a gain change, draw in the disabled chip's ink and keep
+/// their values, so the old reading stays as a reference until the next
+/// pass; the chip's tooltip and the bar's Re-measure Loudness button
+/// say they are out of date.
 class _LayoutFigures extends StatelessWidget {
   final ProgrammeLoudness? loudness;
-  final bool stale;
-  const _LayoutFigures({required this.loudness, required this.stale});
+  const _LayoutFigures({required this.loudness});
 
   @override
   Widget build(BuildContext context) {
     final l = loudness;
-    final color = stale ? T.textGhost : T.textValueDim;
+    final color = ConsoleChip.ink(
+      selected: false,
+      enabled: !(l?.stale ?? false),
+    );
     final style = TextStyle(
       fontFamily: T.monoFamily,
       fontSize: T.fontSmall,
+      fontWeight: FontWeight.w400,
       color: color,
       fontFeatures: const [FontFeature.tabularFigures()],
     );
@@ -1470,16 +1506,18 @@ class _LayoutsBar extends ConsumerWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
-          Text(
-            'LAYOUTS',
-            style: TextStyle(
-              fontSize: T.fontSmall,
-              color: T.textMuted,
-              letterSpacing: 0.5,
-              fontWeight: FontWeight.w600,
-            ),
+          // In the order IAMF stores a sub-mix: its output mix gain, then
+          // its layouts with their loudness.
+          Text('OUTPUT MIX GAIN', style: T.styleSectionLabel),
+          const SizedBox(width: T.gapSm),
+          _OutputMixGainField(
+            mix: mix,
+            subMix: subMix,
+            subMixIndex: subMixIndex,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: T.gapLg),
+          Text('LAYOUTS', style: T.styleSectionLabel),
+          const SizedBox(width: T.gapSm),
           // The chips scroll sideways once they outgrow the bar (six
           // tagged layouts with figures at the default window width),
           // so the buttons at the right end stay in reach.
@@ -1499,18 +1537,11 @@ class _LayoutsBar extends ConsumerWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(
-                            l.soundSystem.uiLabel,
-                            style: TextStyle(
-                              fontSize: T.fontBody,
-                              color: T.purpleLight,
-                            ),
-                          ),
+                          Text(l.soundSystem.uiLabel),
                           if (loudness != null) ...[
                             const SizedBox(width: T.gapSm),
                             _LayoutFigures(
                               loudness: loudness.byLayout[l.soundSystem],
-                              stale: loudness.stale,
                             ),
                           ],
                           const SizedBox(width: T.gapPair),
@@ -1523,12 +1554,11 @@ class _LayoutsBar extends ConsumerWidget {
                             RemoveXButton(
                               // Box no taller than the chip label's line, so
                               // removable chips stay level with the mandatory
-                              // stereo chip (which never shows a ✕). Tertiary
-                              // over the purpleDim fill — ghost is grid-line
-                              // faint there.
+                              // stereo chip (which never shows a ✕).
+                              // In the plain chip's ink.
                               width: 16,
                               height: 12,
-                              color: T.textTertiary,
+                              color: ConsoleChip.ink(selected: false),
                               onTap: () {
                                 ref
                                     .read(mixesNotifierProvider.notifier)
@@ -1552,27 +1582,12 @@ class _LayoutsBar extends ConsumerWidget {
                     ),
                   ),
                   // Builder gives the "+" its own context so the menu anchors
-                  // to the button's render box (the _TopbarSelector pattern)
-                  // instead of the raw tap position with a vertical fudge.
+                  // to the button's render box instead of the raw tap
+                  // position with a vertical fudge.
                   Builder(
-                    builder: (btnContext) => GestureDetector(
+                    builder: (btnContext) => _AddChip(
+                      tooltip: 'Add layout',
                       onTap: () => _showAddLayoutMenu(btnContext, ref),
-                      child: Container(
-                        height: 22,
-                        padding: const EdgeInsets.symmetric(horizontal: 8),
-                        alignment: Alignment.center,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(T.radiusSm),
-                          border: Border.all(color: T.border),
-                        ),
-                        child: Text(
-                          '+',
-                          style: TextStyle(
-                            fontSize: T.fontBody,
-                            color: T.textTertiary,
-                          ),
-                        ),
-                      ),
                     ),
                   ),
                 ],
@@ -1653,10 +1668,8 @@ class _LayoutsBar extends ConsumerWidget {
     );
   }
 
-  /// Add-layout popup, styled and anchored like the topbar mix
-  /// presentation switcher (_TopbarSelector._showMenu in topbar.dart):
-  /// 32 px fontBody items on an elevated fill with the rounded border
-  /// outline, dropped below the "+" button's render box.
+  /// Add-layout popup: 32 px fontBody items on an elevated fill with the
+  /// rounded border outline, dropped below the "+" button's render box.
   void _showAddLayoutMenu(BuildContext context, WidgetRef ref) {
     final profile = ref.read(iamfProfileProvider);
     final used = subMix.layouts.map((l) => l.soundSystem).toSet();

@@ -15,8 +15,8 @@
 //
 // Regenerate with scripts/gen_eclipsa_audio_wordmark.py, which reads
 // the glyphs out of Google Sans (google/fonts ofl/googlesans, commit 5412d702), instanced at
-// wght=400, opsz=18, GRAD=0. The pen positions were measured from the Eclipsa Audio
-// lockup artwork, as the script describes.
+// wght=400, opsz=18, GRAD=0. The pen positions are set in the script, not taken
+// from the font's advances.
 
 /// One glyph of the Eclipsa Audio wordmark.
 class EclipsaAudioGlyph {

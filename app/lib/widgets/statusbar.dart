@@ -16,8 +16,8 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../loudness/loudness_measure_runner.dart';
 import '../loudness/loudness_report_dialog.dart';
+import '../loudness/qc_loudness_report_provider.dart';
 import '../meters/meter_provider.dart';
 import '../theme.dart';
 import '../state.dart';
@@ -136,7 +136,17 @@ class Statusbar extends ConsumerWidget {
           ),
           gap,
           const _DimStatus(),
-          if (ref.watch(loudnessMeasureProvider.select((s) => s.running))) ...[
+          if (ref.watch(
+            outputSoloMuteProvider.select(
+              (s) => s.soloed.isNotEmpty || s.muted.isNotEmpty,
+            ),
+          )) ...[
+            gap,
+            const OutputSoloMuteStatus(),
+          ],
+          if (ref.watch(
+            runningLoudnessMeasureProvider.select((s) => s != null),
+          )) ...[
             gap,
             const _MeasureStatus(),
           ],
@@ -218,9 +228,74 @@ class _DimStatus extends ConsumerWidget {
   }
 }
 
-/// A running Loudness Report pass, visible from every view since the
-/// pass is not modal: the device output is silent and transport cannot
-/// start until it ends. A click opens the report, which has Cancel.
+/// Output-channel solo and mute (ES-999) in the status bar while either is
+/// engaged. The Renderer view's output meter is the only other place
+/// that shows them, and a muted channel stays silent in every view, so
+/// the item names the channels in its tooltip and a click clears both.
+@visibleForTesting
+class OutputSoloMuteStatus extends ConsumerWidget {
+  const OutputSoloMuteStatus({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Self-track both modes: this widget is const-constructed.
+    ref.watch(themeModeProvider);
+    ref.watch(fontSizeModeProvider);
+    final soloMute = ref.watch(outputSoloMuteProvider);
+    if (soloMute.soloed.isEmpty && soloMute.muted.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final labels = ref
+        .watch(monitoringConfigProvider.select((c) => c.layout))
+        .meterLabels;
+    List<String> names(Set<int> channels) => [
+      for (final c in channels.toList()..sort())
+        c < labels.length ? labels[c] : '${c + 1}',
+    ];
+    return Tooltip(
+      message: outputSoloMuteStatusTooltip(
+        names(soloMute.soloed),
+        names(soloMute.muted),
+      ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => ref.read(outputSoloMuteProvider.notifier).clear(),
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(text: 'OUT', style: statusbarTextStyle()),
+                if (soloMute.soloed.isNotEmpty)
+                  TextSpan(
+                    text: ' SOLO',
+                    style: statusbarTextStyle(
+                      color: T.meterYellow,
+                      weight: FontWeight.w700,
+                    ),
+                  ),
+                if (soloMute.muted.isNotEmpty)
+                  TextSpan(
+                    text: ' MUTE',
+                    style: statusbarTextStyle(
+                      color: T.meterRed,
+                      weight: FontWeight.w700,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A running Loudness Report pass, creator or QC, visible from every
+/// view since the pass is not modal: the device output is silent and
+/// transport cannot start until it ends. A click opens the report for
+/// the current workspace mode, which has Cancel. A pass that is already
+/// cancelling takes no click: it can belong to the other workspace
+/// mode, and opening the current mode's report would start a new pass.
 class _MeasureStatus extends ConsumerWidget {
   const _MeasureStatus();
 
@@ -228,21 +303,28 @@ class _MeasureStatus extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
-    final m = ref.watch(loudnessMeasureProvider);
+    final m = ref.watch(runningLoudnessMeasureProvider);
+    if (m == null) return const SizedBox.shrink();
     final text = m.cancelRequested
         ? 'Cancelling loudness measurement…'
         : m.total > 0
         ? 'Measuring loudness ${m.done}/${m.total}…'
         : 'Measuring loudness…';
     return Tooltip(
-      message:
-          'The Loudness Report is measuring the programme. Monitoring is '
-          'silent and transport cannot start until it ends. Click to open '
-          'the report, which has Cancel.',
+      message: m.cancelRequested
+          ? 'The Loudness Report is stopping its measurement. Monitoring '
+                'is silent and transport cannot start until it ends.'
+          : 'The Loudness Report is measuring the programme. Monitoring is '
+                'silent and transport cannot start until it ends. Click to '
+                'open the report, which has Cancel.',
       child: MouseRegion(
-        cursor: SystemMouseCursors.click,
+        cursor: m.cancelRequested
+            ? MouseCursor.defer
+            : SystemMouseCursors.click,
         child: GestureDetector(
-          onTap: () => LoudnessReportDialog.show(context),
+          onTap: m.cancelRequested
+              ? null
+              : () => LoudnessReportDialog.show(context),
           child: Text(
             text,
             style: statusbarTextStyle(

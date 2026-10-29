@@ -18,8 +18,10 @@ import 'generated/version.dart';
 import 'logging/log.dart';
 import 'meters/meter_provider.dart';
 import 'models/audio_element_enums.dart';
+import 'models/layout_916.dart';
 import 'renderer/colormap.dart';
 import 'loudness/loudness_measure_runner.dart';
+import 'loudness/qc_loudness_report_provider.dart';
 import 'session/app_preferences.dart';
 import 'theme.dart';
 import 'video/video_backend_kind.dart';
@@ -32,15 +34,7 @@ import 'workspace/workspace_mode.dart';
 
 final appVersionProvider = Provider<String>((_) => appVersion);
 
-// --- IAMF profile limits ---
-// These will vary per profile (Simple, Base, Base-Enhanced, etc.).
-
-/// Maximum number of audio elements supported by the engine (hard cap).
-/// Individual IAMF profiles impose tighter limits — see [IamfProfile].
-const kMaxAudioElements = 28;
-
-/// Maximum total channel count across all elements (hard engine cap).
-const kMaxTotalChannels = 28;
+// --- IAMF profiles ---
 
 /// IAMF spec version a profile complies with.
 ///
@@ -83,6 +77,7 @@ enum IamfProfile {
     maxCodecConfigs: 1,
     allowObjectBased: false,
     allowMixedTypes: false,
+    requiresObjectOnlyMixes: false,
   ),
   base(
     label: 'Base',
@@ -94,6 +89,7 @@ enum IamfProfile {
     maxCodecConfigs: 1,
     allowObjectBased: false,
     allowMixedTypes: false,
+    requiresObjectOnlyMixes: false,
   ),
   baseEnhanced(
     label: 'Base-Enhanced',
@@ -107,6 +103,7 @@ enum IamfProfile {
     // Base-Enhanced allows only channel- and scene-based elements.
     allowObjectBased: false,
     allowMixedTypes: true,
+    requiresObjectOnlyMixes: false,
   ),
   baseAdvanced(
     label: 'Base-Advanced',
@@ -118,6 +115,7 @@ enum IamfProfile {
     maxCodecConfigs: 2,
     allowObjectBased: true,
     allowMixedTypes: true,
+    requiresObjectOnlyMixes: true,
   ),
   advanced1(
     label: 'Advanced-1',
@@ -129,6 +127,7 @@ enum IamfProfile {
     maxCodecConfigs: 2,
     allowObjectBased: true,
     allowMixedTypes: true,
+    requiresObjectOnlyMixes: false,
   ),
   advanced2(
     label: 'Advanced-2',
@@ -140,6 +139,7 @@ enum IamfProfile {
     maxCodecConfigs: 2,
     allowObjectBased: true,
     allowMixedTypes: true,
+    requiresObjectOnlyMixes: false,
   );
 
   const IamfProfile({
@@ -152,6 +152,7 @@ enum IamfProfile {
     required this.maxCodecConfigs,
     required this.allowObjectBased,
     required this.allowMixedTypes,
+    required this.requiresObjectOnlyMixes,
   });
 
   final String label;
@@ -175,12 +176,20 @@ enum IamfProfile {
   final int maxCodecConfigs;
   final bool allowObjectBased;
 
-  /// Whether object-based elements can coexist with channel/scene in
-  /// the same mix presentation. Base-Advanced allows objects but
-  /// restricts the first mix presentation (objects-only if any objects
-  /// are present) — that constraint is checked at export/validation
-  /// time, not here.
+  /// Whether the session's audio elements can be of more than one type
+  /// (channel, scene, object). Eclipsa Studio sets it to false for Simple
+  /// and Base; for Base that is stricter than the spec, which permits some
+  /// two-element channel and scene combinations.
   final bool allowMixedTypes;
+
+  /// Whether object-based elements need mix presentations of their own:
+  /// a mix presentation that includes object-based elements must include
+  /// only object-based elements, and when any does, the first mix
+  /// presentation must be one of them. True for Base-Advanced. iamf-tools'
+  /// encoder drops Base-Advanced for a mix presentation that breaks the
+  /// first rule, and its decoder rejects a Base-Advanced file that breaks
+  /// the second.
+  final bool requiresObjectOnlyMixes;
 
   /// Whether YouTube's IAMF upload pipeline accepts this profile. YouTube
   /// supports the Simple and Base profiles; the higher profiles are not
@@ -214,19 +223,14 @@ final iamfProfileProvider = NotifierProvider<IamfProfileNotifier, IamfProfile>(
 
 class AudioElement {
   /// True if this is a channel-based element whose declared layout is
-  /// Binaural — i.e. the WAV already contains pre-rendered L/R binaural
-  /// content. The Mix view locks headphones_rendering_mode to Stereo
-  /// (IAMF spec value 0) for these elements. Mode 0 is the canonical
-  /// "already binaural, do not spatialize" authoring value; writing it
-  /// to the bitstream is correct for any IAMF decoder. In the engine
-  /// the element registers with OAR as a *stereo* element (see
-  /// renderer/oar_capability.h), and mode 0 is what routes it through
-  /// OAR's identity L/R passthrough on the binaural monitoring target
-  /// (the retarget in audio_element_renderer.c:186 of the OAR fork —
-  /// OBR's kPassthroughStereo path applies only to binaural-*input*
-  /// registration, which we don't use). Any other mode re-binauralizes
-  /// the already-binaural signal, so the lock keeps both the
-  /// monitoring path and the exported bitstream honest (ES-327).
+  /// Binaural: the WAV holds pre-rendered L/R binaural content. The Mix
+  /// view locks headphones_rendering_mode to Stereo (IAMF value 0) for
+  /// these elements. In the engine the element registers with OAR as a
+  /// stereo element (see renderer/oar_capability.h), and with mode 0
+  /// OAR passes its L/R through unchanged on the binaural monitoring
+  /// target. With any other mode OBR renders the already-binaural
+  /// signal again, so the lock keeps what is monitored and the mode
+  /// written to the exported file the same (ES-327).
   bool get isChannelBasedBinaural => type == 'Channel' && layout == 'Binaural';
 
   final int id;
@@ -498,14 +502,15 @@ class MixElementSettings {
 
   /// Returns the headphones-rendering mode that should be pushed to OAR
   /// for [el], coercing to [HeadphonesRenderingMode.stereo] (IAMF mode
-  /// 0) when [el] is channel-based with a Binaural layout. Mode 0 is
-  /// the canonical "pre-rendered binaural content" signal and the only
-  /// value that is unambiguously correct for every IAMF decoder.
-  /// OBR's reference implementation handles all modes as a direct L/R
-  /// passthrough for these elements anyway, so the coercion does not
-  /// change what the user hears — it exists to keep the bitstream value
-  /// honest. The stored [headphonesMode] is left untouched so that
-  /// toggling an element's type back and forth preserves user intent.
+  /// 0) when [el] is channel-based with a Binaural layout
+  /// ([AudioElement.isChannelBasedBinaural]). For a channel-based
+  /// element, mode 0 renders the element to stereo instead of passing
+  /// it to a binaural renderer. On the binaural monitoring target it
+  /// makes OAR output the element's L/R unchanged: with any other mode
+  /// OBR renders the already-binaural signal again, from virtual
+  /// loudspeakers at ±30°.
+  /// The stored [headphonesMode] is left untouched so that toggling an
+  /// element's type back and forth preserves user intent.
   HeadphonesRenderingMode effectiveHeadphonesMode(AudioElement el) {
     if (el.isChannelBasedBinaural) return HeadphonesRenderingMode.stereo;
     return headphonesMode;
@@ -516,7 +521,7 @@ class MixElementSettings {
 
 class SubMix {
   final String label; // e.g. "Main", "Commentary"
-  final double outputMixGain; // dB, master fader for this sub-mix
+  final double outputMixGain; // dB, IAMF output_mix_gain of this sub-mix
   final List<MixElementSettings> elementSettings;
   final List<MixLayout> layouts;
 
@@ -614,9 +619,12 @@ class TransportState {
   final int sampleRate;
   final int durationSamples;
 
-  /// Where return-on-stop puts the playhead: set when playback starts
-  /// and moved by mid-playback user relocations (ES-277). A selected
-  /// loop region overrides it — see [TransportNotifier.returnToPlayStart].
+  /// Where return-on-stop puts the playhead: set when playback starts,
+  /// moved by user relocations while playing (ES-277) or paused, and kept
+  /// across a pause (ES-564). A stop clears it, and so does Return to
+  /// start while stopped or paused; Return to start while playing sets
+  /// it to 0. A selected loop region overrides it — see
+  /// [TransportNotifier.returnToPlayStart].
   final int? playStartPosition;
 
   const TransportState({
@@ -689,10 +697,13 @@ class TransportNotifier extends Notifier<TransportState> {
   /// If [frames] is outside `[0, durationSamples]` it is clamped and
   /// a debounced warning is logged — an out-of-range read usually
   /// indicates a sample-rate or duration desync between Dart and the
-  /// engine.
-  void setSamplePosition(int frames) {
+  /// engine. A read past the end by no more than [pastEndTolerance]
+  /// frames is clamped without the warning: playback that reaches the
+  /// end between two ticks reads past it by what the engine rendered
+  /// since the last tick, before the tick loop stops or wraps (ES-967).
+  void setSamplePosition(int frames, {int pastEndTolerance = 0}) {
     final clamped = frames.clamp(0, state.durationSamples);
-    if (clamped != frames) {
+    if (frames < 0 || frames > state.durationSamples + pastEndTolerance) {
       final now = DateTime.now().microsecondsSinceEpoch;
       // Rate-limit to at most one warning per second.
       if (now - _lastClampWarnMicros > 1000000) {
@@ -710,18 +721,21 @@ class TransportNotifier extends Notifier<TransportState> {
 
   /// User-facing playhead relocation (timeline click/drag, scrub bar).
   ///
-  /// While the transport is rolling the relocation also becomes the
-  /// new play-start, so return-on-stop comes back to where the user
-  /// last placed the playhead instead of where playback originally
-  /// began (ES-277) — DAW convention. Internal seeks (loop wrap, session
-  /// restore, go-to-end) use [seekSample]/[resetPosition] and must not
-  /// move the play-start.
+  /// While the transport is rolling, or paused with a play-start mark,
+  /// the relocation also becomes the new play-start, so return-on-stop
+  /// comes back to where the user last placed the playhead instead of
+  /// where playback originally began (ES-277) — DAW convention. Internal
+  /// seeks (loop-region wrap, go-to-end) use [seekSample] and keep the
+  /// play-start; [resetPosition] sets it to 0 while playing and clears
+  /// it otherwise.
   void seek(double fraction) {
     final pos = (fraction.clamp(0.0, 1.0) * state.durationSamples).round();
+    final moveMark =
+        ref.read(playingProvider) || state.playStartPosition != null;
     state = state.copyWith(
       samplePosition: pos,
-      // null → copyWith keeps the existing mark when stopped.
-      playStartPosition: ref.read(playingProvider) ? pos : null,
+      // Stopped: no mark to move, and null leaves it unset.
+      playStartPosition: moveMark ? pos : null,
     );
     _seeked = true;
   }
@@ -767,14 +781,33 @@ class TransportNotifier extends Notifier<TransportState> {
     );
   }
 
+  /// Move the playhead to 0: Return to start, the whole-timeline loop
+  /// wrap and session loads. While playing, 0 becomes the play-start,
+  /// so a later pause and resume does not mark the pause position
+  /// (ES-564). Otherwise the mark is cleared and the next start marks a
+  /// new one.
   void resetPosition() {
-    state = state.copyWith(samplePosition: 0, clearPlayStart: true);
+    final rolling = ref.read(playingProvider);
+    state = state.copyWith(
+      samplePosition: 0,
+      playStartPosition: rolling ? 0 : null,
+      clearPlayStart: !rolling,
+    );
     _seeked = true;
   }
 
-  /// Mark the current position as the play-start point.
+  /// Mark the current position as the play-start point, unless a pause
+  /// left a mark: resuming after a pause keeps the existing mark, so
+  /// return-on-stop does not go back to where the pause happened (ES-564).
   void markPlayStart() {
+    if (state.playStartPosition != null) return;
     state = state.copyWith(playStartPosition: state.samplePosition);
+  }
+
+  /// Drop the play-start mark without moving the playhead: a stop with
+  /// return-on-stop off. The next start marks a new play-start.
+  void clearPlayStart() {
+    state = state.copyWith(clearPlayStart: true);
   }
 
   /// Return to the position where playback started (or 0).
@@ -786,7 +819,7 @@ class TransportNotifier extends Notifier<TransportState> {
     final region = ref.read(loopRegionProvider);
     final pos = region != null
         ? region.startSample.clamp(0, state.durationSamples)
-        : (state.playStartPosition ?? 0);
+        : (state.playStartPosition ?? 0).clamp(0, state.durationSamples);
     state = state.copyWith(samplePosition: pos, clearPlayStart: true);
     _seeked = true;
   }
@@ -929,6 +962,16 @@ abstract final class WorkspaceTabs {
     final allowed = allowedIn(mode);
     return allowed.isEmpty ? elements : allowed.first;
   }
+
+  /// The tab's name as the View menu and the Keyboard Shortcuts dialog
+  /// show it. The top bar draws it in capitals.
+  static String title(String id) => switch (id) {
+    elements => 'Elements',
+    mix => 'Mix',
+    renderer => 'Renderer',
+    inspector => 'Inspector',
+    _ => id,
+  };
 }
 
 class ActiveTabNotifier extends Notifier<String> {
@@ -961,29 +1004,70 @@ class PlayingNotifier extends Notifier<bool> {
   @override
   bool build() => false;
   void set(bool v) => state = v;
-  void toggle() => state = !state;
+
+  /// Start playback: the play button and the Space bar. Marks the
+  /// play-start (a paused pass keeps its mark) and re-enables timeline
+  /// follow. Swallowed while transport is blocked
+  /// (transportBlockedProvider).
+  void start() {
+    if (ref.read(transportBlockedProvider)) return;
+    ref.read(transportProvider.notifier).markPlayStart();
+    ref.read(followOverrideProvider.notifier).set(false);
+    state = true;
+  }
+
+  /// Pause: the play button while playing. The playhead stays and the
+  /// play-start mark is kept, so the next [start] resumes the same pass
+  /// and a later stop returns to where it started (ES-564). Holds that
+  /// set this provider to false (export, Loudness Report, ADM import)
+  /// keep the mark in the same way.
+  void pause() => state = false;
+
+  /// Stop: the Stop button, the Space bar while playing, and (through
+  /// [stopAtTimelineEnd]) the end of the timeline. With return-on-stop
+  /// the playhead goes to [TransportNotifier.returnToPlayStart];
+  /// without it the playhead stays. Either way the play-start mark is
+  /// cleared, so the next start marks a new one.
+  void stop() {
+    state = false;
+    final transport = ref.read(transportProvider.notifier);
+    if (ref.read(returnOnStopProvider)) {
+      transport.returnToPlayStart();
+    } else {
+      transport.clearPlayStart();
+    }
+  }
+
+  /// [stop] when playback reaches the end of the timeline, plus a seek
+  /// to where the playhead stops. The engine counter has run past the
+  /// end by what it rendered since the last tick; the tick loop pauses
+  /// the engine on the next tick and then forwards the seek, so the
+  /// position it reads while stopped is in range (ES-967). With
+  /// return-on-stop, [stop] has already armed a seek to the same
+  /// position. Not part of [stop]: after a Stop mid-playback with
+  /// return-on-stop off the tick loop reads the engine position
+  /// instead, which is ahead of the playhead by the audio rendered
+  /// since the last tick.
+  void stopAtTimelineEnd() {
+    stop();
+    final transport = ref.read(transportProvider.notifier);
+    transport.seekSample(ref.read(transportProvider).samplePosition);
+  }
 
   /// Space-bar play/stop semantics, shared by every entry point that
   /// binds the key (main shell, video pop-out window, routing matrix
-  /// screen — ES-79) so they can't drift: stop optionally returns the
-  /// playhead to where playback started (returnOnStopProvider); start
-  /// marks the play-start and re-enables timeline follow. Starting is
-  /// swallowed while transport is blocked (transportBlockedProvider:
-  /// the IAMF duration scan, or a Loudness Report pass or an ADM
-  /// import holding the renderer) — the keyboard must not bypass the
-  /// disabled transport controls — but stopping stays available so a
-  /// transport that was already rolling can always be silenced.
+  /// screen — ES-79) so they can't drift: [stop] while playing, [start]
+  /// otherwise. Starting is swallowed while transport is blocked
+  /// (transportBlockedProvider: the IAMF duration scan, or a Loudness
+  /// Report pass or an ADM import holding the renderer) — the keyboard
+  /// must not bypass the disabled transport controls — but stopping
+  /// stays available so a transport that was already rolling can
+  /// always be silenced.
   void toggleTransport() {
     if (state) {
-      state = false;
-      if (ref.read(returnOnStopProvider)) {
-        ref.read(transportProvider.notifier).returnToPlayStart();
-      }
+      stop();
     } else {
-      if (ref.read(transportBlockedProvider)) return;
-      ref.read(transportProvider.notifier).markPlayStart();
-      ref.read(followOverrideProvider.notifier).set(false);
-      state = true;
+      start();
     }
   }
 }
@@ -1011,6 +1095,68 @@ class MonitorDimNotifier extends Notifier<bool> {
   }
 
   void toggle() => set(!state);
+}
+
+/// Output-channel solo and mute in the Monitoring panel (ES-999): which
+/// output channels of the active monitoring target are soloed and which
+/// are muted, by index in the target's channel order.
+class OutputSoloMute {
+  const OutputSoloMute({this.soloed = const {}, this.muted = const {}});
+
+  final Set<int> soloed;
+  final Set<int> muted;
+
+  /// The channels of a target with [channels] outputs that the cut
+  /// silences: a muted channel and, while any channel is soloed, every
+  /// channel that is not. The engine applies the same rule, to elements
+  /// and to output channels.
+  Set<int> silenced(int channels) => {
+    for (var c = 0; c < channels; c++)
+      if (muted.contains(c) || (soloed.isNotEmpty && !soloed.contains(c))) c,
+  };
+}
+
+/// [OutputSoloMute] for the active monitoring target, pushed to the
+/// engine on every change. Cleared on a target switch, since an index
+/// names another channel there, and never persisted.
+class OutputSoloMuteNotifier extends Notifier<OutputSoloMute> {
+  @override
+  OutputSoloMute build() {
+    ref.listen(monitoringConfigProvider.select((c) => c.layout), (_, _) {
+      if (state.soloed.isEmpty && state.muted.isEmpty) return;
+      _publish(const OutputSoloMute());
+    });
+    return const OutputSoloMute();
+  }
+
+  /// Clears every solo and mute, as the status bar item does on a click.
+  void clear() {
+    if (state.soloed.isEmpty && state.muted.isEmpty) return;
+    _publish(const OutputSoloMute());
+  }
+
+  void toggleSolo(int channel) => _publish(
+    OutputSoloMute(soloed: _toggled(state.soloed, channel), muted: state.muted),
+  );
+
+  void toggleMute(int channel) => _publish(
+    OutputSoloMute(soloed: state.soloed, muted: _toggled(state.muted, channel)),
+  );
+
+  void _publish(OutputSoloMute next) {
+    state = next;
+    ref
+        .read(eclipsaStudioEngineProvider)
+        ?.setOutputSoloMute(next.soloed, next.muted);
+    Log.i(
+      LogCat.audio,
+      'Output solo ${next.soloed.toList()..sort()}, '
+      'mute ${next.muted.toList()..sort()}',
+    );
+  }
+
+  static Set<int> _toggled(Set<int> set, int channel) =>
+      set.contains(channel) ? ({...set}..remove(channel)) : {...set, channel};
 }
 
 /// One transient import/load-feedback message.
@@ -1188,14 +1334,15 @@ final admImportBusyProvider = NotifierProvider<AdmImportBusyNotifier, int>(
 
 /// True while transport must not start: the IAMF duration scan
 /// ([transportAnalyzingProvider]), a Loudness Report pass
-/// (loudnessMeasureProvider) or an ADM import ([admImportBusyProvider])
-/// holding the renderer offline-exclusive, during which the device
-/// output is silent. Every play entry point checks it; stopping stays
-/// available.
+/// (loudnessMeasureProvider in Creator, qcLoudnessMeasureProvider in
+/// Playback) or an ADM import ([admImportBusyProvider]) holding the
+/// renderer offline-exclusive, during which the device output is
+/// silent. Every play entry point checks it; stopping stays available.
 final transportBlockedProvider = Provider<bool>(
   (ref) =>
       ref.watch(transportAnalyzingProvider) ||
       ref.watch(loudnessMeasureProvider.select((s) => s.running)) ||
+      ref.watch(qcLoudnessMeasureProvider.select((s) => s.running)) ||
       ref.watch(admImportBusyProvider) > 0,
 );
 
@@ -1205,6 +1352,11 @@ final loopingProvider = NotifierProvider<LoopingNotifier, bool>(
 final monitorDimProvider = NotifierProvider<MonitorDimNotifier, bool>(
   MonitorDimNotifier.new,
 );
+final outputSoloMuteProvider =
+    NotifierProvider<OutputSoloMuteNotifier, OutputSoloMute>(
+      OutputSoloMuteNotifier.new,
+    );
+
 final importNoticeProvider =
     NotifierProvider<ImportNoticeNotifier, ImportNotice?>(
       ImportNoticeNotifier.new,
@@ -2135,6 +2287,18 @@ final audioDevicesProvider =
       AudioDevicesNotifier.new,
     );
 
+/// Name of the selected output device, or null when the device index is
+/// outside the device list. Monitoring config and output labels are saved
+/// per device under this name. A function over the two source providers
+/// rather than a derived provider: a device-index listener registered
+/// before a derived provider runs before that provider is marked stale,
+/// so it would read the previous device's name.
+String? selectedOutputDeviceName(WidgetRef ref) {
+  final devices = ref.read(audioDevicesProvider);
+  final index = ref.read(audioSettingsProvider).deviceIndex;
+  return index >= 0 && index < devices.length ? devices[index].name : null;
+}
+
 /// Output device selection mode (ES-467): true = follow the OS default
 /// output device, switching live when the OS default moves (device
 /// hot-plug, a user pick in System Settings); false = stay pinned to
@@ -2177,7 +2341,10 @@ typedef FollowSystemDefaultAction = ({int index, bool reopen});
 /// otherwise `index` is the device to be on and `reopen` says whether
 /// the stream must be reopened (the OS default moved to a different
 /// device) or the open device merely shifted enumeration index (re-pin
-/// the selection, leave the stream untouched).
+/// the selection, leave the stream untouched). When no device is flagged
+/// as the default, the selection follows the open device by name:
+/// re-pinned when its index moved; null when it is gone or its index did
+/// not change.
 ///
 /// Pure so the decision rule is unit-testable without audio hardware —
 /// same pattern as the engine's `DeviceManager::ResolveSelectedIndex`.
@@ -2193,7 +2360,11 @@ FollowSystemDefaultAction? followSystemDefaultAction(
       break;
     }
   }
-  if (defaultIdx < 0) return null;
+  if (defaultIdx < 0) {
+    final openIdx = devices.indexWhere((d) => d.name == openDeviceName);
+    if (openIdx < 0 || openIdx == selectedIndex) return null;
+    return (index: openIdx, reopen: false);
+  }
   if (devices[defaultIdx].name == openDeviceName) {
     if (defaultIdx == selectedIndex) return null;
     return (index: defaultIdx, reopen: false);
@@ -2239,6 +2410,28 @@ class OutputLabelsNotifier extends Notifier<Map<int, String>> {
 final outputLabelsProvider =
     NotifierProvider<OutputLabelsNotifier, Map<int, String>>(
       OutputLabelsNotifier.new,
+    );
+
+/// Name of the device whose saved state [monitoringConfigProvider] and
+/// [outputLabelsProvider] hold, set when `applyMonitoringForDevice`
+/// (app_shell.dart) loads it; null before the first load and
+/// when no device was resolved. Device identity is the device name, as for
+/// the saved audio device; the engine exposes no stable UID. Edits are
+/// saved under this name. The selected device can differ from it: from a
+/// device switch until its load has read the preferences, and after a
+/// device-list change that left the selection index on another device
+/// (the open device disappeared in follow-system-default mode with no
+/// device flagged as the default, or a reopen failed) (ES-949).
+class MonitoringDeviceNameNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void set(String? name) => state = name;
+}
+
+final monitoringDeviceNameProvider =
+    NotifierProvider<MonitoringDeviceNameNotifier, String?>(
+      MonitoringDeviceNameNotifier.new,
     );
 
 /// Display name for device output [channel] (0-based): the custom label when
@@ -2321,20 +2514,28 @@ enum OarLayout {
 final Map<OarLayout, List<String>> _speakerLabelsCache = {};
 
 extension OarLayoutSpeakers on OarLayout {
-  /// Per-channel speaker labels in the engine's output channel order
-  /// (OAR / IAMF / ITU-R BS.2051), via the authoritative label source
-  /// in `widgets/routing_labels.dart`. A hand-kept table here had
-  /// 9.1.6 in the wrong order (ES-552: OAR renders L60/R60 first and
-  /// the rears at index 4–5, not wides-then-sides). Length always
-  /// equals [channels].
+  /// Per-channel speaker labels in the engine's monitoring output
+  /// channel order, via the authoritative label source in
+  /// `widgets/routing_labels.dart`. A hand-kept table here had 9.1.6
+  /// in the wrong order (ES-552). Length always equals [channels].
+  ///
+  /// 9.1.6 is monitored in OBR's alt order (the engine reorders OAR's
+  /// render, ES-960), labelled `familiar (IAMF)` from the shared table
+  /// in `models/layout_916.dart`: L (FLc), R (FRc), C (FC), LFE, Lw
+  /// (FL), Rw (FR), Lss (SiL), Rss (SiR), Lrs (BL), Rrs (BR), Ltf
+  /// (TpFL), Rtf (TpFR), Lts (TpSiL), Rts (TpSiR), Ltr (TpBL), Rtr
+  /// (TpBR). The output meter and the routing matrix cells, which have
+  /// no room for two names, use [meterLabels]; [channelTooltips] gives
+  /// the per-channel tooltips.
   ///
   /// The order, and [oarValue], are pinned against
-  /// `engine/renderer/oar_output_channels.txt` in
-  /// `test/renderer/oar_output_channels_test.dart` — which
-  /// `engine/test/oar_output_channels_test.cc` pins against what OAR
+  /// `engine/renderer/channel_layouts.txt` in
+  /// `test/renderer/channel_layouts_test.dart` — which
+  /// `engine/test/channel_layouts_test.cc` pins against what OAR
   /// actually renders, so an OAR pin bump that reorders a layout fails
   /// instead of relabelling these silently (ES-592).
   List<String> get speakerLabels => _speakerLabelsCache.putIfAbsent(this, () {
+    if (this == OarLayout.layout916) return alt916DisplayLabels;
     // The disambiguation hint for count-ambiguous layouts (8ch is
     // 5.1.2 or 7.1, 10ch is 5.1.4 or 7.1.2) is keyed on the enum, not
     // on [label]: display text must be freely renamable without
@@ -2348,6 +2549,23 @@ extension OarLayoutSpeakers on OarLayout {
       iamfChannelLabels(channelCount: channels, layoutHint: hint),
     );
   });
+
+  /// [speakerLabels] for the output meter, whose 16 bars at 9.1.6 sit on
+  /// a 9.8 px pitch in the Renderer view, and for the routing matrix's
+  /// 28 px cells: the familiar names alone (L, R, C, LFE, Lw, Rw, Lss,
+  /// ...), since the `familiar (IAMF)` form takes two rotated rows of
+  /// about 60 px each at Medium and Large on the meter and leaves the
+  /// bars about 80 px of the 220 px, and `Lts (TpSiL)` is about 58 px
+  /// wide at Medium in a cell. Every other layout's labels are
+  /// [speakerLabels].
+  List<String> get meterLabels =>
+      this == OarLayout.layout916 ? alt916Labels : speakerLabels;
+
+  /// Per-channel tooltips for the routing matrix cells, by channel
+  /// index ("L (IAMF bitstream FLc)" at 9.1.6, null for LFE), or
+  /// null for a layout whose labels have one name.
+  List<String?>? get channelTooltips =>
+      this == OarLayout.layout916 ? alt916Tooltips : null;
 }
 
 /// Device-channel ceiling for routing bitmasks. Matches the engine's
@@ -2580,16 +2798,6 @@ class MonitoringConfigNotifier extends Notifier<MonitoringConfig> {
     state = state.copyWith(targets: list);
   }
 
-  /// Replace the active target's routing map.
-  void setActiveRouting(List<int> routing) {
-    state = state.copyWith(
-      targets: [
-        for (final t in state.targets)
-          t.layout == state.activeLayout ? t.copyWith(routing: routing) : t,
-      ],
-    );
-  }
-
   /// Toggle one cross-point cell on [layout]'s patch: OAR channel [oarCh]
   /// to device channel [devCh]. Independent toggle — does not clear other
   /// cells, so splits (one OAR ch → many device ch) and sums (many → one)
@@ -2699,6 +2907,18 @@ final noiseInjectionProvider =
   return (0, oarLayout, channels);
 }
 
+/// The engine channel order of [el]'s channels after routing
+/// (`eclipsa_studio_element_set_channel_order()`): a 9.1.6 channel
+/// element is in OBR's alt order and the engine permutes it into OAR's
+/// order at the feed; every other element is fed as it is. Pushed beside
+/// [EclipsaStudioEngine.setElementType] wherever an element is
+/// registered or re-typed, and to the offline measure with the element.
+int elementChannelOrder(AudioElement el) {
+  final (oarType, _, _) = elementToOarType(el);
+  if (oarType != 0) return kChannelOrderOar;
+  return channelOrderForLayout(el.layout);
+}
+
 /// Wraps an azimuth in degrees onto the circle, into (-180, 180].
 ///
 /// OAR's OLR does not normalize out-of-range azimuths: its rear
@@ -2780,11 +3000,64 @@ void pushElementObjectPosition(EclipsaStudioEngine engine, AudioElement el) {
   );
 }
 
+/// The sub-mix at [subMixIndex] of the mix at [mixIndex] in [mixes]:
+/// the active sub-mix when given the values of [mixesNotifierProvider],
+/// [activeMixProvider] and [activeSubMixProvider]. Null when either
+/// index is out of range.
+SubMix? activeSubMixOf(List<Mix> mixes, int mixIndex, int subMixIndex) {
+  if (mixIndex < 0 || mixIndex >= mixes.length) return null;
+  final subMixes = mixes[mixIndex].subMixes;
+  if (subMixIndex < 0 || subMixIndex >= subMixes.length) return null;
+  return subMixes[subMixIndex];
+}
+
+/// Push [s], an element's settings in the active sub-mix, to [engine]
+/// for [el]. The mix exclusion and the mix gain apply at once; the
+/// rendering config is staged for the next
+/// [EclipsaStudioEngine.commitRenderingConfig]. The engine resets the
+/// exclusion and the mix gain when it adds an element, and the rendering
+/// config when it sets an element's type, so every path that does
+/// either pushes them again.
+void stageElementMixSettings(
+  EclipsaStudioEngine engine,
+  AudioElement el,
+  MixElementSettings s,
+) {
+  engine.setElementMixExcluded(el.id, !s.included);
+  engine.setElementMixGain(el.id, s.mixGain);
+  // effectiveHeadphonesMode sends a channel-based Binaural element as
+  // mode 0 (stereo), whatever mode is stored.
+  engine.stageElementRenderingConfig(
+    el.id,
+    s.effectiveHeadphonesMode(el).index,
+    s.binauralProfile.index,
+  );
+}
+
+/// Push [sub]'s settings for each of [elements], and its output mix
+/// gain, to [engine]. The rendering configs are committed together, so
+/// the renderer is rebuilt at most once.
+void pushSubMixSettings(
+  EclipsaStudioEngine engine,
+  SubMix sub,
+  List<AudioElement> elements,
+) {
+  for (final el in elements) {
+    stageElementMixSettings(engine, el, sub.settingsFor(el.id));
+  }
+  engine.commitRenderingConfig();
+  engine.setOutputMixGain(sub.outputMixGain);
+}
+
 /// Maps layout string to (oar_layout_t, channel_count).
 /// Values must match oar_layout_t enum in oar.h.
 (int, int) _layoutToOar(String layout) {
+  // The values are the section headers of engine/renderer/
+  // channel_layouts.txt, pinned there by test/renderer/
+  // channel_layouts_test.dart.
+  if (layout.contains('10.2.9.3')) return (11, 24);
   if (layout.contains('9.1.6')) return (10, 16);
-  if (layout.contains('7.1.5.4') || layout.contains('7154')) return (12, 16);
+  if (layout.contains('7.1.5.4') || layout.contains('7154')) return (12, 17);
   if (layout.contains('7.1.4')) return (8, 12);
   if (layout.contains('7.1.2')) return (7, 10);
   if (layout.contains('7.1')) return (6, 8);
@@ -2801,14 +3074,21 @@ int _ambisonicsChannels(int order) {
   return (order + 1) * (order + 1); // (N+1)^2
 }
 
-/// CLI auto-load session path (`--session <path>`).
+/// The session to load at startup, resolved in main.dart: from a launch
+/// parameter (`--session`, or `--open` with a session), the
+/// `ECLIPSA_STUDIO_SESSION` or `ECLIPSA_STUDIO_OPEN` variable, the
+/// one-shot `startup_session.txt`, or, when no file was named and Reopen
+/// Last Project is on, the last project. See workspace/launch_args.dart.
 final autoLoadSessionProvider = Provider<String?>((ref) => null);
 
-/// CLI auto-open IAMF path (`--iamf <path>`): opens the file in Playback
-/// mode at startup. Parsed in main.dart; consumed once by StartupRestore.
+/// Launch-parameter Playback path (`--playback`, its old name `--iamf`,
+/// or `--open` with a `.iamf` file or an MP4 with an IAMF track): opens
+/// the file in Playback mode at startup. Resolved in main.dart; consumed
+/// once by StartupRestore.
 final autoLoadIamfProvider = Provider<String?>((ref) => null);
 
-/// CLI smoke-test flag (`--quit-after-load`): exit once the auto-load
-/// session is up — 0 on success, non-zero on failure. Parsed in
-/// main.dart; consumed by AppShell after the auto-load completes.
+/// Launch smoke-test flag (`--quit-after-load`): exit once the launch
+/// file is open, 0 on success and 1 on failure. Parsed in main.dart;
+/// consumed by AppShell after a session load and by StartupRestore after
+/// a Playback open.
 final quitAfterLoadProvider = Provider<bool>((ref) => false);

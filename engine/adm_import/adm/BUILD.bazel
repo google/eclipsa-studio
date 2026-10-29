@@ -34,6 +34,7 @@ cc_library(
     name = "adm_model",
     srcs = ["adm_model.cc"],
     hdrs = ["adm_model.h"],
+    deps = ["@abseil-cpp//absl/container:flat_hash_map"],
 )
 
 cc_library(
@@ -44,6 +45,7 @@ cc_library(
         ":adm_model",
         "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -130,6 +132,15 @@ cc_test(
     srcs = ["xml_test.cc"],
     deps = [
         ":xml",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "adm_model_test",
+    srcs = ["adm_model_test.cc"],
+    deps = [
+        ":adm_model",
         "@googletest//:gtest_main",
     ],
 )

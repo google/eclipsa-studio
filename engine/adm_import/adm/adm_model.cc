@@ -76,5 +76,41 @@ uint16_t Model::TrackIndexForUid(const std::string& uid) const {
   return 0;
 }
 
+// try_emplace keeps the first entry for a key, as the Model scans do.
+ModelIndex::ModelIndex(const Model& model) {
+  packs_.reserve(model.packs.size());
+  for (const auto& p : model.packs) packs_.try_emplace(p.id, &p);
+  channels_.reserve(model.channels.size());
+  for (const auto& c : model.channels) channels_.try_emplace(c.id, &c);
+  track_by_channel_.reserve(model.chna.size());
+  track_by_uid_.reserve(model.chna.size());
+  for (const auto& e : model.chna) {
+    if (e.track_index == 0) continue;
+    track_by_channel_.try_emplace(e.ChannelFormatId(), e.track_index);
+    track_by_uid_.try_emplace(e.uid, e.track_index);
+  }
+}
+
+const AudioPackFormat* ModelIndex::Pack(const std::string& id) const {
+  const auto it = packs_.find(id);
+  return it == packs_.end() ? nullptr : it->second;
+}
+
+const AudioChannelFormat* ModelIndex::Channel(const std::string& id) const {
+  const auto it = channels_.find(id);
+  return it == channels_.end() ? nullptr : it->second;
+}
+
+uint16_t ModelIndex::TrackIndexForChannel(
+    const std::string& channel_format_id) const {
+  const auto it = track_by_channel_.find(channel_format_id);
+  return it == track_by_channel_.end() ? 0 : it->second;
+}
+
+uint16_t ModelIndex::TrackIndexForUid(const std::string& uid) const {
+  const auto it = track_by_uid_.find(uid);
+  return it == track_by_uid_.end() ? 0 : it->second;
+}
+
 }  // namespace adm
 }  // namespace adm2iamf

@@ -80,4 +80,34 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   }, skip: !Platform.isMacOS);
+
+  // Release Notes... was in both the app menu and the Help menu. The two
+  // menus are the same in every workspace mode, so landing covers them.
+  testWidgets('Release Notes is in the Help menu only', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    try {
+      await tester.pumpWidget(
+        const ProviderScope(
+          child: MaterialApp(
+            home: AppMenuBar(child: Scaffold(body: SizedBox.expand())),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final bar = tester.widget<PlatformMenuBar>(find.byType(PlatformMenuBar));
+      List<String> itemLabels(String menu) => [
+        for (final m
+            in bar.menus
+                .whereType<PlatformMenu>()
+                .firstWhere((m) => m.label == menu)
+                .menus)
+          m.label,
+      ];
+      expect(itemLabels('Eclipsa Studio'), isNot(contains('Release Notes...')));
+      expect(itemLabels('Help'), contains('Release Notes...'));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  }, skip: !Platform.isMacOS);
 }

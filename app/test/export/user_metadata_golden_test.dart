@@ -195,10 +195,10 @@ IamfExportConfig _multiMixConfig() {
 }
 
 /// The multi-mix session re-encoded as Opus — pins the Opus codec
-/// config contract (ES-382): CODEC_ID_OPUS, 960-sample frames,
-/// audio_roll_distance -4, one shared codec config, and the
-/// per-channel bitrate in opus_encoder_metadata. The engine encode
-/// round-trip test feeds this through the real Opus encoder.
+/// config contract (ES-382): 960-sample frames, one shared codec config,
+/// the per-channel bitrate in opus_encoder_metadata, and the two
+/// includes_* trim fields set to false. The engine encode round-trip
+/// test feeds this through the real Opus encoder.
 IamfExportConfig _multiMixOpusConfig() {
   final base = _multiMixConfig();
   return IamfExportConfig(
@@ -269,6 +269,103 @@ IamfExportConfig _bed714Config() {
   );
 }
 
+/// 9.1.6 bed (ES-940, ES-960): one "9.1.6" element, a WAV in the app's
+/// order (OBR's alt order), declared on a Stereo loudness layout. The
+/// engine's CliEncode.Golden916AltRoundTrip encodes it and checks that
+/// WAV channel 0 decodes as FLc, so the channel labels here are listed
+/// per WAV index in the alt order.
+IamfExportConfig _bed916Config() {
+  return IamfExportConfig(
+    profile: IamfProfile.baseEnhanced,
+    sampleRate: 48000,
+    elements: [
+      AudioElement(
+        id: 1,
+        name: 'Bed',
+        type: 'Channel',
+        layout: '9.1.6',
+        codec: 'LPCM',
+        color: 0xFF000000,
+        wavPath: '/wavs/bed916.wav',
+      ),
+    ],
+    mixes: [
+      Mix(
+        id: 1,
+        name: 'Main',
+        subMixes: [
+          SubMix(
+            outputMixGain: 0.0,
+            elementSettings: [MixElementSettings(elementId: 1, mixGain: 0.0)],
+            layouts: const [
+              MixLayout(
+                soundSystem: SoundSystem.stereo,
+                loudness: LoudnessInfo(
+                  integratedLoudness: -18.0,
+                  digitalPeak: -2.0,
+                  truePeak: -1.0,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ],
+    wavBasenames: const {1: 'bed916.wav'},
+    outputPath: '/tmp/bed916.iamf',
+  );
+}
+
+/// Third-order ambisonics scene (ES-940): one "3OA" element, 16 channels
+/// in ACN order, declared on a Stereo loudness layout. The builder writes
+/// an ambisonics_mono_config with one substream per channel, an identity
+/// channel_mapping and the labels A_0 to A_15. The engine's
+/// CliEncode.GoldenScene3oaRoundTrip encodes it, checks the probed
+/// mapping, and checks that each of the 16 WAV channels decodes on the
+/// same ACN channel.
+IamfExportConfig _scene3oaConfig() {
+  return IamfExportConfig(
+    profile: IamfProfile.baseEnhanced,
+    sampleRate: 48000,
+    elements: [
+      AudioElement(
+        id: 1,
+        name: 'Scene',
+        type: 'Scene',
+        layout: '3OA',
+        codec: 'LPCM',
+        color: 0xFF000000,
+        ambisonicsOrder: 3,
+        wavPath: '/wavs/scene3oa.wav',
+      ),
+    ],
+    mixes: [
+      Mix(
+        id: 1,
+        name: 'Main',
+        subMixes: [
+          SubMix(
+            outputMixGain: 0.0,
+            elementSettings: [MixElementSettings(elementId: 1, mixGain: 0.0)],
+            layouts: const [
+              MixLayout(
+                soundSystem: SoundSystem.stereo,
+                loudness: LoudnessInfo(
+                  integratedLoudness: -18.0,
+                  digitalPeak: -2.0,
+                  truePeak: -1.0,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ],
+    wavBasenames: const {1: 'scene3oa.wav'},
+    outputPath: '/tmp/scene3oa.iamf',
+  );
+}
+
 void _checkGolden(String name, IamfExportConfig config) {
   final file = File('$_goldenDir/$name');
   final built = buildUserMetadataTextproto(config);
@@ -304,6 +401,14 @@ void main() {
 
   test('multi_mix_opus golden matches builder output', () {
     _checkGolden('multi_mix_opus.textproto', _multiMixOpusConfig());
+  });
+
+  test('bed916 golden matches builder output', () {
+    _checkGolden('bed916.textproto', _bed916Config());
+  });
+
+  test('scene3oa golden matches builder output', () {
+    _checkGolden('scene3oa.textproto', _scene3oaConfig());
   });
 
   test('bed714 golden matches builder output', () {

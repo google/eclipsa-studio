@@ -20,6 +20,7 @@ import 'package:ffi/ffi.dart' as ffi_pkg;
 import 'package:ffi/ffi.dart' show calloc;
 
 import 'ffi/engine_bindings.dart';
+import 'ffi/engine_strings.dart';
 import 'logging/log.dart';
 import 'renderer/element_stats.dart';
 
@@ -500,10 +501,12 @@ class EclipsaStudioEngine {
   )
   _elementSetObjectPosition;
   late final void Function(int, Pointer<Int8>, int) _elementSetInputRouting;
+  late final void Function(int, int) _elementSetChannelOrder;
   late final void Function(double) _setOutputMixGain;
   late final void Function(int, double) _elementSeedMixGain;
   late final void Function(double) _seedOutputMixGain;
   late final void Function(int) _setMonitorDim;
+  late final void Function(int, int) _setOutputSoloMute;
 
   // --- Transport bindings ---
   late final void Function() _transportPlay;
@@ -645,10 +648,18 @@ class EclipsaStudioEngine {
       // eclipsa_studio_string_free — never package:ffi's malloc.free, which
       // maps to CoTaskMemFree on Windows and corrupts the heap when
       // handed CRT-malloc'd memory (ES-353).
-      final cat = category.toDartString();
-      final msg = message.toDartString();
-      _stringFree(category);
-      _stringFree(message);
+      //
+      // A message can end in a character cut short by the 511-byte log
+      // slot or a fixed engine buffer, so decoding tolerates invalid UTF-8.
+      final String cat;
+      final String msg;
+      try {
+        cat = decodeEngineString(category);
+        msg = decodeEngineString(message);
+      } finally {
+        _stringFree(category);
+        _stringFree(message);
+      }
       switch (level) {
         case 1:
           Log.i(cat, msg);
@@ -735,6 +746,10 @@ class EclipsaStudioEngine {
           Void Function(Uint32, Pointer<Int8>, Uint32),
           void Function(int, Pointer<Int8>, int)
         >('eclipsa_studio_element_set_input_routing');
+    _elementSetChannelOrder = _lib
+        .lookupFunction<Void Function(Uint32, Uint32), void Function(int, int)>(
+          'eclipsa_studio_element_set_channel_order',
+        );
 
     _setOutputMixGain = _lib
         .lookupFunction<Void Function(Float), void Function(double)>(
@@ -752,6 +767,10 @@ class EclipsaStudioEngine {
     _setMonitorDim = _lib
         .lookupFunction<Void Function(Int32), void Function(int)>(
           'eclipsa_studio_set_monitor_dim',
+        );
+    _setOutputSoloMute = _lib
+        .lookupFunction<Void Function(Uint64, Uint64), void Function(int, int)>(
+          'eclipsa_studio_set_output_solo_mute',
         );
 
     _transportPlay = _lib.lookupFunction<Void Function(), void Function()>(
@@ -1129,7 +1148,7 @@ class EclipsaStudioEngine {
   /// whenever the FFI contract changes (see the API/ABI stability
   /// policy there). Exact-match checked at load; per-version history
   /// lives in git, not here.
-  static const int kExpectedEngineApiVersion = 20260903;
+  static const int kExpectedEngineApiVersion = 20261019;
 
   // --- Lifecycle ---
 
@@ -1290,7 +1309,20 @@ class EclipsaStudioEngine {
     }
   }
 
-  /// Set the master/output mix gain for the active mix presentation.
+  /// Declare the order of an element's channels after routing, an
+  /// `ECLIPSA_STUDIO_CHANNEL_ORDER_*` value (engine.h; the tables are in
+  /// engine/renderer/channel_order.h, the Dart constants
+  /// `kChannelOrderOar` and `kChannelOrder916Alt` in
+  /// models/layout_916.dart): OAR's order feeds the element to
+  /// OAR as it is; a 9.1.6 element in OBR's alt order, which the engine
+  /// permutes into OAR's order at the feed (after the element's routing,
+  /// gains and meters). One atomic store in the engine; the audio thread
+  /// applies it from the next callback.
+  void setElementChannelOrder(int elementId, int order) {
+    _elementSetChannelOrder(elementId, order);
+  }
+
+  /// Set the output mix gain for the active mix presentation.
   /// Passed to OAR as group metadata on group 0. Same slew-and-ramp
   /// semantics as setElementMixGain.
   void setOutputMixGain(double gainDb) => _setOutputMixGain(gainDb);
@@ -1302,7 +1334,7 @@ class EclipsaStudioEngine {
   void seedElementMixGain(int elementId, double gainDb) =>
       _elementSeedMixGain(elementId, gainDb);
 
-  /// Seed the master/output mix gain without ramping. Same constraints
+  /// Seed the output mix gain without ramping. Same constraints
   /// as seedElementMixGain.
   void seedOutputMixGain(double gainDb) => _seedOutputMixGain(gainDb);
 
@@ -1311,6 +1343,27 @@ class EclipsaStudioEngine {
   /// meter tap. Monitor-only: it never reaches the mix, an export or a
   /// measurement. Ramped over 15 ms each way.
   void setMonitorDim(bool engaged) => _setMonitorDim(engaged ? 1 : 0);
+
+  /// Output-channel solo and mute of the monitoring target (ES-999), by
+  /// output-channel index in the order of [readOutputPeaks]. A muted
+  /// channel and, while any channel is soloed, every channel that is
+  /// not are silenced in the engine on the way to the device, after the
+  /// render and the limiter, ramped over 15 ms each way while program
+  /// plays. The output and loudness meters read the render without the
+  /// cut. Monitor-only: it never reaches the mix, an export or a
+  /// measurement.
+  void setOutputSoloMute(Set<int> soloed, Set<int> muted) =>
+      _setOutputSoloMute(channelMask(soloed), channelMask(muted));
+
+  /// [channels] as a bitmask, bit c for channel c; indices outside
+  /// 0..63 are left out.
+  static int channelMask(Iterable<int> channels) {
+    var mask = 0;
+    for (final c in channels) {
+      if (c >= 0 && c < 64) mask |= 1 << c;
+    }
+    return mask;
+  }
 
   /// Register element IAMF type with OAR renderer.
   /// type: 0=channel, 1=scene, 2=object
@@ -1380,13 +1433,18 @@ class EclipsaStudioEngine {
   /// copy it into a Dart `String` and immediately release the C
   /// allocation with `eclipsa_studio_string_free` (matching the engine's own
   /// allocator; `malloc.free` maps to CoTaskMemFree on Windows and
-  /// must not be used on CRT-malloc'd memory).
+  /// must not be used on CRT-malloc'd memory). The ASIO backend passes
+  /// the driver's name and its error text through without converting
+  /// them from the ANSI code page to UTF-8, so the decode replaces
+  /// invalid bytes instead of throwing (ES-942).
   String get lastDeviceError {
     final ptr = _lastDeviceError();
     if (ptr == nullptr) return '';
-    final s = ptr.toDartString();
-    _stringFree(ptr);
-    return s;
+    try {
+      return decodeEngineString(ptr);
+    } finally {
+      _stringFree(ptr);
+    }
   }
 
   // --- Playback (IAMF streaming) ---
@@ -1413,9 +1471,11 @@ class EclipsaStudioEngine {
     try {
       final native = resultPtr.ref;
       if (native.status != 0) {
+        // A file-open error holds the path cut to 256 bytes, which can
+        // end inside a character.
         final msg = native.errorMessage == nullptr
             ? 'playback_open failed (status ${native.status})'
-            : native.errorMessage.toDartString();
+            : decodeEngineString(native.errorMessage);
         return PlaybackOpenResult.error(msg);
       }
       final aes = <PlaybackAe>[];
@@ -1851,6 +1911,8 @@ class EclipsaStudioEngine {
 
   /// Set the OAR target layout. Returns true on success.
   /// Use the oar_layout_t enum value (e.g. 2=stereo, 11=binaural).
+  /// Setting the layout the renderer already uses keeps the renderer and
+  /// clears the mix-bus loudness readings.
   bool setLayout(int oarLayoutValue) =>
       _monitoringSetLayout(oarLayoutValue) == 0;
 
@@ -2017,13 +2079,17 @@ class EclipsaStudioEngine {
   ///
   /// The native side hands ownership of the buffer to us (same
   /// contract as [deviceChannelName]) — copy to a Dart `String`, then
-  /// release with `eclipsa_studio_string_free`.
+  /// release with `eclipsa_studio_string_free`. ASIO driver names are
+  /// not converted to UTF-8, so the decode replaces invalid bytes
+  /// instead of throwing and breaking the device list (ES-942).
   String deviceName(int index) {
     final ptr = _deviceName(index);
     if (ptr == nullptr) return '';
-    final s = ptr.toDartString();
-    _stringFree(ptr);
-    return s;
+    try {
+      return decodeEngineString(ptr);
+    } finally {
+      _stringFree(ptr);
+    }
   }
 
   /// Hardware-reported name of output [channel] (0-based) on the open
@@ -2034,13 +2100,16 @@ class EclipsaStudioEngine {
   ///
   /// The native side hands ownership of the buffer to us (same
   /// contract as [lastDeviceError]) — copy to a Dart `String`, then
-  /// release with `eclipsa_studio_string_free`.
+  /// release with `eclipsa_studio_string_free`. As in [deviceName], the
+  /// decode replaces invalid UTF-8 bytes instead of throwing.
   String deviceChannelName(int channel) {
     final ptr = _deviceChannelName(channel);
     if (ptr == nullptr) return '';
-    final s = ptr.toDartString();
-    _stringFree(ptr);
-    return s;
+    try {
+      return decodeEngineString(ptr);
+    } finally {
+      _stringFree(ptr);
+    }
   }
 
   /// Re-enumerate output devices (hot-plug / OS default changes). Safe

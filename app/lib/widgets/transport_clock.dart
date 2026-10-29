@@ -35,17 +35,29 @@ import 'chrome_surface.dart';
 /// - `outlined`: High Contrast, a `borderWidth` `chromeRimDark` outline at
 ///   `radiusSm`, `textValue` with no tracking, the slash in
 ///   `textGhost`.
+///
+/// With [widest] set, the readout's box is at least the size of
+/// `widest / widest` drawn in the same style, and the current readout is
+/// centred in it.
 class TransportClock extends StatelessWidget {
   const TransportClock({
     super.key,
     required this.position,
     required this.duration,
+    this.widest,
     this.onTap,
     this.tooltip,
   });
 
   final String position;
   final String duration;
+
+  /// The longest value the readout can show in its display mode, used
+  /// for both the position and the duration. The top bar sets it so the
+  /// readout keeps one width as the values change length, and the
+  /// controls beside it keep their place.
+  final String? widest;
+
   final VoidCallback? onTap;
   final String? tooltip;
 
@@ -67,6 +79,36 @@ class TransportClock extends StatelessWidget {
       },
     );
     final slash = flat ? T.textGhost : base.color!.withValues(alpha: 0.5);
+    TextSpan readout(String position, String duration) => TextSpan(
+      style: base,
+      children: [
+        TextSpan(text: position),
+        TextSpan(
+          text: ' / ',
+          style: TextStyle(color: slash),
+        ),
+        TextSpan(text: duration),
+      ],
+    );
+    Widget text = Text.rich(readout(position, duration));
+    if (widest != null) {
+      // The widest readout is laid out but not painted, so the box takes
+      // its size under the same text style, scaler and locale as the
+      // visible readout drawn over it.
+      text = Stack(
+        alignment: Alignment.center,
+        children: [
+          Visibility(
+            visible: false,
+            maintainSize: true,
+            maintainAnimation: true,
+            maintainState: true,
+            child: Text.rich(readout(widest!, widest!)),
+          ),
+          text,
+        ],
+      );
+    }
     final box = Container(
       height: 30,
       padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -83,19 +125,7 @@ class TransportClock extends StatelessWidget {
           border: Border.all(color: T.chromeRimDark, width: T.borderWidth),
         ),
       },
-      child: Text.rich(
-        TextSpan(
-          style: base,
-          children: [
-            TextSpan(text: position),
-            TextSpan(
-              text: ' / ',
-              style: TextStyle(color: slash),
-            ),
-            TextSpan(text: duration),
-          ],
-        ),
-      ),
+      child: text,
     );
     final tapped = onTap == null
         ? box

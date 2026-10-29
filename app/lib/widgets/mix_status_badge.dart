@@ -13,14 +13,23 @@
 // limitations under the License.
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../state.dart';
 import '../theme.dart';
+import 'ae_type_badge.dart';
 
-/// Pill badge showing "NOT IN MIX" when an element is excluded.
-class MixStatusBadge extends StatelessWidget {
+/// "Not in mix presentation" line of an element card, shown when the
+/// active mix presentation excludes the element: a block glyph and the
+/// label in `meterYellow`, drawn as an [ElementDetailRow] so it lines up
+/// with the card's other detail lines.
+///
+/// Watches the theme so a `const` call site still rebuilds with the new
+/// colour.
+class MixStatusBadge extends ConsumerWidget {
   /// Tooltip for Creator-mode call sites, where inclusion is editable.
   static const String creatorTooltip =
-      'This element is not in the active mix. '
+      'This element is not in the active mix presentation. '
       'Add it in the Mix tab.';
 
   final String? tooltip;
@@ -28,36 +37,18 @@ class MixStatusBadge extends StatelessWidget {
   const MixStatusBadge({super.key, this.tooltip});
 
   @override
-  Widget build(BuildContext context) {
-    final badge = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-      decoration: BoxDecoration(
-        color: T.meterYellow.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(T.radiusSm),
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(themeModeProvider);
+    final row = ElementDetailRow(
+      glyph: Icon(
+        Icons.block,
+        size: ElementDetailRow.glyphSize,
+        color: T.meterYellow,
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.block, size: 10, color: T.meterYellow),
-          const SizedBox(width: 4),
-          // Flexible so a narrow parent ellipsizes the label instead of
-          // overflowing (the element header at its 120 px minimum).
-          Flexible(
-            child: Text(
-              'NOT IN MIX',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: T.fontCaption,
-                color: T.meterYellow,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-        ],
-      ),
+      label: 'Not in mix presentation',
+      color: T.meterYellow,
     );
-    if (tooltip == null) return badge;
-    return Tooltip(message: tooltip!, child: badge);
+    if (tooltip == null) return row;
+    return Tooltip(message: tooltip!, child: row);
   }
 }

@@ -174,13 +174,13 @@ class _Header extends StatelessWidget {
           height: 8,
           margin: const EdgeInsets.only(right: 8),
           decoration: BoxDecoration(
-            color: Color(element.color),
+            color: aeTypeColor(element.type),
             shape: BoxShape.circle,
           ),
         ),
         Expanded(
           child: Text(
-            '${element.name}  ·  ${element.layout}'
+            '${element.name}  ·  ${SpeakerLayout.displayName(element.layout)}'
             '${layout != null ? '  (${layout!.channelCount} ch)' : ''}',
             style: TextStyle(
               fontSize: T.fontSmall,

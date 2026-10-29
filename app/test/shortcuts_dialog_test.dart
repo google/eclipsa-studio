@@ -15,6 +15,7 @@
 import 'dart:io';
 
 import 'package:eclipsa_studio/widgets/shortcuts_dialog.dart';
+import 'package:eclipsa_studio/workspace/workspace_mode.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -96,5 +97,45 @@ void main() {
   testWidgets('mouse gesture renders as text, not a keycap', (tester) async {
     await pumpDialog(tester);
     expect(find.text('double-click'), findsOneWidget);
+  });
+
+  testWidgets('the View section lists the open workspace tabs', (tester) async {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: Scaffold(body: ShortcutsDialog())),
+      ),
+    );
+    // The landing screen has no tabs.
+    expect(find.text('Elements tab'), findsNothing);
+    expect(find.text('1'), findsNothing);
+
+    // A key cap in the row of [description].
+    Finder capIn(String description, String cap) => find.descendant(
+      of: find
+          .ancestor(of: find.text(description), matching: find.byType(Row))
+          .first,
+      matching: find.text(cap),
+    );
+
+    container.read(workspaceModeProvider.notifier).enterCreator();
+    await tester.pump();
+    for (final (i, row) in [
+      'Elements tab',
+      'Mix tab',
+      'Renderer tab',
+    ].indexed) {
+      expect(capIn(row, isMac ? '⌘' : 'Ctrl'), findsOneWidget, reason: row);
+      expect(capIn(row, '${i + 1}'), findsOneWidget, reason: row);
+    }
+
+    container.read(workspaceModeProvider.notifier).enterPlayback();
+    await tester.pump();
+    expect(find.text('Inspector tab'), findsOneWidget);
+    expect(find.text('Renderer tab'), findsOneWidget);
+    expect(find.text('Elements tab'), findsNothing);
+    expect(find.text('3'), findsNothing);
   });
 }

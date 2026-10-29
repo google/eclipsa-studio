@@ -84,6 +84,7 @@ cc_library(
         "//io:device_manager",
         "//io:volume_info",
         "//io:wav_probe_ffi",
+        "//mix_renderer:offline_iamf_measurer",
         "//mix_renderer:offline_mix_renderer",
         "//meters:meter_state",
         "//renderer:oar_renderer",

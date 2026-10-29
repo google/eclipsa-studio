@@ -14,11 +14,16 @@
 
 #include "adm_import/render/channel_renderer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <functional>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "adm_import/render/object_motion.h"
 #include "adm_import/render/render_progress.h"
 #include "adm_import/scene/layouts.h"
 #include "adm_import/scene/scene.h"
@@ -353,11 +358,11 @@ TEST(ChannelRenderer, ElevationAboveTheTopRingSpreadsAcrossIt) {
 }
 
 // The progress hook reports a non-decreasing frames_done that reaches
-// frames_total, with one OLR-pass worth of work counted per non-coincident
-// source and per object (here: 2 sources phantomed + 1 object = 3 passes).
+// frames_total, which counts output frames: one report per chunk of 65536
+// frames, here three for two full chunks and a partial one.
 TEST(ChannelRenderer, ProgressReportsMonotonicAndReachesTotal) {
   const Layout* l714 = &ImportLayout();
-  const int kN = 4096;
+  const int kN = 2 * 65536 + 1000;
   Scene scene;
   // Two non-coincident bed sources (off-speaker angles) + one object: 3 passes.
   scene.sources = {Spk(22, 5, 1), Spk(-22, 5, 2)};
@@ -380,13 +385,14 @@ TEST(ChannelRenderer, ProgressReportsMonotonicAndReachesTotal) {
   auto out =
       RenderChannelBed(scene, *l714, tracks, 48000, 0, nullptr, &progress);
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_GT(calls, 0);
+  EXPECT_EQ(calls, 3);
   EXPECT_TRUE(monotonic);
-  EXPECT_EQ(final_total, static_cast<uint64_t>(3) * kN);  // 3 passes * frames.
-  EXPECT_EQ(last_done, final_total);                      // Reaches 100%.
+  EXPECT_EQ(final_total, static_cast<uint64_t>(kN));  // Output frames.
+  EXPECT_EQ(last_done, final_total);                  // Reaches 100%.
 }
 
-// Cancelling mid-render aborts with CancelledError.
+// Cancelling aborts the render with CancelledError at the end of the first
+// chunk.
 TEST(ChannelRenderer, CancelAbortsRender) {
   const Layout* l714 = &ImportLayout();
   Scene scene;
@@ -394,12 +400,35 @@ TEST(ChannelRenderer, CancelAbortsRender) {
   std::vector<std::vector<float>> tracks = {std::vector<float>(48000, 1.0f)};
 
   RenderProgress progress;
-  progress.should_cancel = [] { return true; };  // Cancel at the first block.
+  progress.should_cancel = [] { return true; };  // Cancel at the first poll.
 
   auto out =
       RenderChannelBed(scene, *l714, tracks, 48000, 0, nullptr, &progress);
   ASSERT_FALSE(out.ok());
   EXPECT_EQ(out.status().code(), absl::StatusCode::kCancelled);
+}
+
+// Cancelling while the next chunk is being read waits for that read and
+// stops there: the first chunk and the prefetched second are the only reads.
+TEST(ChannelRenderer, StreamedCancelWaitsForThePrefetchRead) {
+  Scene scene;
+  scene.objects = {Obj(1, 10, {Kf(0, 70, 10, 1.0f)})};
+  // Reads run one at a time on a helper thread and the render returns only
+  // after the last one, so the counter is not shared while it runs.
+  int reads = 0;
+  const ReadTracksFn read = [&reads](uint64_t, uint64_t count,
+                                     std::vector<std::vector<float>>& tracks) {
+    ++reads;
+    tracks.assign(1, std::vector<float>(count, 0.5f));
+    return absl::OkStatus();
+  };
+  RenderProgress progress;
+  progress.should_cancel = [] { return true; };
+
+  auto out = RenderChannelBedStreamed(scene, ImportLayout(), 1, 3 * 65536, read,
+                                      48000, 0, nullptr, &progress);
+  EXPECT_EQ(out.status().code(), absl::StatusCode::kCancelled);
+  EXPECT_EQ(reads, 2);
 }
 
 // The layout-anchored conversion's acceptance criterion (ES-567): a cartesian
@@ -464,6 +493,204 @@ TEST(ChannelRenderer, NullAnchorsFallBackToSectorMap) {
   polar_pos.polar = {30.0f, 10.0f, 0.5f};
   const Polar through = ConvertObjectPosition(polar_pos, nullptr);
   EXPECT_EQ(through.azimuth, 30.0f);  // Polar passes through untouched.
+}
+
+// The render before it was chunked: one oar_t per OLR source, run over the
+// whole signal block by block, each source summed into the output in scene
+// order. Sources 0 and 2 of the scene below are a passthrough on L and the
+// LFE; source 1 and the objects render through OLR.
+std::vector<std::vector<float>> OnePassPerSource(
+    const Scene& scene, const std::vector<std::vector<float>>& tracks) {
+  constexpr uint32_t kBlock = 1024;
+  const Layout& layout = ImportLayout();
+  const int num_out = layout.num_channels();
+  const size_t frames = tracks[0].size();
+  std::vector<std::vector<float>> out(num_out,
+                                      std::vector<float>(frames, 0.0f));
+  const AnchorsHandle anchors = MakeAnchors(layout);
+  const auto olr = [&](const std::vector<float>& signal,
+                       const std::function<PosGain(uint64_t)>& at) {
+    oar_config_t cfg = {};
+    cfg.target_layout = layout.oar_layout;
+    cfg.samples_per_channel = kBlock;
+    cfg.sampling_rate = 48000;
+    oar_t* oar = oar_create(&cfg);
+    ASSERT_NE(oar, nullptr);
+    const int gid = oar_add_audio_group(oar);
+    oar_audio_element_config_t ecfg;
+    std::memset(&ecfg, 0, sizeof(ecfg));
+    ecfg.type = ck_object_based;
+    ecfg.obc.num_objects = 1;
+    ASSERT_EQ(oar_add_audio_element(oar, static_cast<uint32_t>(gid), 1, &ecfg),
+              0);
+    std::vector<float> in(kBlock);
+    std::vector<float> rendered(static_cast<size_t>(num_out) * kBlock);
+    for (size_t pos = 0; pos < frames; pos += kBlock) {
+      const size_t valid = std::min<size_t>(kBlock, frames - pos);
+      const PosGain pg = at(pos);
+      const Polar p = ConvertObjectPosition(pg.position, anchors.get());
+      for (size_t n = 0; n < kBlock; ++n) {
+        in[n] = n < valid ? signal[pos + n] * pg.gain : 0.0f;
+      }
+      oar_audio_block_t ib = {in.data(), 1, kBlock};
+      ASSERT_EQ(oar_update_audio_element_data(oar, 1, &ib), 0);
+      oar_metadata_t md;
+      std::memset(&md, 0, sizeof(md));
+      md.type = ck_metadata_object_positions;
+      md.duration = static_cast<int>(kBlock);
+      md.object_positions.param_type = ck_param_constant;
+      md.object_positions.position_type = ck_polar;
+      md.object_positions.num_objects = 1;
+      md.object_positions.polar_positions[0].azimuth = p.azimuth;
+      md.object_positions.polar_positions[0].elevation = p.elevation;
+      md.object_positions.polar_positions[0].distance = p.distance;
+      ASSERT_EQ(oar_update_audio_element_metadata(oar, 1, &md), 0);
+      oar_audio_block_t ob = {rendered.data(), static_cast<uint32_t>(num_out),
+                              kBlock};
+      ASSERT_EQ(oar_render(oar, &ob), 0);
+      for (int ch = 0; ch < num_out; ++ch) {
+        for (size_t n = 0; n < valid; ++n) {
+          out[ch][pos + n] += rendered[static_cast<size_t>(ch) * kBlock + n];
+        }
+      }
+    }
+    oar_destroy(oar);
+  };
+
+  const auto add = [&](int ch, const Source& s) {
+    const std::vector<float>& signal = tracks[s.track_index - 1];
+    for (size_t n = 0; n < frames; ++n) out[ch][n] += signal[n] * s.gain;
+  };
+  add(0, scene.sources[0]);
+  const Source& phantom = scene.sources[1];
+  olr(tracks[phantom.track_index - 1], [&](uint64_t) {
+    PosGain pg;
+    pg.position.polar = phantom.position;
+    pg.gain = phantom.gain;
+    return pg;
+  });
+  add(layout.lfe_index(), scene.sources[2]);
+  for (const ObjectSource& obj : scene.objects) {
+    const std::vector<uint64_t> start =
+        KeyframeStartFrames(obj.timeline, 48000);
+    olr(tracks[obj.track_index - 1], [&](uint64_t frame) {
+      return EvalObjectTimeline(obj.timeline, start,
+                                ActiveKeyframe(start, frame), frame, 48000);
+    });
+  }
+  return out;
+}
+
+// Rendering in chunks, with the passes spread across threads, writes the same
+// samples as one uninterrupted pass per source summed in scene order. The
+// signal spans three chunks of 65536 frames and ends mid-block, and both
+// objects move across the chunk boundaries.
+TEST(ChannelRenderer, ChunkedRenderMatchesOnePassPerSource) {
+  const size_t kN = 2 * 65536 + 1000;
+  Scene scene;
+  scene.sources = {Spk(30, 0, 1), Spk(22, 5, 2), Spk(0, 0, 3, /*lfe=*/true)};
+  ObjectKeyframe ramp = Kf(1.0, -60, 20, 1.0f);
+  ramp.interp_length_s = 1.5;
+  scene.objects = {Obj(4, 10, {Kf(0, 90, 0, 1.0f), ramp}),
+                   Obj(5, 10, {Kc(0, 0.6f, 0.4f, 0.2f), Kc(2.0, -1, -1, 1)})};
+  std::vector<std::vector<float>> tracks(5, std::vector<float>(kN));
+  for (size_t t = 0; t < tracks.size(); ++t) {
+    for (size_t n = 0; n < kN; ++n) {
+      tracks[t][n] = 0.5f * std::sin(0.001f * (t + 1) * static_cast<float>(n));
+    }
+  }
+
+  const std::vector<std::vector<float>> want = OnePassPerSource(scene, tracks);
+  const auto expect_matches = [&](const std::vector<std::vector<float>>& got) {
+    ASSERT_EQ(got.size(), want.size());
+    for (size_t ch = 0; ch < want.size(); ++ch) {
+      ASSERT_EQ(got[ch].size(), kN);
+      const auto diff =
+          std::mismatch(want[ch].begin(), want[ch].end(), got[ch].begin());
+      EXPECT_EQ(diff.first, want[ch].end())
+          << "ch=" << ch << " first differs at frame "
+          << (diff.first - want[ch].begin());
+    }
+  };
+
+  auto out = RenderChannelBed(scene, ImportLayout(), tracks, 48000);
+  ASSERT_TRUE(out.ok()) << out.status();
+  expect_matches(*out);
+
+  // The three OLR passes on one thread, on two (one shares a thread with
+  // another) and on more threads than passes give the same output.
+  const ReadTracksFn read = [&](uint64_t begin, uint64_t count,
+                                std::vector<std::vector<float>>& chunk) {
+    chunk.resize(tracks.size());
+    for (size_t t = 0; t < tracks.size(); ++t) {
+      chunk[t].assign(tracks[t].begin() + begin,
+                      tracks[t].begin() + begin + count);
+    }
+    return absl::OkStatus();
+  };
+  for (const unsigned threads : {1u, 2u, 8u}) {
+    SCOPED_TRACE("threads=" + std::to_string(threads));
+    auto streamed = RenderChannelBedStreamed(
+        scene, ImportLayout(), tracks.size(), kN, read, 48000,
+        /*importance_threshold=*/0, /*stats=*/nullptr, /*progress=*/nullptr,
+        threads);
+    ASSERT_TRUE(streamed.ok()) << streamed.status();
+    expect_matches(*streamed);
+  }
+}
+
+// The streamed render asks for each chunk once, in order, and covers every
+// frame.
+TEST(ChannelRenderer, StreamedRenderReadsEachChunkOnceInOrder) {
+  const uint64_t kN = 2 * 65536 + 1000;
+  Scene scene;
+  scene.objects = {Obj(1, 10, {Kf(0, 70, 10, 1.0f)})};
+  // Reads run one at a time on a helper thread; the render returns only
+  // after the last one, so `reads` is not shared while it runs.
+  std::vector<std::pair<uint64_t, uint64_t>> reads;
+  const ReadTracksFn read = [&](uint64_t begin, uint64_t count,
+                                std::vector<std::vector<float>>& tracks) {
+    reads.emplace_back(begin, count);
+    tracks.assign(2, std::vector<float>(count, 0.5f));
+    return absl::OkStatus();
+  };
+  auto out =
+      RenderChannelBedStreamed(scene, ImportLayout(), 2, kN, read, 48000);
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ((*out)[0].size(), kN);
+  const std::vector<std::pair<uint64_t, uint64_t>> want = {
+      {0, 65536}, {65536, 65536}, {131072, 1000}};
+  EXPECT_EQ(reads, want);
+}
+
+// A read error fails the render with that error.
+TEST(ChannelRenderer, StreamedRenderFailsOnReadError) {
+  Scene scene;
+  scene.objects = {Obj(1, 10, {Kf(0, 70, 10, 1.0f)})};
+  const ReadTracksFn read = [](uint64_t begin, uint64_t count,
+                               std::vector<std::vector<float>>& tracks) {
+    if (begin > 0) return absl::DataLossError("Short PCM read.");
+    tracks.assign(1, std::vector<float>(count, 0.5f));
+    return absl::OkStatus();
+  };
+  auto out = RenderChannelBedStreamed(scene, ImportLayout(), 1, 2 * 65536, read,
+                                      48000);
+  EXPECT_EQ(out.status().code(), absl::StatusCode::kDataLoss);
+}
+
+// A reader that returns fewer frames than asked for fails the render rather
+// than letting a pass read past the chunk.
+TEST(ChannelRenderer, StreamedRenderRejectsShortChunk) {
+  Scene scene;
+  scene.objects = {Obj(1, 10, {Kf(0, 70, 10, 1.0f)})};
+  const ReadTracksFn read = [](uint64_t, uint64_t count,
+                               std::vector<std::vector<float>>& tracks) {
+    tracks.assign(1, std::vector<float>(count - 1, 0.5f));
+    return absl::OkStatus();
+  };
+  auto out =
+      RenderChannelBedStreamed(scene, ImportLayout(), 1, 4096, read, 48000);
+  EXPECT_EQ(out.status().code(), absl::StatusCode::kInternal);
 }
 
 }  // namespace

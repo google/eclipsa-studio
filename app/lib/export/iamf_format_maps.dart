@@ -165,8 +165,6 @@ String binauralFilterProfileName(BinauralProfile p) {
   }
 }
 
-// ── Codec ───────────────────────────────────────────────────────────────
-
 // ── SoundSystem → oar_layout_t ──────────────────────────────────────
 
 /// Maps an Eclipsa Studio SoundSystem to an `oar_layout_t` value for offline
@@ -217,28 +215,4 @@ SoundSystem? soundSystemForOarValue(int oarValue) {
     if (soundSystemToOarLayout(s) == oarValue) return s;
   }
   return null;
-}
-
-// ── Codec ───────────────────────────────────────────────────────────
-
-/// iamf-tools `CodecId` enum name for a given Eclipsa Studio codec string.
-///
-/// LPCM and Opus are the only export codecs; AAC-LC and FLAC are out of
-/// scope for export, while playback decodes all four. Source WAV files use
-/// codec strings like "WAV 24bit" — those are all just LPCM.
-String iamfCodecIdName(String codec) {
-  final upper = codec.toUpperCase();
-  if (upper == 'LPCM' ||
-      upper == 'PCM' ||
-      upper == 'IPCM' ||
-      upper.startsWith('WAV')) {
-    // iamf-tools enum name is CODEC_ID_LPCM (the 4CC is "ipcm", but the
-    // proto enum identifier uses the LPCM spelling).
-    return 'CODEC_ID_LPCM';
-  }
-  if (upper == 'OPUS') return 'CODEC_ID_OPUS';
-  throw UnsupportedError(
-    'IAMF codec "$codec" is not wired in the exporter. '
-    'LPCM and Opus only.',
-  );
 }

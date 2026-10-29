@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -39,11 +40,11 @@ namespace adm2iamf {
 namespace {
 
 // The render front-end: open the BW64, parse axml + chna into the ADM
-// model, build the canonical scene, and read the PCM.
+// model and build the canonical scene. The PCM stays in the file; the render
+// reads it a chunk at a time through `reader`.
 struct LoadedAdm {
   Scene scene;
-  std::vector<std::vector<float>> tracks;
-  uint32_t sample_rate = 0;
+  std::unique_ptr<Bw64Reader> reader;
 };
 
 absl::StatusOr<LoadedAdm> LoadAdm(absl::string_view input_path) {
@@ -72,10 +73,7 @@ absl::StatusOr<LoadedAdm> LoadAdm(absl::string_view input_path) {
 
   LoadedAdm loaded;
   loaded.scene = *std::move(scene);
-  loaded.sample_rate = (*reader)->format().sample_rate;
-  auto frames =
-      (*reader)->ReadPlanarFloat(0, (*reader)->num_frames(), loaded.tracks);
-  if (!frames.ok()) return frames.status();
+  loaded.reader = *std::move(reader);
   return loaded;
 }
 
@@ -162,7 +160,8 @@ absl::StatusOr<ConvertResult> ConvertAdmFileToChannelBed(
   auto loaded = LoadAdm(input_path);
   if (!loaded.ok()) return loaded.status();
 
-  const uint32_t source_rate = loaded->sample_rate;
+  Bw64Reader& reader = *loaded->reader;
+  const uint32_t source_rate = reader.format().sample_rate;
   const bool resample = source_rate != kBedSampleRate;
 
   // Progress: with a resample pass to follow, the render owns the first 80%
@@ -187,10 +186,17 @@ absl::StatusOr<ConvertResult> ConvertAdmFileToChannelBed(
   }
 
   ConvertResult result;
-  auto channels =
-      RenderChannelBed(loaded->scene, ImportLayout(), loaded->tracks,
-                       source_rate, min_importance, &result.stats,
-                       progress != nullptr ? &render_progress : nullptr);
+  const ReadTracksFn read = [&reader](uint64_t begin, uint64_t count,
+                                      std::vector<std::vector<float>>& tracks) {
+    auto got = reader.ReadPlanarFloat(begin, count, tracks);
+    if (!got.ok()) return got.status();
+    if (*got != count) return absl::DataLossError("Short PCM read.");
+    return absl::OkStatus();
+  };
+  auto channels = RenderChannelBedStreamed(
+      loaded->scene, ImportLayout(), reader.format().channels,
+      reader.num_frames(), read, source_rate, min_importance, &result.stats,
+      progress != nullptr ? &render_progress : nullptr);
   if (!channels.ok()) return channels.status();
   result.channels = *std::move(channels);
   result.sample_rate = source_rate;

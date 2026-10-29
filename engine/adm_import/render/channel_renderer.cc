@@ -15,11 +15,17 @@
 #include "adm_import/render/channel_renderer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -40,8 +46,8 @@ namespace {
 constexpr uint32_t kBlock = 1024;     // OLR samples per render call.
 constexpr float kAngleTolDeg = 1.0f;  // "Coincident" threshold.
 
-// We drive OLR one object at a time and write
-// object_positions.polar_positions[0] (see RenderViaOlr). Assert OAR's
+// Each OLR pass drives one object and writes
+// object_positions.polar_positions[0] (see OlrPass::Render). Assert OAR's
 // fixed-size array can hold it, so a change to def_max_number_of_objects fails
 // the build rather than silently writing out of bounds.
 static_assert(def_max_number_of_objects >= 1,
@@ -68,104 +74,143 @@ int CoincidentSpeaker(const Layout& layout, const Polar& p) {
   return -1;
 }
 
-// Drives one OLR pass over `signal`, pulling the (position, gain) for each
-// render block from `pos_gain`, and sums the result into `out` (planar).
-// `work_done`/`work_total` track cumulative render frames across all of this
-// renderer's OLR passes so `progress` reports one smooth 0..1 ratio; the pass
-// aborts with `absl::CancelledError` if `progress` reports cancellation.
-absl::Status RenderViaOlr(const Layout& layout,
-                          const oar_position_anchors_t* anchors,
-                          const std::vector<float>& signal,
-                          uint32_t sample_rate, const PosGainFn& pos_gain,
-                          std::vector<std::vector<float>>& out,
-                          const RenderProgress* progress, uint64_t work_total,
-                          uint64_t& work_done) {
-  const int num_out = layout.num_channels();
-  const uint64_t frames = signal.size();
-
-  oar_config_t cfg = {};
-  cfg.target_layout = layout.oar_layout;
-  cfg.samples_per_channel = kBlock;
-  cfg.sampling_rate = sample_rate;
-  oar_t* oar = oar_create(&cfg);
-  if (oar == nullptr) return absl::InternalError("oar_create failed.");
-  auto cleanup = [&](absl::Status s) {
-    oar_destroy(oar);
-    return s;
-  };
-
-  int gid = oar_add_audio_group(oar);
-  if (gid < 0)
-    return cleanup(absl::InternalError("oar_add_audio_group failed."));
-
-  oar_audio_element_config_t ecfg;
-  std::memset(&ecfg, 0, sizeof(ecfg));
-  ecfg.type = ck_object_based;
-  ecfg.obc.num_objects = 1;
-  constexpr uint32_t kElemId = 1;
-  if (oar_add_audio_element(oar, static_cast<uint32_t>(gid), kElemId, &ecfg) !=
-      0) {
-    return cleanup(absl::InternalError("oar_add_audio_element failed."));
-  }
-  if (oar_get_number_of_audio_element_channels(oar, kElemId) != 1 ||
-      static_cast<int>(oar_get_number_of_output_channels(oar)) != num_out) {
-    return cleanup(absl::InternalError("unexpected OAR channel counts."));
+// One OLR pass: a persistent oar_t rendering one mono source with a
+// per-block (position, gain). The instance lives for the whole render, so
+// rendering it chunk by chunk carries OLR's gain-interpolation state across
+// chunk boundaries exactly as one uninterrupted pass would.
+class OlrPass {
+ public:
+  OlrPass(int track, PosGainFn pos_gain)
+      : track_(track), pos_gain_(std::move(pos_gain)) {}
+  OlrPass(const OlrPass&) = delete;
+  OlrPass& operator=(const OlrPass&) = delete;
+  ~OlrPass() {
+    if (oar_ != nullptr) oar_destroy(oar_);
   }
 
-  std::vector<float> in(kBlock);
-  std::vector<float> rendered(static_cast<size_t>(num_out) * kBlock);
+  int track() const { return track_; }
 
-  for (uint64_t pos = 0; pos < frames; pos += kBlock) {
-    const uint32_t valid =
-        static_cast<uint32_t>(std::min<uint64_t>(kBlock, frames - pos));
-    const std::pair<ObjectPosition, float> pg = pos_gain(pos);
-    const Polar p = ConvertObjectPosition(pg.first, anchors);
-    const float gain = pg.second;
+  absl::Status Init(const Layout& layout, uint32_t sample_rate) {
+    num_out_ = layout.num_channels();
+    oar_config_t cfg = {};
+    cfg.target_layout = layout.oar_layout;
+    cfg.samples_per_channel = kBlock;
+    cfg.sampling_rate = sample_rate;
+    oar_ = oar_create(&cfg);
+    if (oar_ == nullptr) return absl::InternalError("oar_create failed.");
+    const int gid = oar_add_audio_group(oar_);
+    if (gid < 0) return absl::InternalError("oar_add_audio_group failed.");
+    oar_audio_element_config_t ecfg;
+    std::memset(&ecfg, 0, sizeof(ecfg));
+    ecfg.type = ck_object_based;
+    ecfg.obc.num_objects = 1;
+    if (oar_add_audio_element(oar_, static_cast<uint32_t>(gid), kElemId,
+                              &ecfg) != 0) {
+      return absl::InternalError("oar_add_audio_element failed.");
+    }
+    if (oar_get_number_of_audio_element_channels(oar_, kElemId) != 1 ||
+        static_cast<int>(oar_get_number_of_output_channels(oar_)) != num_out_) {
+      return absl::InternalError("unexpected OAR channel counts.");
+    }
+    in_.assign(kBlock, 0.0f);
+    return absl::OkStatus();
+  }
 
-    for (uint32_t n = 0; n < kBlock; ++n) {
-      in[n] = (n < valid) ? signal[pos + n] * gain : 0.0f;
-    }
-    oar_audio_block_t ib = {in.data(), 1, kBlock};
-    if (oar_update_audio_element_data(oar, kElemId, &ib) != 0) {
-      return cleanup(
-          absl::InternalError("oar_update_audio_element_data failed."));
-    }
-
-    oar_metadata_t md;
-    std::memset(&md, 0, sizeof(md));
-    md.type = ck_metadata_object_positions;
-    md.duration = static_cast<int>(kBlock);
-    md.object_positions.param_type = ck_param_constant;
-    md.object_positions.position_type = ck_polar;
-    md.object_positions.num_objects = 1;
-    md.object_positions.polar_positions[0].azimuth = p.azimuth;
-    md.object_positions.polar_positions[0].elevation = p.elevation;
-    md.object_positions.polar_positions[0].distance = p.distance;
-    if (oar_update_audio_element_metadata(oar, kElemId, &md) != 0) {
-      return cleanup(
-          absl::InternalError("oar_update_audio_element_metadata failed."));
-    }
-
-    std::fill(rendered.begin(), rendered.end(), 0.0f);
-    oar_audio_block_t ob = {rendered.data(), static_cast<uint32_t>(num_out),
-                            kBlock};
-    if (oar_render(oar, &ob) != 0) {
-      return cleanup(absl::InternalError("oar_render failed."));
-    }
-    for (int ch = 0; ch < num_out; ++ch) {
-      const float* col = rendered.data() + static_cast<size_t>(ch) * kBlock;
-      for (uint32_t n = 0; n < valid; ++n) out[ch][pos + n] += col[n];
-    }
-
-    work_done += valid;
-    if (progress != nullptr) {
-      progress->Report(work_done, work_total);
-      if (progress->ShouldCancel()) {
-        return cleanup(absl::CancelledError("render cancelled"));
+  // Renders frames [begin, end) (begin a multiple of kBlock). `signal` holds
+  // those frames of this pass's track. The output is block-major: block b's
+  // planar output (num_out x kBlock) starts at out + b * num_out * kBlock,
+  // and oar_render writes it in place.
+  absl::Status Render(const oar_position_anchors_t* anchors, uint64_t begin,
+                      uint64_t end, const float* signal, float* out) {
+    for (uint64_t pos = begin; pos < end; pos += kBlock) {
+      const uint32_t valid =
+          static_cast<uint32_t>(std::min<uint64_t>(kBlock, end - pos));
+      const std::pair<ObjectPosition, float> pg = pos_gain_(pos);
+      const Polar p = ConvertObjectPosition(pg.first, anchors);
+      const float gain = pg.second;
+      const float* x = signal + (pos - begin);
+      for (uint32_t n = 0; n < kBlock; ++n) {
+        in_[n] = (n < valid) ? x[n] * gain : 0.0f;
+      }
+      oar_audio_block_t ib = {in_.data(), 1, kBlock};
+      if (oar_update_audio_element_data(oar_, kElemId, &ib) != 0) {
+        return absl::InternalError("oar_update_audio_element_data failed.");
+      }
+      oar_metadata_t md;
+      std::memset(&md, 0, sizeof(md));
+      md.type = ck_metadata_object_positions;
+      md.duration = static_cast<int>(kBlock);
+      md.object_positions.param_type = ck_param_constant;
+      md.object_positions.position_type = ck_polar;
+      md.object_positions.num_objects = 1;
+      md.object_positions.polar_positions[0].azimuth = p.azimuth;
+      md.object_positions.polar_positions[0].elevation = p.elevation;
+      md.object_positions.polar_positions[0].distance = p.distance;
+      if (oar_update_audio_element_metadata(oar_, kElemId, &md) != 0) {
+        return absl::InternalError("oar_update_audio_element_metadata failed.");
+      }
+      float* dst = out + (pos - begin) * static_cast<size_t>(num_out_);
+      oar_audio_block_t ob = {dst, static_cast<uint32_t>(num_out_), kBlock};
+      if (oar_render(oar_, &ob) != 0) {
+        return absl::InternalError("oar_render failed.");
       }
     }
+    return absl::OkStatus();
   }
-  return cleanup(absl::OkStatus());
+
+ private:
+  static constexpr uint32_t kElemId = 1;
+  int track_;
+  PosGainFn pos_gain_;
+  oar_t* oar_ = nullptr;
+  int num_out_ = 0;
+  std::vector<float> in_;
+};
+
+// Runs fn(0) .. fn(count - 1) on up to `threads` threads, the caller's
+// included, and returns once every call has finished. When a thread cannot
+// be started, the threads that did start and the caller share the work. The
+// first exception thrown by `fn` stops further calls and is rethrown here
+// once all threads have joined.
+template <typename Fn>
+void RunParallel(unsigned threads, size_t count, const Fn& fn) {
+  std::atomic<size_t> next{0};
+  std::mutex error_mu;
+  std::exception_ptr error;
+  const auto worker = [&] {
+    try {
+      for (size_t i = next.fetch_add(1); i < count; i = next.fetch_add(1)) {
+        fn(i);
+      }
+    } catch (...) {
+      next.store(count);
+      const std::lock_guard<std::mutex> lock(error_mu);
+      if (error == nullptr) error = std::current_exception();
+    }
+  };
+  const size_t n = std::min<size_t>(threads, count);
+  std::vector<std::thread> pool;
+  pool.reserve(n);
+  for (size_t t = 1; t < n; ++t) {
+    try {
+      pool.emplace_back(worker);
+    } catch (...) {  // std::system_error, or std::bad_alloc from libc++.
+      break;
+    }
+  }
+  worker();
+  for (std::thread& t : pool) t.join();
+  if (error != nullptr) std::rethrow_exception(error);
+}
+
+// Threads for the OLR passes: the hardware thread count minus one, at most
+// 8. The chunk reader runs on one more thread beside them. On a 54-track,
+// 337 s master (44 objects) on an 18-core Apple M5 Pro, 8 threads render in
+// 5.2 s and 17 in 4.5 s, while the system time grows from 4.2 s to 20.3 s.
+unsigned RenderThreads() {
+  constexpr unsigned kMaxThreads = 8;
+  const unsigned hw = std::thread::hardware_concurrency();
+  return std::clamp(hw > 1 ? hw - 1 : 1, 1u, kMaxThreads);
 }
 
 }  // namespace
@@ -189,40 +234,32 @@ Polar ConvertObjectPosition(const ObjectPosition& p,
   return {s.azimuth, s.elevation, s.distance};
 }
 
-absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBed(
-    const Scene& scene, const Layout& layout,
-    const std::vector<std::vector<float>>& input_tracks, uint32_t sample_rate,
+absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBedStreamed(
+    const Scene& scene, const Layout& layout, size_t num_tracks,
+    uint64_t frames, const ReadTracksFn& read_tracks, uint32_t sample_rate,
     int importance_threshold, RenderStats* stats,
-    const RenderProgress* progress) {
+    const RenderProgress* progress, unsigned threads) {
   const int num_out = layout.num_channels();
 
-  auto signal_for =
-      [&](int track_index,
-          const char* label) -> absl::StatusOr<const std::vector<float>*> {
-    const int idx = track_index - 1;
-    if (idx < 0 || idx >= static_cast<int>(input_tracks.size())) {
+  const auto check_track = [&](int track_index,
+                               const std::string& label) -> absl::Status {
+    if (track_index < 1 || static_cast<size_t>(track_index) > num_tracks) {
       return absl::InvalidArgumentError(
           absl::StrCat("'", label, "' has out-of-range track index ",
-                       track_index, " (", input_tracks.size(), " tracks)."));
+                       track_index, " (", num_tracks, " tracks)."));
     }
-    return &input_tracks[idx];
+    return absl::OkStatus();
   };
-
-  uint64_t frames = 0;
   for (const Source& s : scene.sources) {
-    auto sig = signal_for(s.track_index, s.label.c_str());
-    if (!sig.ok()) return sig.status();
-    frames = std::max<uint64_t>(frames, (*sig)->size());
+    if (absl::Status st = check_track(s.track_index, s.label); !st.ok()) {
+      return st;
+    }
   }
   for (const ObjectSource& o : scene.objects) {
-    auto sig = signal_for(o.track_index, o.label.c_str());
-    if (!sig.ok()) return sig.status();
-    frames = std::max<uint64_t>(frames, (*sig)->size());
+    if (absl::Status st = check_track(o.track_index, o.label); !st.ok()) {
+      return st;
+    }
   }
-
-  std::vector<std::vector<float>> out(
-      num_out, std::vector<float>(static_cast<size_t>(frames), 0.0f));
-  RenderStats local;
 
   // One anchor set per target layout, shared by every OLR pass below: the
   // layout-anchored cartesian->polar conversion pins room-cube walls and
@@ -235,73 +272,185 @@ absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBed(
         "position conversion anchors unavailable for ", layout.name, "."));
   }
 
-  // Total render work = one pass over `frames` per OLR pass we are about to run
-  // (one per non-coincident bed source, one per kept object). Passthrough/LFE
-  // copies are cheap and not counted; `work_done` accumulates as passes run.
-  uint64_t olr_passes = 0;
-  for (const Source& src : scene.sources) {
-    if (!src.is_lfe && CoincidentSpeaker(layout, src.position) < 0)
-      ++olr_passes;
-  }
-  for (const ObjectSource& obj : scene.objects) {
-    if (obj.importance >= importance_threshold) ++olr_passes;
-  }
-  const uint64_t work_total = olr_passes * frames;
-  uint64_t work_done = 0;
+  // Every source's contribution, in scene order (bed sources, then kept
+  // objects). The output is summed in this order, so the result does not
+  // depend on how the passes are spread across threads.
+  struct Contribution {
+    int track = 0;     // 0-based input track.
+    int channel = -1;  // >= 0: direct copy into this channel with `gain`.
+    float gain = 1.0f;
+    int pass = -1;  // >= 0: index into `passes`.
+  };
+  RenderStats local;
+  std::vector<Contribution> contributions;
+  std::vector<std::unique_ptr<OlrPass>> passes;
 
-  // Bed channels: passthrough / LFE / OLR phantom.
   for (const Source& src : scene.sources) {
-    const std::vector<float>& signal = input_tracks[src.track_index - 1];
+    const int track = src.track_index - 1;
     if (src.is_lfe) {
-      const int lfe = layout.lfe_index();
-      for (size_t n = 0; n < signal.size(); ++n)
-        out[lfe][n] += signal[n] * src.gain;
+      contributions.push_back({track, layout.lfe_index(), src.gain, -1});
       ++local.lfe;
       continue;
     }
     const int coincident = CoincidentSpeaker(layout, src.position);
     if (coincident >= 0) {
-      for (size_t n = 0; n < signal.size(); ++n) {
-        out[coincident][n] += signal[n] * src.gain;
-      }
+      contributions.push_back({track, coincident, src.gain, -1});
       ++local.passthrough;
       continue;
     }
     ObjectPosition pos;
     pos.polar = src.position;
     const float gain = src.gain;
-    absl::Status s = RenderViaOlr(
-        layout, anchors.get(), signal, sample_rate,
-        [&](uint64_t) { return std::pair<ObjectPosition, float>{pos, gain}; },
-        out, progress, work_total, work_done);
-    if (!s.ok()) return s;
+    passes.push_back(std::make_unique<OlrPass>(track, [pos, gain](uint64_t) {
+      return std::pair<ObjectPosition, float>{pos, gain};
+    }));
+    contributions.push_back(
+        {track, -1, 1.0f, static_cast<int>(passes.size()) - 1});
     ++local.olr;
   }
-
-  // Dynamic objects: always OLR, with time-varying position/gain.
   for (const ObjectSource& obj : scene.objects) {
     if (obj.importance < importance_threshold) {
       ++local.objects_dropped;
       continue;
     }
-    const std::vector<float>& signal = input_tracks[obj.track_index - 1];
-    const std::vector<uint64_t> start_frame =
-        KeyframeStartFrames(obj.timeline, sample_rate);
-    absl::Status s = RenderViaOlr(
-        layout, anchors.get(), signal, sample_rate,
-        [&](uint64_t block_start) -> std::pair<ObjectPosition, float> {
-          const size_t cur = ActiveKeyframe(start_frame, block_start);
-          const PosGain pg = EvalObjectTimeline(obj.timeline, start_frame, cur,
+    const int track = obj.track_index - 1;
+    // `scene` outlives the render, so the pass may point into it.
+    passes.push_back(std::make_unique<OlrPass>(
+        track,
+        [o = &obj, start = KeyframeStartFrames(obj.timeline, sample_rate),
+         sample_rate](
+            uint64_t block_start) -> std::pair<ObjectPosition, float> {
+          const size_t cur = ActiveKeyframe(start, block_start);
+          const PosGain pg = EvalObjectTimeline(o->timeline, start, cur,
                                                 block_start, sample_rate);
           return {pg.position, pg.gain};
-        },
-        out, progress, work_total, work_done);
-    if (!s.ok()) return s;
+        }));
+    contributions.push_back(
+        {track, -1, 1.0f, static_cast<int>(passes.size()) - 1});
     ++local.objects;
+  }
+  for (auto& pass : passes) {
+    if (absl::Status s = pass->Init(layout, sample_rate); !s.ok()) return s;
+  }
+
+  std::vector<std::vector<float>> out(
+      num_out, std::vector<float>(static_cast<size_t>(frames), 0.0f));
+
+  // Render in chunks of kChunkBlocks blocks. The next chunk's PCM is read on
+  // its own thread while the current one renders. Within a chunk the passes
+  // run in parallel, each into its own buffer; the summation then runs in
+  // parallel across output channels, each adding contributions in scene
+  // order.
+  constexpr uint64_t kChunkBlocks = 64;
+  constexpr uint64_t kChunk = kChunkBlocks * kBlock;
+  const unsigned render_threads = threads > 0 ? threads : RenderThreads();
+  std::vector<std::vector<float>> pass_buf(
+      passes.size(), std::vector<float>(static_cast<size_t>(num_out) * kChunk));
+  std::vector<absl::Status> pass_status(passes.size());
+  std::vector<std::vector<float>> tracks[2];
+  const auto read_chunk = [&](int slot, uint64_t begin) -> absl::Status {
+    const uint64_t count = std::min<uint64_t>(kChunk, frames - begin);
+    std::vector<std::vector<float>>& chunk = tracks[slot];
+    if (absl::Status s = read_tracks(begin, count, chunk); !s.ok()) return s;
+    if (chunk.size() < num_tracks) {
+      return absl::InternalError("track reader returned too few tracks.");
+    }
+    for (size_t t = 0; t < num_tracks; ++t) {
+      if (chunk[t].size() < count) {
+        return absl::InternalError("track reader returned a short chunk.");
+      }
+    }
+    return absl::OkStatus();
+  };
+  // A future from std::async waits for its task in its destructor, so every
+  // exit below, by return or by exception, waits for an in-flight read
+  // before `tracks` is destroyed. `pending` must stay declared after
+  // `tracks` and `read_chunk`.
+  std::future<absl::Status> pending;
+  if (frames > 0) pending = std::async(std::launch::async, read_chunk, 0, 0);
+
+  int slot = 0;
+  for (uint64_t begin = 0; begin < frames; begin += kChunk, slot ^= 1) {
+    const uint64_t end = std::min<uint64_t>(frames, begin + kChunk);
+    if (absl::Status s = pending.get(); !s.ok()) return s;
+    if (end < frames) {
+      pending = std::async(std::launch::async, read_chunk, slot ^ 1, end);
+    }
+    const std::vector<std::vector<float>>& chunk = tracks[slot];
+    RunParallel(render_threads, passes.size(), [&](size_t p) {
+      pass_status[p] = passes[p]->Render(anchors.get(), begin, end,
+                                         chunk[passes[p]->track()].data(),
+                                         pass_buf[p].data());
+    });
+    // Returning destroys `pending`, which waits for the next chunk's read and
+    // drops its status; the first error is the one reported.
+    for (const absl::Status& s : pass_status) {
+      if (!s.ok()) return s;
+    }
+    RunParallel(render_threads, static_cast<size_t>(num_out), [&](size_t ch) {
+      float* dst = out[ch].data();
+      for (const Contribution& c : contributions) {
+        if (c.pass < 0) {
+          if (static_cast<int>(ch) != c.channel) continue;
+          const float* src = chunk[c.track].data();
+          for (uint64_t n = begin; n < end; ++n) {
+            dst[n] += src[n - begin] * c.gain;
+          }
+          continue;
+        }
+        const float* buf = pass_buf[c.pass].data();
+        for (uint64_t b = begin; b < end; b += kBlock) {
+          const float* src = buf + (b - begin) * static_cast<size_t>(num_out) +
+                             static_cast<size_t>(ch) * kBlock;
+          const uint64_t n_end = std::min<uint64_t>(end, b + kBlock);
+          for (uint64_t n = b; n < n_end; ++n) dst[n] += src[n - b];
+        }
+      }
+    });
+    if (progress != nullptr) {
+      progress->Report(end, frames);
+      if (progress->ShouldCancel()) {
+        return absl::CancelledError("render cancelled");
+      }
+    }
   }
 
   if (stats != nullptr) *stats = local;
   return out;
+}
+
+absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBed(
+    const Scene& scene, const Layout& layout,
+    const std::vector<std::vector<float>>& input_tracks, uint32_t sample_rate,
+    int importance_threshold, RenderStats* stats,
+    const RenderProgress* progress) {
+  // The output spans the longest track a source uses; shorter tracks read
+  // as silence past their end.
+  uint64_t frames = 0;
+  const auto extend = [&](int track_index) {
+    const int idx = track_index - 1;
+    if (idx >= 0 && idx < static_cast<int>(input_tracks.size())) {
+      frames = std::max<uint64_t>(frames, input_tracks[idx].size());
+    }
+  };
+  for (const Source& s : scene.sources) extend(s.track_index);
+  for (const ObjectSource& o : scene.objects) extend(o.track_index);
+  const ReadTracksFn read = [&](uint64_t begin, uint64_t count,
+                                std::vector<std::vector<float>>& tracks) {
+    tracks.resize(input_tracks.size());
+    for (size_t t = 0; t < input_tracks.size(); ++t) {
+      const std::vector<float>& src = input_tracks[t];
+      tracks[t].assign(static_cast<size_t>(count), 0.0f);
+      if (begin < src.size()) {
+        const uint64_t n = std::min<uint64_t>(count, src.size() - begin);
+        std::copy_n(src.data() + begin, n, tracks[t].data());
+      }
+    }
+    return absl::OkStatus();
+  };
+  return RenderChannelBedStreamed(scene, layout, input_tracks.size(), frames,
+                                  read, sample_rate, importance_threshold,
+                                  stats, progress);
 }
 
 }  // namespace adm2iamf

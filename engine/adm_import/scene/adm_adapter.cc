@@ -43,6 +43,7 @@ using adm::AudioChannelFormat;
 using adm::AudioObject;
 using adm::AudioPackFormat;
 using adm::Model;
+using adm::ModelIndex;
 using adm::TypeDefinition;
 
 // A lowPass <frequency> at or below this cutoff marks an LFE channel
@@ -71,10 +72,11 @@ struct ResolvedChannel {
 
 // Pack-level context for cube classification: whether the pack occupies
 // the side slots (±1,0,0) / M±090 — Table 2B's rear disambiguation.
-PackContext ContextForPack(const Model& model, const AudioPackFormat& pack) {
+PackContext ContextForPack(const ModelIndex& index,
+                           const AudioPackFormat& pack) {
   PackContext ctx;
   for (const std::string& ch_id : pack.channel_format_id_refs) {
-    const AudioChannelFormat* ch = model.Channel(ch_id);
+    const AudioChannelFormat* ch = index.Channel(ch_id);
     if (ch == nullptr || ch->blocks.empty()) continue;
     const adm::AudioBlockFormat& b = ch->blocks.front();
     if (b.cart.has_value()) {
@@ -284,14 +286,19 @@ std::vector<const AudioObject*> UsedObjects(const Model& model) {
     for (const auto& o : model.objects) used.push_back(&o);
     return used;
   }
-  absl::flat_hash_set<std::string> object_ids;
+  // Every content whose id a programme references contributes its objects,
+  // duplicate ids included. One pass over the refs and one over the
+  // contents keeps this linear (ES-849).
+  absl::flat_hash_set<std::string> content_ids;
   for (const auto& prog : model.programmes) {
-    for (const auto& cref : prog.content_id_refs) {
-      for (const auto& content : model.contents) {
-        if (content.id != cref) continue;
-        for (const auto& oref : content.object_id_refs) object_ids.insert(oref);
-      }
-    }
+    content_ids.insert(prog.content_id_refs.begin(),
+                       prog.content_id_refs.end());
+  }
+  absl::flat_hash_set<std::string> object_ids;
+  for (const auto& content : model.contents) {
+    if (!content_ids.contains(content.id)) continue;
+    object_ids.insert(content.object_id_refs.begin(),
+                      content.object_id_refs.end());
   }
   for (const auto& o : model.objects) {
     if (object_ids.contains(o.id)) used.push_back(&o);
@@ -345,13 +352,13 @@ ObjectPosition ResolveObjectPosition(const adm::AudioBlockFormat& block,
 
 // Resolves the WAV track for a source: by audioTrackUID (objects) if available,
 // else by audioChannelFormat id (beds), else sequential when no chna exists.
-uint16_t ResolveTrack(const Model& model, const std::string& uid,
+uint16_t ResolveTrack(const ModelIndex& index, const std::string& uid,
                       const std::string& channel_id, bool have_chna,
                       int& sequential) {
   if (!uid.empty()) {
-    if (uint16_t t = model.TrackIndexForUid(uid)) return t;
+    if (uint16_t t = index.TrackIndexForUid(uid)) return t;
   }
-  if (uint16_t t = model.TrackIndexForChannel(channel_id)) return t;
+  if (uint16_t t = index.TrackIndexForChannel(channel_id)) return t;
   if (!have_chna) return static_cast<uint16_t>(++sequential);
   return 0;
 }
@@ -396,26 +403,28 @@ absl::StatusOr<Scene> BuildSceneFromAdm(const Model& model) {
   Scene scene;
   const bool have_chna = !model.chna.empty();
   int sequential_track = 0;  // Fallback when no chna table exists.
+  // Pack, channel and track lookups go through hash maps (ES-849).
+  const ModelIndex index(model);
 
   absl::flat_hash_set<std::string> processed_packs;
 
   for (const AudioObject* obj : UsedObjects(model)) {
     for (const std::string& pack_ref : obj->pack_format_id_refs) {
-      const AudioPackFormat* pack = model.Pack(pack_ref);
+      const AudioPackFormat* pack = index.Pack(pack_ref);
       if (pack == nullptr) continue;
 
       if (pack->type == TypeDefinition::kDirectSpeakers) {
         // Bed: shared across objects, so process each pack once.
         if (!processed_packs.insert(pack_ref).second) continue;
-        const PackContext context = ContextForPack(model, *pack);
+        const PackContext context = ContextForPack(index, *pack);
         for (const std::string& ch_id : pack->channel_format_id_refs) {
-          const AudioChannelFormat* ch = model.Channel(ch_id);
+          const AudioChannelFormat* ch = index.Channel(ch_id);
           // Resolve the track before any bail-out: with no chna table the
           // fallback is sequential, so a dangling channel ref must still
           // consume its index or every later channel in the pack shifts one
           // track down (wrong audio on the wrong speaker).
           const uint16_t ti =
-              ResolveTrack(model, "", ch_id, have_chna, sequential_track);
+              ResolveTrack(index, "", ch_id, have_chna, sequential_track);
           if (ch == nullptr) {
             RecordUnresolved(scene, ch_id, "",
                              "audioChannelFormat definition not found");
@@ -447,11 +456,11 @@ absl::StatusOr<Scene> BuildSceneFromAdm(const Model& model) {
         // Object: zip the pack's channel(s) with the object's track UID(s).
         const auto& cids = pack->channel_format_id_refs;
         for (size_t k = 0; k < cids.size(); ++k) {
-          const AudioChannelFormat* ch = model.Channel(cids[k]);
+          const AudioChannelFormat* ch = index.Channel(cids[k]);
           const std::string uid =
               k < obj->track_uid_refs.size() ? obj->track_uid_refs[k] : "";
           uint16_t ti =
-              ResolveTrack(model, uid, cids[k], have_chna, sequential_track);
+              ResolveTrack(index, uid, cids[k], have_chna, sequential_track);
           if (ch == nullptr || ch->blocks.empty() || ti == 0) {
             RecordUnresolved(
                 scene, cids[k], ch == nullptr ? "" : ch->name,
@@ -493,10 +502,10 @@ absl::StatusOr<Scene> BuildSceneFromAdm(const Model& model) {
         if (!per_object && !processed_packs.insert(pack_ref).second) continue;
         const auto& cids = pack->channel_format_id_refs;
         for (size_t k = 0; k < cids.size(); ++k) {
-          const AudioChannelFormat* ch = model.Channel(cids[k]);
+          const AudioChannelFormat* ch = index.Channel(cids[k]);
           const std::string uid =
               k < obj->track_uid_refs.size() ? obj->track_uid_refs[k] : "";
-          ResolveTrack(model, uid, cids[k], have_chna, sequential_track);
+          ResolveTrack(index, uid, cids[k], have_chna, sequential_track);
           RecordUnsupportedPack(scene, cids[k], ch == nullptr ? "" : ch->name,
                                 pack->type);
         }

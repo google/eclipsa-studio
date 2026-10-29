@@ -21,7 +21,7 @@
 
 /// Abstract base class for all pull-based audio processing nodes.
 ///
-/// Nodes form a directed acyclic graph; the leaf nodes (e.g. WavReader)
+/// Nodes form a directed acyclic graph; the leaf nodes (sources)
 /// produce audio and interior nodes transform it.  The root (mix bus /
 /// device output) drives the graph by calling process() on its inputs.
 ///

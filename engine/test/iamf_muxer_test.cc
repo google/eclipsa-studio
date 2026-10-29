@@ -21,9 +21,14 @@
 
 #include "iamf/iamf_muxer.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "iamf/gpac_system.h"
 
@@ -129,6 +134,64 @@ TEST(IamfMuxerMux, MuxesZeroDurationSttsTail) {
   EXPECT_EQ(track_count, 2u);
   ASSERT_NE(video, 0u);
   EXPECT_EQ(video_samples, kFixtureFrames);
+}
+
+TEST(IamfMuxerMux, MuxesAudioOnly) {
+  eclipsa_studio::IamfMuxer muxer;
+  const std::string out = TempPath("audio_only_muxed.mp4");
+  ASSERT_EQ(muxer.MuxAudioOnly(FindFixture(kIamfFixture), out), 0);
+
+  eclipsa_studio::GpacSystem gpac;
+  ASSERT_TRUE(gpac.ok());
+  GF_ISOFile* file = gf_isom_open(out.c_str(), GF_ISOM_OPEN_READ, nullptr);
+  ASSERT_NE(file, nullptr);
+  const u32 track_count = gf_isom_get_track_count(file);
+  const u32 media_type = track_count == 0 ? 0 : gf_isom_get_media_type(file, 1);
+  const u32 samples = track_count == 0 ? 0 : gf_isom_get_sample_count(file, 1);
+  gf_isom_close(file);
+  EXPECT_EQ(track_count, 1u);
+  EXPECT_EQ(media_type, static_cast<u32>(GF_ISOM_MEDIA_AUDIO));
+  EXPECT_GT(samples, 0u);
+}
+
+TEST(IamfMuxerMux, AudioOnlyRejectsMissingInputAndLeavesNoFile) {
+  eclipsa_studio::IamfMuxer muxer;
+  const std::string out = TempPath("audio_only_missing.mp4");
+  EXPECT_EQ(muxer.MuxAudioOnly(TempPath("does_not_exist.iamf"), out), -2);
+  EXPECT_FALSE(std::filesystem::exists(out));
+}
+
+// GPAC's IAMF writer rejects a draft profile (iamf_gpac_limits_test pins
+// the boundary), which makes the filter session fail: -11, and an earlier
+// file at the output path is removed.
+TEST(IamfMuxerMux, AudioOnlyMuxFailureRemovesOutput) {
+  std::ifstream fixture(FindFixture(kIamfFixture), std::ios::binary);
+  std::vector<char> bytes{std::istreambuf_iterator<char>(fixture),
+                          std::istreambuf_iterator<char>()};
+  // The IA Sequence Header OBU: header 0xF8, size 6, "iamf", then
+  // primary_profile and additional_profile.
+  ASSERT_GT(bytes.size(), 8u);
+  ASSERT_EQ(static_cast<uint8_t>(bytes[0]), 0xF8);
+  ASSERT_EQ(std::string(bytes.data() + 2, 4), "iamf");
+  bytes[6] = 3;  // Base-Advanced, a v2.0.0 draft profile
+  bytes[7] = 3;
+  const std::string draft = TempPath("draft_profile.iamf");
+  std::ofstream(draft, std::ios::binary)
+      .write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+
+  const std::string out = TempPath("draft_profile.mp4");
+  std::ofstream(out) << "earlier file";
+  ASSERT_TRUE(std::filesystem::exists(out));
+
+  eclipsa_studio::IamfMuxer muxer;
+  EXPECT_EQ(muxer.MuxAudioOnly(draft, out), -11);
+  EXPECT_FALSE(std::filesystem::exists(out));
+}
+
+TEST(IamfMuxerMux, AudioOnlyRejectsEmptyArgument) {
+  eclipsa_studio::IamfMuxer muxer;
+  EXPECT_EQ(muxer.MuxAudioOnly("", TempPath("unused.mp4")), -1);
+  EXPECT_EQ(muxer.MuxAudioOnly(FindFixture(kIamfFixture), ""), -1);
 }
 
 }  // namespace

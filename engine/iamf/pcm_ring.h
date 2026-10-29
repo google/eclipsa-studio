@@ -26,7 +26,9 @@
 
 /// Single-producer / single-consumer lock-free ring for interleaved
 /// PCM frames. Used by `IamfPlaybackSession` to hand decoded audio
-/// from the I/O thread to the audio thread without blocking either.
+/// from the I/O thread to the audio thread, and by `WavStream`
+/// (io/wav_stream.h) to hand WAV frames from the disk thread to the
+/// audio thread, without blocking either.
 ///
 /// Storage layout: interleaved by `channels()`. Frame `f` channel `c`
 /// lives at `buf_[(f & mask_) * channels_ + c]`. Reads convert to the
@@ -165,6 +167,26 @@ class PcmRing {
       std::memcpy(
           buf_.data(), src + static_cast<size_t>(a) * channels_,
           static_cast<size_t>(to_write - a) * channels_ * sizeof(float));
+    }
+    head_.store(h + to_write, std::memory_order_release);
+    return to_write;
+  }
+
+  /// Producer write of planar PCM: channel `c` of each frame comes from
+  /// `src.channel(c)`. `src.channels` must equal channels(). Returns
+  /// frames written (may be less than `frames` when the ring is near
+  /// full).
+  uint32_t write_planar(const AudioBuffer& src, uint32_t frames) {
+    const uint32_t free = free_frames();
+    const uint32_t to_write = frames < free ? frames : free;
+    if (to_write == 0) return 0;
+    const uint64_t h = head_.load(std::memory_order_relaxed);
+    for (uint32_t c = 0; c < channels_; ++c) {
+      const float* plane = src.channel(c);
+      for (uint32_t f = 0; f < to_write; ++f) {
+        const uint32_t idx = static_cast<uint32_t>(h + f) & mask_;
+        buf_[static_cast<size_t>(idx) * channels_ + c] = plane[f];
+      }
     }
     head_.store(h + to_write, std::memory_order_release);
     return to_write;

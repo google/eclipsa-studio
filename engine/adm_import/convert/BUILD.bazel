@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 package(default_visibility = ["//:__subpackages__"])
 
@@ -47,5 +47,23 @@ cc_test(
         "//adm_import/scene:layouts",
         "//adm_import/wav:bwf_fixture",
         "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "adm_import_bench",
+    srcs = ["adm_import_bench.cc"],
+    deps = [
+        ":convert",
+        "//adm_import/adm:adm_parser",
+        "//adm_import/adm:common_definitions",
+        "//adm_import/render:channel_renderer",
+        "//adm_import/render:render_progress",
+        "//adm_import/scene:adm_adapter",
+        "//adm_import/scene:layouts",
+        "//adm_import/wav:bw64_reader",
+        "//adm_import/wav:wav_writer",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/types:span",
     ],
 )

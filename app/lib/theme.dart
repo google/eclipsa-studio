@@ -24,6 +24,18 @@ import 'theme_tokens.dart';
 export 'theme_data.dart';
 export 'theme_tokens.dart';
 
+/// Theme colour for an audio-element type, the one colour that stands for
+/// the type wherever an element is drawn: its glyph, its Elements row and
+/// waveform, and its sources in the 3D scene and the visualizers. A type
+/// the session loader keeps but does not recognise takes the Channel
+/// colour.
+Color aeTypeColor(String type) {
+  final t = type.toLowerCase();
+  if (t.contains('object')) return T.typeObject;
+  if (t.contains('scene')) return T.typeScene;
+  return T.typeChannel;
+}
+
 /// Font size presets. Medium is the reference (1.0×); small and large scale
 /// relative to it.
 enum FontSizeMode {
@@ -207,6 +219,16 @@ class T {
   static TextStyle get styleLabel =>
       TextStyle(color: textMuted, fontSize: fontSmall);
 
+  /// Caps label of a panel, bar or strip: the Renderer view's AUDIO
+  /// ELEMENTS and MONITORING, the Mix view's NAME, LANG, OUTPUT MIX GAIN
+  /// and LAYOUTS, and the Settings window's section headers.
+  static TextStyle get styleSectionLabel => TextStyle(
+    color: textMuted,
+    fontSize: fontBody,
+    fontWeight: FontWeight.w600,
+    letterSpacing: 0.5,
+  );
+
   /// Captions under content.
   static TextStyle get styleCaption =>
       TextStyle(color: textMuted, fontSize: fontCaption);
@@ -365,6 +387,11 @@ class T {
   // incidental mouse movement.
   static const Duration tooltipWait = Duration(milliseconds: 500);
 
+  /// Widest a tooltip grows before its text wraps, wired in through the
+  /// same tooltipTheme. A long tooltip (the 9.1.6 channel-order note)
+  /// otherwise spans the whole window.
+  static const double tooltipMaxWidth = 360;
+
   // ── Motion ──────────────────────────────────────────────────
   static const Duration motionFast = Duration(milliseconds: 100);
   static const Duration motionMed = Duration(milliseconds: 150);
@@ -422,6 +449,9 @@ ThemeData eclipsaStudioTheme() {
     // Global tooltip behavior — see T.tooltipWait. Setting it here
     // means individual Tooltip widgets inherit the correct delay
     // without having to repeat waitDuration at every call site.
-    tooltipTheme: const TooltipThemeData(waitDuration: T.tooltipWait),
+    tooltipTheme: const TooltipThemeData(
+      waitDuration: T.tooltipWait,
+      constraints: BoxConstraints(minHeight: 24, maxWidth: T.tooltipMaxWidth),
+    ),
   );
 }

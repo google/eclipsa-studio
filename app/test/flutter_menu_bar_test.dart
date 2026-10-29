@@ -69,6 +69,49 @@ void main() {
     expect(find.byType(Divider), findsNWidgets(2));
   });
 
+  testWidgets('Loudness Report is greyed on the landing screen and '
+      'enabled in Creator and Playback', (tester) async {
+    final container = ProviderContainer(
+      overrides: [
+        landingVisibleProvider.overrideWithValue(true),
+        recentSessionsProvider.overrideWith(StubRecentSessions.new),
+        recentQcFilesProvider.overrideWith(_StubRecentQcFiles.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(
+          home: Scaffold(
+            body: Align(alignment: Alignment.topLeft, child: FlutterMenuBar()),
+          ),
+        ),
+      ),
+    );
+
+    Future<bool> enabled() async {
+      await open(tester, 'View');
+      final button = tester.widget<MenuItemButton>(
+        find.ancestor(
+          of: find.text('Loudness Report...'),
+          matching: find.byType(MenuItemButton),
+        ),
+      );
+      await tester.tapAt(const Offset(400, 400));
+      await tester.pumpAndSettle();
+      return button.onPressed != null;
+    }
+
+    expect(await enabled(), isFalse);
+    container.read(workspaceModeProvider.notifier).enterCreator();
+    await tester.pumpAndSettle();
+    expect(await enabled(), isTrue);
+    container.read(workspaceModeProvider.notifier).enterPlayback();
+    await tester.pumpAndSettle();
+    expect(await enabled(), isTrue);
+  });
+
   testWidgets('the theme commands are in View, not Help', (tester) async {
     await pumpBar(tester);
     await open(tester, 'Help');

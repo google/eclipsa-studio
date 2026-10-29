@@ -45,3 +45,26 @@ const String kMonitorDimTooltip =
     'Monitor DIM: cuts the monitoring output by 20 dB. Monitoring only: '
     'the meters, the export and the Loudness Report are unaffected. '
     'Press D to toggle.';
+
+/// Output-channel solo (ES-999) for the Monitoring panel's S button of the
+/// output channel labelled [label].
+String outputSoloTooltip(String label) =>
+    'Solo output channel $label: play this channel only.\n'
+    'Monitoring only: the meters, the export and the Loudness Report '
+    'are unaffected.';
+
+/// The status bar item for engaged output-channel solo and mute (ES-999),
+/// with the [soloed] and [muted] channels' labels.
+String outputSoloMuteStatusTooltip(List<String> soloed, List<String> muted) => [
+  if (soloed.isNotEmpty) 'Soloed output channels: ${soloed.join(', ')}.',
+  if (muted.isNotEmpty) 'Muted output channels: ${muted.join(', ')}.',
+  'Monitoring only: the meters, the export and the Loudness Report '
+      'are unaffected. Click to clear.',
+].join('\n');
+
+/// Output-channel mute (ES-999) for the Monitoring panel's M button of the
+/// output channel labelled [label].
+String outputMuteTooltip(String label) =>
+    'Mute output channel $label: silence this channel.\n'
+    'Monitoring only: the meters, the export and the Loudness Report '
+    'are unaffected.';

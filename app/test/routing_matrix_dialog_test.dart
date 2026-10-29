@@ -62,6 +62,45 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  AudioElement bed916(String layout) => AudioElement(
+    id: 1,
+    name: 'test',
+    type: 'Channel',
+    layout: layout,
+    codec: 'WAV 24bit',
+    color: 0xFF00FF00,
+    wavInfo: WavInfo(
+      channels: 16,
+      sampleRate: 48000,
+      bitsPerSample: 24,
+      audioFormat: 1,
+      dataOffset: 44,
+      dataSize: 16 * 48000 * 3,
+      totalSamples: 48000,
+    ),
+  );
+
+  Iterable<String> rowTooltips(WidgetTester tester) => tester
+      .widgetList<Tooltip>(find.byType(Tooltip))
+      .map((t) => t.message ?? '');
+
+  testWidgets('9.1.6 rows name the IAMF bitstream channel (ES-960)', (
+    tester,
+  ) async {
+    await openDialog(tester, bed916('9.1.6'));
+    final tips = rowTooltips(tester);
+    expect(
+      tips,
+      containsAll([
+        'L (IAMF bitstream FLc)',
+        'Lw (IAMF bitstream FL)',
+        'Lts (IAMF bitstream TpSiL)',
+      ]),
+    );
+    // LFE has no other name, so its row has no tooltip.
+    expect(tips.where((t) => t.startsWith('LFE')), isEmpty);
+  });
+
   testWidgets('"Source Channels" stays on one line over a narrow matrix', (
     tester,
   ) async {

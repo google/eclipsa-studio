@@ -34,6 +34,7 @@ import '../whats_new/whats_new_dialog.dart';
 import '../workspace/workspace_actions.dart';
 import '../workspace/workspace_close.dart';
 import '../workspace/workspace_mode.dart';
+import '../workspace/workspace_tab_shortcuts.dart';
 import 'chrome_surface.dart';
 import 'console_widgets.dart';
 import 'theme_cycle.dart';
@@ -158,10 +159,6 @@ class _AppMenuBarState extends ConsumerState<AppMenuBar> {
           label: 'Settings...',
           shortcut: const SingleActivator(LogicalKeyboardKey.comma, meta: true),
           onSelected: () => SettingsDialog.show(context),
-        ),
-        PlatformMenuItem(
-          label: 'Release Notes...',
-          onSelected: () => _showWhatsNew(context),
         ),
         PlatformMenuItem(
           label: 'Third-Party Licenses...',
@@ -378,19 +375,28 @@ class _AppMenuBarState extends ConsumerState<AppMenuBar> {
       PlatformMenu(
         label: 'View',
         menus: [
-          // Creator-only for now: the report measures from session WAV
-          // sources; Playback (QC) has no offline decode-and-measure
-          // path yet (ES-520). Greyed, not hidden — macOS convention —
-          // and a null onSelected also disables the ⌘L key equivalent.
+          // The mode's tabs in top bar order, on Cmd+1 to Cmd+3.
+          PlatformMenuItemGroup(
+            members: [
+              for (final (i, id) in WorkspaceTabs.allowedIn(mode).indexed)
+                PlatformMenuItem(
+                  label: WorkspaceTabs.title(id),
+                  shortcut: workspaceTabShortcut(i, mac: true),
+                  onSelected: () =>
+                      ref.read(activeTabProvider.notifier).set(id),
+                ),
+            ],
+          ),
+          // Creator measures the session's sources; Playback measures
+          // the loaded file (ES-520). The landing screen builds its own
+          // View menu above, without this item.
           PlatformMenuItem(
             label: 'Loudness Report...',
             shortcut: const SingleActivator(
               LogicalKeyboardKey.keyL,
               meta: true,
             ),
-            onSelected: isCreator
-                ? () => LoudnessReportDialog.show(context)
-                : null,
+            onSelected: () => LoudnessReportDialog.show(context),
           ),
           const PlatformProvidedMenuItem(
             type: PlatformProvidedMenuItemType.toggleFullScreen,
@@ -749,17 +755,30 @@ class FlutterMenuBar extends ConsumerWidget {
       '&View',
       onBar: true,
       grouped([
+        // The mode's tabs in top bar order, none on the landing screen.
+        // Each name's first letter is its Alt key; none repeats another
+        // item's in this menu. Ctrl+digit is display-only here, as Ctrl+L
+        // is below; the workspace shell's key handler takes Ctrl+digit.
         [
-          // Creator-only for now (ES-520) — see the macOS branch. Ctrl+L is
-          // display-only here (Material MenuBar does not register menu
-          // shortcuts), so gating onPressed fully disables the item.
+          for (final (i, id) in WorkspaceTabs.allowedIn(mode).indexed)
+            item(
+              '&${WorkspaceTabs.title(id)}',
+              shortcut: workspaceTabShortcut(i, mac: false),
+              onPressed: () => ref.read(activeTabProvider.notifier).set(id),
+            ),
+        ],
+        [
+          // Creator and Playback (ES-520); greyed on the landing screen.
+          // Ctrl+L is display-only here (Material MenuBar does not
+          // register menu shortcuts), so a null onPressed fully disables
+          // the item.
           item(
             '&Loudness Report...',
             shortcut: const SingleActivator(
               LogicalKeyboardKey.keyL,
               control: true,
             ),
-            onPressed: isCreator
+            onPressed: inWorkspace
                 ? () => LoudnessReportDialog.show(context)
                 : null,
           ),

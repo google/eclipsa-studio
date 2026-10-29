@@ -58,9 +58,10 @@ uint32_t WavWriter::write(const AudioBuffer& buffer, uint32_t frames) {
   return frames;
 }
 
-void WavWriter::close() {
-  if (!open_) return;
-  writer_->Finalize();  // Best-effort; errors surface on the next open().
+bool WavWriter::close() {
+  if (!open_) return true;
+  const wav::Status status = writer_->Finalize();
   writer_.reset();
   open_ = false;
+  return status.ok();
 }

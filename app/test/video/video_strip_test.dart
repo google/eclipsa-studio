@@ -115,11 +115,11 @@ void main() {
     expect(tester.getSize(headerBox).height, 24);
   });
 
-  testWidgets('the overlaid flat header drops its fill and its hairline', (
+  testWidgets('the overlaid flat header drops its fill and its border', (
     tester,
   ) async {
     // Over the picture the header paints neither the bgSurface fill
-    // nor the 0.5 px hairline; its metrics and ink are unchanged.
+    // nor the 1 px line; its metrics and ink are unchanged.
     await tester.pumpWidget(flatStrip(height: 224, visible: true));
     expect(tester.widget<Container>(headerBox).decoration, isNull);
     final name = tester.widget<Text>(find.text('a.mp4'));
@@ -133,20 +133,29 @@ void main() {
     tester,
   ) async {
     // Collapsed the header is the whole strip, so it keeps the bar it
-    // has always drawn.
-    await tester.pumpWidget(flatStrip(height: 224, visible: false));
-    expect(tester.getSize(find.byType(VideoStrip)).height, 24);
-    final box =
-        tester.widget<Container>(headerBox).decoration! as BoxDecoration;
-    expect(box.color, T.bgSurface);
-    expect(box.border!.bottom.width, 0.5);
-    expect(box.border!.bottom.color, T.border);
+    // has always drawn. Its bottom border is 1 px in each flat-ground
+    // theme, High Contrast included, whose borderWidth is 2 px (ES-1009).
+    for (final mode in AppThemeMode.values) {
+      T.setMode(mode);
+      if (!T.chromeStyle.flatGround) continue;
+      await tester.pumpWidget(flatStrip(height: 224, visible: false));
+      expect(tester.getSize(find.byType(VideoStrip)).height, 24);
+      final box =
+          tester.widget<Container>(headerBox).decoration! as BoxDecoration;
+      expect(box.color, T.bgSurface, reason: mode.name);
+      expect(box.border!.bottom.width, 1, reason: mode.name);
+      expect(box.border!.bottom.color, T.border, reason: mode.name);
+    }
   });
 
   /// The video pane with the panel's own state and resize handle,
-  /// 600 px wide on a surface tall enough for the 600 px clamp.
-  /// [initialHeight] omitted takes the panel's default.
-  Future<void> pumpPane(WidgetTester tester, {double? initialHeight}) async {
+  /// 600 px wide on a surface 900 px tall. [initialHeight] omitted takes
+  /// the panel's default; [maxHeight] omitted sets no limit.
+  Future<void> pumpPane(
+    WidgetTester tester, {
+    double? initialHeight,
+    double maxHeight = double.infinity,
+  }) async {
     tester.view.physicalSize = const Size(800, 900);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -160,8 +169,11 @@ void main() {
               child: SizedBox(
                 width: 600,
                 child: initialHeight == null
-                    ? const VideoPanel()
-                    : VideoPanel(initialHeight: initialHeight),
+                    ? VideoPanel(maxHeight: maxHeight)
+                    : VideoPanel(
+                        initialHeight: initialHeight,
+                        maxHeight: maxHeight,
+                      ),
               ),
             ),
           ),
@@ -187,20 +199,39 @@ void main() {
     expect(stripHeight(tester), 300);
   });
 
-  testWidgets('the resize handle clamps the flat strip to 100 and 600', (
+  testWidgets('the expanded pane ends in a 1 px border under the handle', (
     tester,
   ) async {
-    // _minHeight (100) and _maxHeight (600) clamp the strip now that
-    // the header lies over it, where in the flat layout they clamped
-    // the body under a header row: the pane's own range is 100 to 600
-    // px where it was 124 to 624.
-    await pumpPane(tester);
+    // It was 0.5 px, half the panel borders below it, and the only mark
+    // of the resize target at rest (ES-1009). It is 1 px in every theme,
+    // High Contrast included, whose borderWidth is 2 px. The handle's
+    // lower edge is the pane's, so the view below keeps its pointer
+    // input.
+    for (final mode in AppThemeMode.values) {
+      T.setMode(mode);
+      await pumpPane(tester);
+      final pane = tester.getRect(find.byType(VideoPanel));
+      expect(pane.height - stripHeight(tester), 1, reason: mode.name);
+      expect(
+        tester.getRect(find.byType(ResizeHandle)).bottom,
+        pane.bottom,
+        reason: mode.name,
+      );
+    }
+  });
+
+  testWidgets('the resize handle clamps the flat strip to 100 px and to '
+      'maxHeight', (tester) async {
+    // _minHeight (100) and VideoPanel.maxHeight, less the 1 px border,
+    // clamp the strip now that the header lies over it, where in the
+    // flat layout they clamped the body under a header row.
+    await pumpPane(tester, maxHeight: 600);
     await tester.drag(find.byType(ResizeHandle), const Offset(0, -400));
     await tester.pump();
     expect(stripHeight(tester), 100);
     await tester.drag(find.byType(ResizeHandle), const Offset(0, 1000));
     await tester.pump();
-    expect(stripHeight(tester), 600);
+    expect(stripHeight(tester), 599);
   });
 
   testWidgets('the overlaid header clears the empty state and takes the tap', (

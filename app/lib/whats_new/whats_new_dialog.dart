@@ -44,9 +44,8 @@ class WhatsNewDialog extends ConsumerWidget {
   }
 
   /// Convenience: load every release from the bundled JSON and show
-  /// the dialog. Used by the landing-screen "What's New" button and
-  /// the Eclipsa Studio / Help menu items, both of which want the
-  /// full history.
+  /// the dialog. Used by the landing-screen version pill and the Help
+  /// menu's Release Notes item, both of which want the full history.
   static Future<void> showAll(BuildContext context) async {
     final notes = await loadReleaseNotes();
     if (!context.mounted) return;

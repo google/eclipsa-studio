@@ -27,6 +27,19 @@ cc_library(
     ],
 )
 
+# Streams a WAV file to the audio thread through a PcmRing filled by a
+# disk thread (WavStreamer).
+cc_library(
+    name = "wav_stream",
+    hdrs = ["wav_stream.h"],
+    srcs = ["wav_stream.cc"],
+    deps = [
+        ":wav_reader",
+        "//graph:audio_buffer",
+        "//iamf:pcm_ring",
+    ],
+)
+
 cc_library(
     name = "wav_writer",
     hdrs = ["wav_writer.h"],

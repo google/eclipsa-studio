@@ -98,7 +98,12 @@ int32_t ElementBouncer::Bounce(const Config& config) {
     }
   }
 
-  writer.close();
+  // A full disk often shows only when the buffered file is flushed here.
+  if (!writer.close()) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "bounce",
+               "Bounce: finalizing the output failed (disk full?)");
+    return -3;
+  }
 
   char buf[256];
   snprintf(buf, sizeof(buf),

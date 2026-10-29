@@ -128,9 +128,9 @@ void main() {
     });
 
     // The tallest header, an Object element excluded from the mix with
-    // its badge drawn, in every font size at the narrowest panel and
-    // the default width (ES-765). The add-element drop zone below it is
-    // laid out too.
+    // its Not in mix presentation line drawn, in every font size at the
+    // narrowest panel and the default width (ES-765). The add-element drop
+    // zone below it is laid out too.
     for (final font in FontSizeMode.values) {
       for (final width in [120.0, 180.0]) {
         testWidgets('${mode.name}, ${font.name} font, ${width.toInt()} px: '
@@ -144,7 +144,7 @@ void main() {
           );
           container.read(trackPanelWidthProvider.notifier).set(width);
           await tester.pumpAndSettle();
-          expect(find.text('NOT IN MIX'), findsOneWidget);
+          expect(find.text('Not in mix presentation'), findsOneWidget);
           expect(tester.takeException(), isNull);
         });
       }

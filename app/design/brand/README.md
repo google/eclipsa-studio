@@ -60,10 +60,8 @@ landing screen (`app/lib/widgets/eclipsa_audio_lockup.dart`), and none
 of the logo suite is checked in. What the repo carries is:
 
 - the symbol as geometry: each half is an outer and a tall inner shape,
-  each two cubic Bézier curves mirrored about the horizontal axis,
-  fitted to the brand's lockup artwork rendered with the symbol
-  356 x 324 px, to within 1.6 px at that size, with the overlap filled
-  in the core colour;
+  each two cubic Bézier curves mirrored about the horizontal axis, in a
+  356 x 324 box, with the overlap filled in the core colour;
 - the wordmark as twelve Google Sans glyph outlines
   (`eclipsa_audio_wordmark_data.dart`, in font units, written by `scripts/gen_eclipsa_audio_wordmark.py` from the OFL font
   in google/fonts), placed where the brand's lockup has them;
@@ -74,5 +72,4 @@ of the logo suite is checked in. What the repo carries is:
 The positive colourway (Grey 400 and Grey 500 shapes, black core and
 wordmark) is for light grounds and the reverse (Grey 600 and Grey 500,
 white core and wordmark) for dark ones; the widget picks by the
-ground's luminance. The brand's artwork is not in the repo, and the
-fit scripts that read it are not either.
+ground's luminance.

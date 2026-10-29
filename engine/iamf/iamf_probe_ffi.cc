@@ -24,6 +24,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "engine_log.h"
 #include "iamf/cli/probe.h"
@@ -101,29 +103,38 @@ absl::Span<const uint8_t> MappedSpan(const eclipsa_studio::ReadOnlyFileMap& m) {
   return absl::MakeConstSpan(m.data(), m.size());
 }
 
-// Resolves the bytes iamf_tools::Probe should read for `path`. A raw .iamf
-// is probed straight from the mmap. An IAMF-in-ISOBMFF .mp4 is demuxed —
-// the `iamf` track is extracted into `*scratch` (which the caller must keep
-// alive across the Probe call) and a span over it is returned. Returns
-// false and sets `*err` for an MP4 with no usable IAMF track.
-bool ResolveProbeSpan(const char* path,
-                      const eclipsa_studio::ReadOnlyFileMap& mapped,
-                      std::vector<uint8_t>* scratch,
-                      absl::Span<const uint8_t>* out_span, std::string* err) {
+// Probes `path`, already mapped as `mapped`. A raw .iamf is probed straight
+// from the mapping. For an IAMF-in-ISOBMFF .mp4 the `iamf` track is read in
+// place through IamfMp4Source. A track whose sample data is stored in
+// another file is demuxed into memory instead. Sets `*demux_failed` when
+// the MP4 has no usable IAMF track.
+absl::StatusOr<iamf_tools::ProbeReport> ProbeMappedFile(
+    const char* path, const eclipsa_studio::ReadOnlyFileMap& mapped,
+    const iamf_tools::ProbeOptions& options, bool* demux_failed) {
+  *demux_failed = false;
   if (!eclipsa_studio::IamfDemuxer::IsIsoBmff(mapped.data(), mapped.size())) {
-    *out_span = MappedSpan(mapped);
-    return true;
+    return iamf_tools::Probe(MappedSpan(mapped), options);
   }
+  eclipsa_studio::IamfMp4Source source;
+  std::string source_err;
+  bool sample_data_external = false;
+  if (source.open(path, &source_err, &sample_data_external)) {
+    return iamf_tools::ProbeSegments(source.segments(), options);
+  }
+  if (!sample_data_external) {
+    *demux_failed = true;
+    return absl::InvalidArgumentError(source_err);
+  }
+  const std::string msg =
+      "probe: " + source_err + "; demuxing the track into memory";
+  engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf_probe", msg.c_str());
+  std::vector<uint8_t> demuxed;
   eclipsa_studio::IamfDemuxer demuxer;
-  if (!demuxer.DemuxToBytes(path, scratch)) {
-    *err = demuxer.last_error();
-    return false;
+  if (!demuxer.DemuxToBytes(path, &demuxed)) {
+    *demux_failed = true;
+    return absl::InvalidArgumentError(demuxer.last_error());
   }
-  // Hand the just-demuxed bitstream to the engine session that QC open runs
-  // moments later, so it doesn't re-parse the same container (ES-215).
-  eclipsa_studio::StashIamfDemux(path, *scratch);
-  *out_span = absl::MakeConstSpan(scratch->data(), scratch->size());
-  return true;
+  return iamf_tools::Probe(absl::MakeConstSpan(demuxed), options);
 }
 
 char* DupStringHeap(const std::string& s) {
@@ -211,22 +222,17 @@ EclipsaStudioIamfProbeResult* eclipsa_studio_iamf_probe(const char* path) {
   // scan (currently FLAC, from STREAMINFO); it stays 0 for Opus/LPCM,
   // where the Playback UI shows the engine's value once the lazy scan
   // finishes.
-  // .mp4 deliverables: demux the embedded `iamf` track first; raw .iamf is
-  // probed straight from the mmap. `demux_scratch` backs the span below.
-  std::vector<uint8_t> demux_scratch;
-  absl::Span<const uint8_t> probe_span;
-  std::string demux_err;
-  if (!ResolveProbeSpan(path, mapped, &demux_scratch, &probe_span,
-                        &demux_err)) {
-    engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf_probe", demux_err.c_str());
-    // -5: MP4 demux failed (distinct from -2, which is mmap-open failure).
-    return MakeErrorResult(-5, demux_err);
-  }
-
   iamf_tools::ProbeOptions options;
   options.scan_mode = iamf_tools::ScanMode::kDescriptorsOnly;
-  auto probe = iamf_tools::Probe(probe_span, options);
+  bool demux_failed = false;
+  auto probe = ProbeMappedFile(path, mapped, options, &demux_failed);
   const auto t_probe = clock::now();
+  if (demux_failed) {
+    const std::string msg(probe.status().message());
+    engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf_probe", msg.c_str());
+    // -5: MP4 demux failed (distinct from -2, which is mmap-open failure).
+    return MakeErrorResult(-5, msg);
+  }
   if (!probe.ok()) {
     std::string msg = std::string("iamf_tools::Probe: ") +
                       std::string(probe.status().message());
@@ -403,21 +409,16 @@ char* eclipsa_studio_iamf_probe_json(const char* path) {
   mapped.hint_sequential();
   const auto t_slurp = clock::now();
 
-  // .mp4 deliverables: demux the embedded `iamf` track first; raw .iamf is
-  // probed straight from the mmap. `demux_scratch` backs the span below.
-  std::vector<uint8_t> demux_scratch;
-  absl::Span<const uint8_t> probe_span;
-  std::string demux_err;
-  if (!ResolveProbeSpan(path, mapped, &demux_scratch, &probe_span,
-                        &demux_err)) {
-    engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf_probe", demux_err.c_str());
-    return MakeJsonError(demux_err);
-  }
-
   iamf_tools::ProbeOptions options;
   options.scan_mode = iamf_tools::ScanMode::kDescriptorsOnly;
-  auto probe_or = iamf_tools::Probe(probe_span, options);
+  bool demux_failed = false;
+  auto probe_or = ProbeMappedFile(path, mapped, options, &demux_failed);
   const auto t_probe = clock::now();
+  if (demux_failed) {
+    const std::string msg(probe_or.status().message());
+    engine_log(ECLIPSA_STUDIO_LOG_WARN, "iamf_probe", msg.c_str());
+    return MakeJsonError(msg);
+  }
   if (!probe_or.ok()) {
     const std::string msg = std::string("iamf_tools::Probe: ") +
                             std::string(probe_or.status().message());

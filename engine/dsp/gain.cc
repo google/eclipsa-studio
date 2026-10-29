@@ -23,7 +23,7 @@ static float db_to_linear(float db) { return std::pow(10.0f, db / 20.0f); }
 
 Gain::Gain() {
   for (uint32_t i = 0; i < kGainMaxChannels; ++i) {
-    target_linear_[i] = 1.0f;
+    target_linear_[i].store(1.0f, std::memory_order_relaxed);
     current_linear_[i] = 1.0f;
   }
 }
@@ -31,13 +31,14 @@ Gain::Gain() {
 void Gain::set_gain_db(float gain_db) {
   float lin = db_to_linear(gain_db);
   for (auto& t : target_linear_) {
-    t = lin;
+    t.store(lin, std::memory_order_relaxed);
   }
 }
 
 void Gain::set_channel_gain_db(uint32_t channel, float gain_db) {
   if (channel < kGainMaxChannels) {
-    target_linear_[channel] = db_to_linear(gain_db);
+    target_linear_[channel].store(db_to_linear(gain_db),
+                                  std::memory_order_relaxed);
   }
 }
 
@@ -46,7 +47,7 @@ void Gain::process(AudioBuffer& buffer, uint32_t frames) {
 
   for (uint32_t ch = 0; ch < channels; ++ch) {
     float* samples = buffer.channel(ch);
-    float target = target_linear_[ch];
+    const float target = target_linear_[ch].load(std::memory_order_relaxed);
     float current = current_linear_[ch];
 
     for (uint32_t i = 0; i < frames; ++i) {
@@ -61,7 +62,7 @@ void Gain::process(AudioBuffer& buffer, uint32_t frames) {
 
 void Gain::reset() {
   for (uint32_t i = 0; i < kGainMaxChannels; ++i) {
-    current_linear_[i] = target_linear_[i];
+    current_linear_[i] = target_linear_[i].load(std::memory_order_relaxed);
   }
 }
 

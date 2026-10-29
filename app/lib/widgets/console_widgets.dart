@@ -25,6 +25,7 @@ library;
 
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../theme.dart';
@@ -92,64 +93,90 @@ class _ConsoleToggleState extends State<ConsoleToggle> {
   /// Everywhere else: the app's recessed well. Border-only chrome -- no
   /// decorative drop shadows; the recessed look comes from the bgDeep
   /// fill against the surrounding surface. (The active-knob glow stays:
-  /// it is a functional LED indicator, not chrome.)
+  /// it is a functional LED indicator, not chrome.) The off knob is
+  /// `textTertiary`, the theme's inactive colour, at least 3:1 against
+  /// the `bgDeep` track. In the `outlined` chrome (High Contrast) the
+  /// track's rim and the off knob are both a `borderStrong` outline at the
+  /// theme's `borderWidth`. The rim follows [SelectorChrome]'s outlined
+  /// control and turns `controlFg` under the pointer; High Contrast sets
+  /// both colours to white, so there, as on its dropdowns, the rim does
+  /// not change under the pointer.
   Widget _track(Color color) {
     final raised = T.chromeStyle == ChromeStyle.raised;
+    final outlined = T.chromeStyle == ChromeStyle.outlined;
+    final offKnob = outlined ? T.bgDeep : T.textTertiary;
     const w = 36.0;
     const h = 18.0;
     final knob = h - 4;
+    final rim = raised ? 0.0 : (outlined ? T.borderWidth : 1.0);
+    final rimColor = outlined
+        ? (_hover ? T.controlFg : T.borderStrong)
+        : (_hover ? T.borderStrong : T.border);
     return Container(
       width: w,
       height: h,
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(raised ? h / 2 : 3),
         color: raised ? T.bgControls : T.bgDeep,
-        border: raised
-            ? null
-            : Border.all(color: _hover ? T.borderStrong : T.border, width: 1),
+        border: raised ? null : Border.all(color: rimColor, width: rim),
       ),
-      child: Stack(
-        children: [
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 80),
-            left: raised
-                ? (widget.value ? w - knob - 2 : 2)
-                : (widget.value ? 18 : 0),
-            top: 0,
-            bottom: 0,
-            child: Center(
-              child: Container(
-                width: raised ? knob : 16,
-                height: raised ? knob : h - 2,
-                margin: raised ? EdgeInsets.zero : const EdgeInsets.all(1),
-                decoration: BoxDecoration(
-                  shape: raised ? BoxShape.circle : BoxShape.rectangle,
-                  borderRadius: raised ? null : BorderRadius.circular(2),
-                  // The caller's activeColor still carries the state
-                  // where it names one -- the monitor DIM readout is
-                  // amber in the status bar beside its switch --
-                  // and chromeTabOn is the default, the accent
-                  // reaching the body one piece at a time.
-                  color: raised
-                      ? (widget.value
-                            ? (widget.activeColor ?? T.chromeTabOn)
-                            : T.chromeTabOff)
-                      : (widget.value ? color : T.bgControls),
-                  // The raised knob reads its state from its own
-                  // colour, so it takes no glow.
-                  boxShadow: widget.value && !raised
-                      ? [
-                          BoxShadow(
-                            color: color.withValues(alpha: 0.4),
-                            blurRadius: 4,
-                          ),
-                        ]
-                      : null,
+      // The clip keeps the on knob's glow inside the track.
+      child: ClipRect(
+        child: Stack(
+          children: [
+            // In the well the rim leaves (36 - 2 x rim) x (18 - 2 x rim)
+            // inside: 34 x 16 with a 1 px rim, 32 x 14 with High
+            // Contrast's 2 px. The knob is 16 wide and fills the inside's
+            // height, with a 1 px margin, an 18 px wide box, so it sits
+            // at 0 off and at the inside's width less 18 on, 1 px from
+            // the rim either way.
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 80),
+              left: raised
+                  ? (widget.value ? w - knob - 2 : 2)
+                  : (widget.value ? w - 2 * rim - 18 : 0),
+              top: 0,
+              bottom: 0,
+              child: Center(
+                child: Container(
+                  width: raised ? knob : 16,
+                  height: raised ? knob : h - 2 * rim - 2,
+                  margin: raised ? EdgeInsets.zero : const EdgeInsets.all(1),
+                  decoration: BoxDecoration(
+                    shape: raised ? BoxShape.circle : BoxShape.rectangle,
+                    borderRadius: raised ? null : BorderRadius.circular(2),
+                    // The caller's activeColor still carries the state
+                    // where it names one -- the monitor DIM readout is
+                    // amber in the status bar beside its switch --
+                    // and chromeTabOn is the default, the accent
+                    // reaching the body one piece at a time.
+                    color: raised
+                        ? (widget.value
+                              ? (widget.activeColor ?? T.chromeTabOn)
+                              : T.chromeTabOff)
+                        : (widget.value ? color : offKnob),
+                    border: outlined && !widget.value
+                        ? Border.all(
+                            color: T.borderStrong,
+                            width: T.borderWidth,
+                          )
+                        : null,
+                    // The raised knob reads its state from its own
+                    // colour, so it takes no glow.
+                    boxShadow: widget.value && !raised
+                        ? [
+                            BoxShadow(
+                              color: color.withValues(alpha: 0.4),
+                              blurRadius: 4,
+                            ),
+                          ]
+                        : null,
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -160,10 +187,11 @@ class _ConsoleToggleState extends State<ConsoleToggle> {
 // Recessed selector with subtle border, no Material dropdown arrow
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The closed control of a dropdown, chosen by the theme's
-/// [ControlStyle]. Read by [ConsoleSelector] and by the top bar's mix
-/// presentation selector, so every dropdown in the app draws the same
-/// control for a given theme.
+/// The closed control of a [ConsoleSelector], chosen by the theme's
+/// [ControlStyle]. Every dropdown in the app is a [ConsoleSelector],
+/// the top bar's mix presentation switcher included, and the Elements
+/// view's format chip draws the same control, so they all look the
+/// same for a given theme.
 ///
 /// - `filled`: a `controlBg` fill at `radiusSm` with a `controlFg` label and
 ///   caret, and a 1 px `border` rim at rest, because `controlBg` equals
@@ -337,13 +365,35 @@ class _OpenRowsIntent extends Intent {
   const _OpenRowsIntent();
 }
 
+/// Keys whose press does not count as keyboard use for the focus ring:
+/// a mouse user holds them for a modified click.
+final Set<LogicalKeyboardKey> _kModifierKeys = {
+  ...LogicalKeyboardKey.expandSynonyms({
+    LogicalKeyboardKey.shift,
+    LogicalKeyboardKey.control,
+    LogicalKeyboardKey.alt,
+    LogicalKeyboardKey.meta,
+  }),
+  LogicalKeyboardKey.capsLock,
+  LogicalKeyboardKey.fn,
+};
+
 class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
   bool _hover = false;
 
   // Whether the trigger holds focus, for the semantics; [_focused] is
-  // whether to draw the ring, which the focus highlight mode gates.
+  // whether the focus highlight mode allows the ring, which is drawn
+  // only while [_keyInput] holds as well.
   bool _hasFocus = false;
   bool _focused = false;
+
+  // Whether the last press in this window was a key rather than a
+  // pointer. On desktop the focus highlight mode starts traditional and
+  // mouse input leaves it there, so without this check a menu opened
+  // with the mouse draws the ring while it is open and again when focus
+  // returns to the trigger. Modifier keys and key events the embedder
+  // synthesizes to resync its state do not count.
+  bool _keyInput = false;
   final MenuController _menu = MenuController();
   final GlobalKey _triggerKey = GlobalKey();
   final FocusNode _focusNode = FocusNode(debugLabel: 'ConsoleSelector');
@@ -366,6 +416,8 @@ class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
   void initState() {
     super.initState();
     _syncRowNodes();
+    HardwareKeyboard.instance.addHandler(_handleKeyInput);
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_handlePointerInput);
   }
 
   @override
@@ -393,8 +445,36 @@ class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
     if (v != _focused) setState(() => _focused = v);
   }
 
+  bool _handleKeyInput(KeyEvent event) {
+    if (event is KeyDownEvent &&
+        !event.synthesized &&
+        !_kModifierKeys.contains(event.logicalKey)) {
+      _setKeyInput(true);
+    }
+    return false;
+  }
+
+  void _handlePointerInput(PointerEvent event) {
+    if (event is PointerDownEvent) _setKeyInput(false);
+  }
+
+  // Only a trigger whose focus highlight shows draws anything different,
+  // so only it rebuilds; one that gains focus later reads the flag then.
+  void _setKeyInput(bool v) {
+    if (v == _keyInput) return;
+    if (_focused) {
+      setState(() => _keyInput = v);
+    } else {
+      _keyInput = v;
+    }
+  }
+
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKeyInput);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(
+      _handlePointerInput,
+    );
     _focusNode.dispose();
     for (final node in _rowNodes) {
       node.dispose();
@@ -447,6 +527,23 @@ class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
     }
   }
 
+  /// A menu closed by pointer input hands focus back, whether a row was
+  /// picked, the menu was dismissed outside or the trigger was tapped
+  /// again, so the trigger keeps no focus after mouse use. After a key
+  /// press, such as Enter on a row or Escape, focus stays on the trigger
+  /// for the next key.
+  void _handleClose() {
+    // After the frame: closing the overlay hands focus back to the
+    // trigger during the frame, which would undo an unfocus made now.
+    // The last input is read then as well: a pick or a dismissal starts
+    // with a pointer press or a key press, which has set [_keyInput].
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _menu.isOpen || _keyInput) return;
+      FocusManager.instance.applyFocusChangesIfNeeded();
+      _focusNode.unfocus();
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final dim = widget.enabled ? 1.0 : 0.4;
@@ -463,7 +560,7 @@ class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
       decoration: SelectorChrome.decoration(
         hover: _hover && widget.enabled,
         dim: dim,
-        focused: _focused && widget.enabled,
+        focused: _focused && _keyInput && widget.enabled,
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -524,6 +621,7 @@ class _ConsoleSelectorState<V> extends State<ConsoleSelector<V>> {
         controller: _menu,
         childFocusNode: _focusNode,
         consumeOutsideTap: true,
+        onClose: _handleClose,
         alignmentOffset: const Offset(0, 4),
         style: MenuStyle(
           backgroundColor: WidgetStatePropertyAll(SelectorChrome.menuColor),
@@ -753,6 +851,7 @@ class ConsoleSegment<V> extends StatelessWidget {
     // 2 + n x (label + 2 x [_cellHPad]), which is what [uniformWidth]
     // measures.
     final raised = T.chromeStyle == ChromeStyle.raised;
+    final outlined = T.chromeStyle == ChromeStyle.outlined;
     final transparent = T.border.withValues(alpha: 0);
     return Container(
       height: 24,
@@ -760,11 +859,29 @@ class ConsoleSegment<V> extends StatelessWidget {
       decoration: BoxDecoration(
         color: raised ? null : T.bgDeep,
         borderRadius: BorderRadius.circular(raised ? T.radiusSm : 3),
-        // The rim is transparent rather than absent in `raised`: a
-        // border insets its child, so dropping it would give the row
-        // 2 px more interior than the other themes' control has.
-        border: Border.all(color: raised ? transparent : dimmed(T.border)),
+        // The rim is transparent rather than absent in `raised` and
+        // `outlined`: a border insets its child, so dropping it would give
+        // the row 2 px more interior than the other themes' control has.
+        // In `outlined` the foreground rim below covers it, and a coloured
+        // layout rim under a dimmed foreground rim would draw two tones.
+        border: Border.all(
+          color: raised || outlined ? transparent : dimmed(T.border),
+        ),
       ),
+      // The `outlined` chrome (High Contrast) draws the rim at the theme's
+      // `borderWidth` in `borderStrong`, as [SelectorChrome] does. It is
+      // painted over the 1 px layout rim and the cells' outer pixel, so
+      // the control measures the same as in the other themes and every
+      // cell keeps the width [uniformWidth] measured for it.
+      foregroundDecoration: outlined
+          ? BoxDecoration(
+              borderRadius: BorderRadius.circular(3),
+              border: Border.all(
+                color: dimmed(T.borderStrong),
+                width: T.borderWidth,
+              ),
+            )
+          : null,
       child: Row(
         mainAxisSize: width == null ? MainAxisSize.min : MainAxisSize.max,
         children: options.map((opt) {

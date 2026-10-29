@@ -171,6 +171,110 @@ Map<int, String> uniqueWavBasenames(List<AudioElement> elements) {
 int _defaultMeasureConcurrency() =>
     min(4, max(1, Platform.numberOfProcessors ~/ 2));
 
+/// Terminal state of a [runMeasurePool] pass.
+class MeasurePoolOutcome<R> {
+  final LoudnessPassStatus status;
+
+  /// Plan index of the lowest entry whose measurement failed, or -1.
+  final int failedIndex;
+
+  /// Completed results in plan order. On cancel or failure this is the
+  /// completed *set* (not necessarily a prefix of the plan).
+  final List<R> results;
+
+  const MeasurePoolOutcome._(this.status, this.failedIndex, this.results);
+}
+
+/// Runs [measure] for plan indices `0..planLength-1` on a bounded pool
+/// of concurrent workers, with per-completion [onProgress]. [measure]
+/// returns the entry's result, or null when its pass failed; entries
+/// for which [isSkipped] is true are not measured and count toward
+/// progress. Results come back in plan order regardless of completion
+/// order. [maxConcurrency] overrides the pool size (1 reproduces a
+/// strictly sequential pass).
+///
+/// Cancel is observed before each dispatch: in-flight passes drain and
+/// their results are kept, so up to pool-size passes may complete after
+/// the cancel. An exception thrown by [measure] stops dispatching, lets
+/// the in-flight passes drain, and is rethrown once the pool settles.
+///
+/// Single-isolate Dart: the shared counters below are read and written
+/// with no await in between, so the workers need no locking.
+Future<MeasurePoolOutcome<R>> runMeasurePool<R>({
+  required int planLength,
+  required Future<R?> Function(int index) measure,
+  bool Function(int index)? isSkipped,
+  void Function(int done, int total)? onProgress,
+  bool Function()? isCancelled,
+  int? maxConcurrency,
+}) async {
+  if (planLength == 0) {
+    return const MeasurePoolOutcome._(LoudnessPassStatus.completed, -1, []);
+  }
+  // Slot per plan entry so completion order never reorders results.
+  final results = List<R?>.filled(planLength, null);
+  var next = 0; // shared dispatch cursor
+  var done = 0; // monotonic progress counter
+  var failedIndex = -1; // lowest plan index whose pass failed
+  var sawCancel = false;
+  Object? firstError;
+  StackTrace? firstErrorStack;
+
+  bool shouldStop() {
+    if (failedIndex >= 0 || firstError != null || sawCancel) return true;
+    if (isCancelled?.call() ?? false) {
+      sawCancel = true;
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> worker() async {
+    while (!shouldStop()) {
+      final i = next++;
+      if (i >= planLength) return;
+      if (isSkipped?.call(i) ?? false) {
+        done++;
+        onProgress?.call(done, planLength);
+        continue;
+      }
+      final R? result;
+      try {
+        result = await measure(i);
+      } catch (e, st) {
+        firstError ??= e;
+        firstErrorStack ??= st;
+        return;
+      }
+      if (result == null) {
+        if (failedIndex < 0 || i < failedIndex) failedIndex = i;
+        return;
+      }
+      results[i] = result;
+      done++;
+      onProgress?.call(done, planLength);
+      await _yieldToUi();
+    }
+  }
+
+  final poolSize = max(
+    1,
+    min(maxConcurrency ?? _defaultMeasureConcurrency(), planLength),
+  );
+  await Future.wait([for (var w = 0; w < poolSize; w++) worker()]);
+
+  final collected = [for (final r in results) ?r];
+  if (firstError != null) {
+    Error.throwWithStackTrace(firstError!, firstErrorStack!);
+  }
+  final status = failedIndex >= 0
+      ? LoudnessPassStatus.failed
+      : sawCancel
+      ? LoudnessPassStatus.cancelled
+      : LoudnessPassStatus.completed;
+  return MeasurePoolOutcome._(status, failedIndex, collected);
+}
+
 /// Renders each mix × layout through OAR and measures loudness on a
 /// bounded pool of worker isolates, with per-completion [onProgress].
 /// Results come back in plan order regardless of completion order.
@@ -222,182 +326,127 @@ Future<LoudnessMeasureOutcome> measureMixLoudness({
     return const LoudnessMeasureOutcome._(LoudnessPassStatus.completed, []);
   }
 
-  // Slot per plan entry so completion order never reorders results.
-  final results = List<MeasuredLayoutLoudness?>.filled(plan.length, null);
-  // Aggregated per-element overload stats; merged turn-atomically (no
-  // await between read and write), commutative so worker completion
-  // order does not matter.
+  // Aggregated per-element overload stats; merged with no await between
+  // read and write, and commutative, so worker completion order does
+  // not matter.
   var clipStats = <int, ElementClipStats>{};
-  var next = 0; // shared dispatch cursor
-  var done = 0; // monotonic progress counter
-  var failedIndex = -1; // lowest plan index whose pass failed
-  var sawCancel = false;
-  Object? firstError;
-  StackTrace? firstErrorStack;
 
-  // Single-isolate Dart: reads and writes of the shared counters above
-  // are turn-atomic (no await between read and write), so the workers
-  // need no locking.
-  bool shouldStop() {
-    if (failedIndex >= 0 || firstError != null || sawCancel) return true;
-    if (isCancelled?.call() ?? false) {
-      sawCancel = true;
-      return true;
+  Future<MeasuredLayoutLoudness?> measureEntry(int i) async {
+    final (mix, subIdx, sub, target) = plan[i];
+    final oarLayout = soundSystemToOarLayout(target.soundSystem)!;
+
+    // Gather the elements included in this sub-mix.
+    final measureElements = <MixMeasureElement>[];
+    for (final settings in sub.elementSettings) {
+      if (!settings.included) continue;
+      final elem = elements
+          .where((e) => e.id == settings.elementId)
+          .firstOrNull;
+      if (elem == null) continue;
+
+      final wavPath = elem.wavPath;
+      if (wavPath == null) continue;
+
+      final (oarType, oarSubType, oarCh) = elementToOarType(elem);
+      final pos = elementObjectPolarPositions(elem);
+      measureElements.add(
+        MixMeasureElement(
+          sourceWavPath: wavPath,
+          gainDb: elem.gain,
+          routing: elem.inputRouting ?? const [],
+          padToFrames: paddedFrames,
+          outputSampleRate: sampleRate,
+          elementId: elem.id,
+          elementType: oarType,
+          elementSubType: oarSubType,
+          channels: oarCh,
+          mixGainDb: settings.mixGain,
+          headphonesMode: settings.headphonesMode.index,
+          binauralProfile: settings.binauralProfile.index,
+          numObjects: pos.count,
+          azimuth: pos.az,
+          elevation: pos.el,
+          distance: pos.dist,
+          azimuth2: pos.az2,
+          elevation2: pos.el2,
+          distance2: pos.dist2,
+          channelOrder: elementChannelOrder(elem),
+        ),
+      );
     }
-    return false;
-  }
 
-  Future<void> worker() async {
-    while (!shouldStop()) {
-      final i = next++;
-      if (i >= plan.length) return;
-      final (mix, subIdx, sub, target) = plan[i];
-      final oarLayout = soundSystemToOarLayout(target.soundSystem);
-      if (oarLayout == null) {
+    // Render + measure on this worker's own isolate. Instances are
+    // independent (see the library doc); overlap with the paused
+    // live renderer is what remains forbidden (ES-44).
+    final outcome = await runPass(
+      sampleRate: sampleRate,
+      bufferSize: bufferSize,
+      oarLayout: oarLayout,
+      outputMixGainDb: sub.outputMixGain,
+      elements: measureElements,
+      withTraces: withTraces,
+    );
+    if (outcome == null) return null;
+
+    final scalars = outcome.scalars;
+    Log.i(
+      LogCat.export,
+      'Measured ${mix.name}/${target.soundSystem.label}: '
+      'I=${scalars.integratedLufs.toStringAsFixed(2)} LUFS '
+      'peak=${scalars.digitalPeakDbfs.toStringAsFixed(2)} dBFS '
+      'truePeak=${scalars.truePeakDbtp.toStringAsFixed(2)} dBTP',
+    );
+    // Every element added to a successful render should have stats;
+    // a missing entry means the engine getter failed unexpectedly
+    // and the overload gate could silently miss that element.
+    for (final e in measureElements) {
+      if (!outcome.elementClipStats.containsKey(e.elementId)) {
         Log.w(
           LogCat.export,
-          'Skipping loudness for unsupported layout: '
-          '${target.soundSystem.label}',
-        );
-        done++;
-        onProgress?.call(done, plan.length);
-        continue;
-      }
-
-      // Gather the elements included in this sub-mix.
-      final measureElements = <MixMeasureElement>[];
-      for (final settings in sub.elementSettings) {
-        if (!settings.included) continue;
-        final elem = elements
-            .where((e) => e.id == settings.elementId)
-            .firstOrNull;
-        if (elem == null) continue;
-
-        final wavPath = elem.wavPath;
-        if (wavPath == null) continue;
-
-        final (oarType, oarSubType, oarCh) = elementToOarType(elem);
-        final pos = elementObjectPolarPositions(elem);
-        measureElements.add(
-          MixMeasureElement(
-            sourceWavPath: wavPath,
-            gainDb: elem.gain,
-            routing: elem.inputRouting ?? const [],
-            padToFrames: paddedFrames,
-            outputSampleRate: sampleRate,
-            elementId: elem.id,
-            elementType: oarType,
-            elementSubType: oarSubType,
-            channels: oarCh,
-            mixGainDb: settings.mixGain,
-            headphonesMode: settings.headphonesMode.index,
-            binauralProfile: settings.binauralProfile.index,
-            numObjects: pos.count,
-            azimuth: pos.az,
-            elevation: pos.el,
-            distance: pos.dist,
-            azimuth2: pos.az2,
-            elevation2: pos.el2,
-            distance2: pos.dist2,
-          ),
+          'No clip stats for element ${e.elementId} in '
+          '${mix.name}/${target.soundSystem.label}',
         );
       }
-
-      // Render + measure on this worker's own isolate. Instances are
-      // independent (see the library doc); overlap with the paused
-      // live renderer is what remains forbidden (ES-44).
-      final MixMeasureOutcome? outcome;
-      try {
-        outcome = await runPass(
-          sampleRate: sampleRate,
-          bufferSize: bufferSize,
-          oarLayout: oarLayout,
-          outputMixGainDb: sub.outputMixGain,
-          elements: measureElements,
-          withTraces: withTraces,
-        );
-      } catch (e, st) {
-        // Stop dispatching, let in-flight workers drain, rethrow after
-        // the pool settles (preserves the sequential pass's contract of
-        // surfacing the exception to the caller).
-        firstError ??= e;
-        firstErrorStack ??= st;
-        return;
-      }
-      if (outcome == null) {
-        if (failedIndex < 0 || i < failedIndex) failedIndex = i;
-        return;
-      }
-
-      final scalars = outcome.scalars;
-      Log.i(
-        LogCat.export,
-        'Measured ${mix.name}/${target.soundSystem.label}: '
-        'I=${scalars.integratedLufs.toStringAsFixed(2)} LUFS '
-        'peak=${scalars.digitalPeakDbfs.toStringAsFixed(2)} dBFS '
-        'truePeak=${scalars.truePeakDbtp.toStringAsFixed(2)} dBTP',
-      );
-
-      results[i] = MeasuredLayoutLoudness(
-        mixId: mix.id,
-        subMixIndex: subIdx,
-        soundSystem: target.soundSystem,
-        taggedInMix: target.taggedInMix,
-        scalars: scalars,
-        traces: outcome.traces,
-      );
-      // Every element added to a successful render should have stats;
-      // a missing entry means the engine getter failed unexpectedly
-      // and the overload gate could silently miss that element.
-      for (final e in measureElements) {
-        if (!outcome.elementClipStats.containsKey(e.elementId)) {
-          Log.w(
-            LogCat.export,
-            'No clip stats for element ${e.elementId} in '
-            '${mix.name}/${target.soundSystem.label}',
-          );
-        }
-      }
-      clipStats = mergeElementClipStats(clipStats, outcome.elementClipStats);
-
-      done++;
-      onProgress?.call(done, plan.length);
-      await _yieldToUi();
     }
+    clipStats = mergeElementClipStats(clipStats, outcome.elementClipStats);
+    return MeasuredLayoutLoudness(
+      mixId: mix.id,
+      subMixIndex: subIdx,
+      soundSystem: target.soundSystem,
+      taggedInMix: target.taggedInMix,
+      scalars: scalars,
+      traces: outcome.traces,
+    );
   }
 
-  final poolSize = max(
-    1,
-    min(maxConcurrency ?? _defaultMeasureConcurrency(), plan.length),
+  final pool = await runMeasurePool<MeasuredLayoutLoudness>(
+    planLength: plan.length,
+    measure: measureEntry,
+    // Layouts OAR cannot render as a target are skipped with a warning.
+    isSkipped: (i) {
+      final target = plan[i].$4;
+      if (soundSystemToOarLayout(target.soundSystem) != null) return false;
+      Log.w(
+        LogCat.export,
+        'Skipping loudness for unsupported layout: '
+        '${target.soundSystem.label}',
+      );
+      return true;
+    },
+    onProgress: onProgress,
+    isCancelled: isCancelled,
+    maxConcurrency: maxConcurrency,
   );
-  await Future.wait([for (var w = 0; w < poolSize; w++) worker()]);
-
-  final collected = [for (final r in results) ?r];
-  if (firstError != null) {
-    Error.throwWithStackTrace(firstError!, firstErrorStack!);
-  }
-  if (failedIndex >= 0) {
-    return LoudnessMeasureOutcome._(
-      LoudnessPassStatus.failed,
-      collected,
-      // uiLabel: this feeds user-facing failure strings in the export and
-      // loudness-report dialogs, which show "10.2.9.3 (22.2)" elsewhere.
-      // With concurrent workers the lowest failed plan index is
-      // reported, so the label is deterministic.
-      failedLayoutLabel: plan[failedIndex].$4.soundSystem.uiLabel,
-      elementClipStats: clipStats,
-    );
-  }
-  if (sawCancel) {
-    return LoudnessMeasureOutcome._(
-      LoudnessPassStatus.cancelled,
-      collected,
-      elementClipStats: clipStats,
-    );
-  }
   return LoudnessMeasureOutcome._(
-    LoudnessPassStatus.completed,
-    collected,
+    pool.status,
+    pool.results,
+    // uiLabel: this feeds user-facing failure strings in the export and
+    // loudness-report dialogs, which show "10.2.9.3 (22.2)" elsewhere.
+    // With concurrent workers the lowest failed plan index is
+    // reported, so the label is deterministic.
+    failedLayoutLabel: pool.failedIndex >= 0
+        ? plan[pool.failedIndex].$4.soundSystem.uiLabel
+        : null,
     elementClipStats: clipStats,
   );
 }

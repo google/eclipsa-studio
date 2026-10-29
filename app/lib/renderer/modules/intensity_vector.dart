@@ -13,10 +13,10 @@
 // limitations under the License.
 
 import 'dart:math' as math;
-import 'dart:ui' show Color;
 
 import 'package:vector_math/vector_math.dart';
 
+import '../../theme.dart';
 import '../coordinate_utils.dart';
 import '../viz_layer.dart';
 import '../viz_module.dart';
@@ -132,7 +132,7 @@ class IntensityVectorModule extends SceneVizModule {
           origin: Vector3.zero(),
           tip: dirViz..scale(tipLen),
           thickness: thickness,
-          color: Color(e.element.color),
+          color: aeTypeColor(e.element.type),
           alpha: alphaGain,
         ),
       );

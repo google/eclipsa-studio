@@ -246,6 +246,16 @@ enum ProfileConflictKind {
   /// More than one element type present in a profile that forbids mixing.
   mixedTypesNotAllowed,
 
+  /// A mix presentation references object-based elements together with
+  /// channel- or scene-based ones in a profile that requires object-only
+  /// mix presentations.
+  objectMixedWithOtherTypes,
+
+  /// Some mix presentation includes object-based elements, and the first
+  /// includes none, in a profile that requires the first to be
+  /// object-only then.
+  firstMixNotObjectOnly,
+
   /// A channel element uses an expanded layout the profile predates.
   elementLayoutNotAllowed,
 
@@ -375,6 +385,66 @@ List<ProfileConflict> profileConflicts({
     );
   }
 
+  final byId = {for (final e in elements) e.id: e};
+
+  // Base-Advanced's object rules, as iamf-tools' profile filter applies
+  // them. A mix presentation that includes object-based elements must
+  // include only object-based elements: the encoder drops Base-Advanced
+  // for one that does not. When any mix presentation includes object-based
+  // elements, the first must include only object-based elements: the
+  // decoder rejects the whole file otherwise. Types are counted over each
+  // mix presentation's included elements across all its sub-mixes.
+  if (profile.requiresObjectOnlyMixes && mixes.isNotEmpty) {
+    final mixTypes = [
+      for (final m in mixes)
+        {
+          for (final sm in m.subMixes)
+            for (final s in sm.elementSettings)
+              if (s.included && byId[s.elementId] != null)
+                byId[s.elementId]!.type,
+        },
+    ];
+    final mixedNames = [
+      for (var i = 0; i < mixes.length; i++)
+        if (mixTypes[i].contains('Object') && mixTypes[i].length > 1)
+          '"${mixes[i].name}"',
+    ];
+    if (mixedNames.isNotEmpty) {
+      final one = mixedNames.length == 1;
+      issues.add(
+        ProfileConflict(
+          kind: ProfileConflictKind.objectMixedWithOtherTypes,
+          shortLabel: 'object-only mixes',
+          message:
+              'Mix presentation${one ? '' : 's'} ${mixedNames.join(', ')} '
+              'include${one ? 's' : ''} object-based elements together '
+              'with channel- or scene-based elements, which '
+              '${profile.label} does not support. Move the object-based '
+              'elements to a mix presentation of their own.',
+        ),
+      );
+    }
+    // A first mix presentation that includes object-based elements and
+    // others is reported above; this covers one without object-based
+    // elements, empty included.
+    final anyObjects = mixTypes.any((t) => t.contains('Object'));
+    if (anyObjects && !mixTypes.first.contains('Object')) {
+      issues.add(
+        ProfileConflict(
+          kind: ProfileConflictKind.firstMixNotObjectOnly,
+          shortLabel: 'object mix first',
+          message:
+              '${profile.label} requires the first mix presentation to '
+              'include only object-based elements when any mix '
+              'presentation includes them, and the first, '
+              '"${mixes.first.name}", does not. Move a mix presentation '
+              'with only object-based elements to the first position in '
+              'the Mix view.',
+        ),
+      );
+    }
+  }
+
   // Expanded channel-element layouts the profile predates.
   final badLayouts = <String>{};
   for (final e in elements) {
@@ -471,7 +541,6 @@ List<ProfileConflict> profileConflicts({
   // in the UI and forced to defaults via effectiveHeadphonesMode, so a
   // leftover value on its reference is unresolvable by the user — exclude it
   // so we never raise a conflict the locked control offers no way to fix.
-  final byId = {for (final e in elements) e.id: e};
   final refs = <({MixElementSettings settings, AudioElement element})>[];
   for (final m in mixes) {
     for (final sm in m.subMixes) {

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:eclipsa_studio/session/session_provider.dart';
 import 'package:eclipsa_studio/state.dart';
 import 'package:eclipsa_studio/theme.dart';
+import 'package:eclipsa_studio/widgets/eclipsa_audio_lockup.dart';
 import 'package:eclipsa_studio/widgets/landing_glow.dart';
 import 'package:eclipsa_studio/workspace/landing_ground.dart';
 import 'package:eclipsa_studio/workspace/landing_screen.dart';
@@ -161,5 +163,95 @@ void main() {
         expect(scaffoldGround(tester).a, 0, reason: mode.name);
       }
     });
+
+    // The cards are constructed const, so no LandingScreen rebuild
+    // reaches them; they watch theme and font mode themselves. Both
+    // switches happen after the first frame, so a card that missed one
+    // keeps the previous theme's title ink or the previous title size.
+    testWidgets('the cards follow a theme and a font-size switch', (
+      tester,
+    ) async {
+      addTearDown(() => T.setFontMode(FontSizeMode.medium));
+      for (final mode in AppThemeMode.values) {
+        await pumpLanding(tester, mode);
+        final expected = T.cardStyle == CardStyle.chrome
+            ? T.chromeInk
+            : T.textPrimary;
+        for (final title in ['CREATOR', 'PLAYBACK']) {
+          expect(
+            tester.widget<Text>(find.text(title)).style!.color,
+            expected,
+            reason: '${mode.name}: $title',
+          );
+        }
+      }
+
+      final medium = T.fontTitle;
+      ProviderScope.containerOf(
+        tester.element(find.byType(LandingScreen)),
+      ).read(fontSizeModeProvider.notifier).set(FontSizeMode.large);
+      await tester.pump();
+      expect(T.fontTitle, greaterThan(medium));
+      for (final title in ['CREATOR', 'PLAYBACK']) {
+        expect(
+          tester.widget<Text>(find.text(title)).style!.fontSize,
+          T.fontTitle,
+          reason: '$title at Large',
+        );
+      }
+    });
+
+    // The caption sits somewhere on the gradient, depending on the
+    // window height, so it has to clear 4.5:1 on both ends. The ink is
+    // textSecondary, which contrast.json gates on landingGroundBottom;
+    // this pins the caption to that token and checks both ends here.
+    testWidgets('the Authoring for caption clears 4.5:1 on both ends of '
+        'the ground in every theme', (tester) async {
+      for (final mode in AppThemeMode.values) {
+        await pumpLanding(tester, mode);
+        final ink = tester
+            .widget<Text>(find.text('Authoring for'))
+            .style!
+            .color!;
+        expect(ink, T.textSecondary, reason: mode.name);
+        for (final (end, ground) in [
+          ('landingGroundTop', T.landingGroundTop),
+          ('landingGroundBottom', T.landingGroundBottom),
+        ]) {
+          expect(
+            _contrast(ink, ground),
+            greaterThanOrEqualTo(4.5),
+            reason: '${mode.name}: caption on $end',
+          );
+        }
+      }
+    });
+
+    testWidgets('the Eclipsa Audio lockup takes the colourway of the '
+        'landing ground, the same at both ends', (tester) async {
+      for (final mode in AppThemeMode.values) {
+        await pumpLanding(tester, mode);
+        final top = EclipsaAudioColorway.forGround(T.landingGroundTop);
+        expect(
+          EclipsaAudioColorway.forGround(T.landingGroundBottom),
+          top,
+          reason: '${mode.name}: the two ends pick different colourways',
+        );
+        expect(
+          tester
+              .widget<EclipsaAudioLockup>(find.byType(EclipsaAudioLockup))
+              .colorway,
+          top,
+          reason: mode.name,
+        );
+      }
+    });
   });
+}
+
+/// WCAG 2.x contrast ratio of two opaque colours.
+double _contrast(Color a, Color b) {
+  final la = a.computeLuminance();
+  final lb = b.computeLuminance();
+  return (math.max(la, lb) + 0.05) / (math.min(la, lb) + 0.05);
 }

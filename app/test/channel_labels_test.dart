@@ -19,10 +19,11 @@ import 'package:flutter_test/flutter_test.dart';
 /// Pins the timeline channel-label orders to OAR's authoritative layout
 /// map (`obr/renderer/loudspeaker_layouts.h` in the OAR fork; the OBR
 /// virtual-loudspeaker sequences are transcribed in the comments below).
-/// The engine registers 16-channel elements as kLayout9_1_6_ch — the
-/// primary L60-first ordering, NOT the `_alt` sequential variant
-/// (verified via the fork's rid map in `renderer/obr/obr.c`), which is
-/// what the 16-channel expectation here encodes.
+/// A 16-channel element is 9.1.6 in the app's order, OBR's alt order
+/// (`kLayout9_1_6_ch_alt`, L30 first), with the familiar names; the
+/// engine permutes it into OAR's order at the feed (ES-960). The 7.1
+/// family's side pair is Lss/Rss, as in IAMF; the 5.1 family's surround
+/// pair is Ls/Rs.
 ///
 /// Also pins that every label the app can emit has a full name for the
 /// gutter tooltips (channelFullName never falls back to echoing for
@@ -42,7 +43,7 @@ void main() {
     });
 
     test('7.1: L30 R30 C LFE L90 R90 L135 R135', () {
-      expect(byCount(8), ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs']);
+      expect(byCount(8), ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs']);
     });
 
     test('5.1.4: L30 R30 C LFE L110 R110 UL45 UR45 UL135 UR135', () {
@@ -53,16 +54,20 @@ void main() {
 
     test('7.1.4: L30 R30 C LFE L90 R90 L135 R135 UL45 UR45 UL135 UR135', () {
       expect(byCount(12), [
-        'L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', //
+        'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', //
         'Ltf', 'Rtf', 'Ltr', 'Rtr',
       ]);
     });
 
-    test('9.1.6 (primary, not _alt): L60 R60 C LFE1 L135 R135 L30 R30 '
-        'L90 R90 UL45 UR45 UL135 UR135 UL90 UR90', () {
+    test('9.1.6 (alt order): L30 R30 C LFE L60 R60 L90 R90 L135 R135 '
+        'UL45 UR45 UL90 UR90 UL135 UR135', () {
       expect(byCount(16), [
-        'L', 'R', 'C', 'LFE', 'Lrs', 'Rrs', 'Lc', 'Rc', 'Lss', 'Rss', //
-        'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltss', 'Rtss',
+        'L', 'R', 'C', 'LFE', 'Lw', 'Rw', 'Lss', 'Rss', 'Lrs', 'Rrs', //
+        'Ltf', 'Rtf', 'Lts', 'Rts', 'Ltr', 'Rtr',
+      ]);
+      expect(iamfChannelLabels(channelCount: 16, layoutHint: '9.1.6'), [
+        'L', 'R', 'C', 'LFE', 'Lw', 'Rw', 'Lss', 'Rss', 'Lrs', 'Rrs', //
+        'Ltf', 'Rtf', 'Lts', 'Rts', 'Ltr', 'Rtr',
       ]);
     });
 
@@ -74,9 +79,18 @@ void main() {
       ]);
     });
 
+    test('10.2.9.3 (OAR order): L60 R60 C LFE1 L135 R135 L30 R30 M180 LFE2 '
+        'L90 R90 UL45 UR45 UL0 T UL135 UR135 UL90 UR90 UL180 B0 B45 B-45', () {
+      expect(byCount(24), [
+        'Lw', 'Rw', 'C', 'LFE', 'Lrs', 'Rrs', 'L', 'R', 'Cs', 'LFE2', //
+        'Lss', 'Rss', 'Ltf', 'Rtf', 'Ctf', 'Tc', 'Ltr', 'Rtr', 'Lts', 'Rts',
+        'Ctr', 'Cbf', 'Lbf', 'Rbf',
+      ]);
+    });
+
     test('unmapped counts fall back to Ch N', () {
-      expect(standardChannelLabel(0, 24), 'Ch 1');
-      expect(standardChannelLabel(23, 24), 'Ch 24');
+      expect(standardChannelLabel(0, 20), 'Ch 1');
+      expect(standardChannelLabel(19, 20), 'Ch 20');
     });
   });
 
@@ -95,7 +109,7 @@ void main() {
 
     test('7.1.2: L30 R30 C LFE L90 R90 L135 R135 UL45 UR45', () {
       expect(iamfChannelLabels(channelCount: 10, layoutHint: '7.1.2'), [
-        'L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', 'Ltf', 'Rtf', //
+        'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', //
       ]);
     });
 
@@ -103,19 +117,14 @@ void main() {
       expect(iamfChannelLabels(channelCount: 6), byCount(6));
     });
 
-    test('7.1.5.4 keeps its own vocabulary at 16 or 17 lanes', () {
-      // The engine registers 7.1.5.4 elements as a 16-channel OAR
-      // element, so outCh can be 16 against a 17-channel file; the
-      // labels must stay 7.1.5.4 speakers (not the 9.1.6 vocabulary
-      // the bare 16-channel fallback would produce), truncated when
-      // only 16 lanes render.
+    test('7.1.5.4 and 10.2.9.3 are unambiguous by count', () {
       expect(
         iamfChannelLabels(channelCount: 17, layoutHint: '7.1.5.4'),
         byCount(17),
       );
       expect(
-        iamfChannelLabels(channelCount: 16, layoutHint: '7.1.5.4'),
-        byCount(17).sublist(0, 16),
+        iamfChannelLabels(channelCount: 24, layoutHint: '10.2.9.3'),
+        byCount(24),
       );
     });
   });
@@ -125,10 +134,10 @@ void main() {
       final all = <String>{
         ...byCount(1), ...byCount(2), ...byCount(6), ...byCount(8),
         ...byCount(10), ...byCount(12), ...byCount(16), ...byCount(17),
+        ...byCount(24),
         ...iamfChannelLabels(channelCount: 6, layoutHint: '3.1.2'),
         ...iamfChannelLabels(channelCount: 8, layoutHint: '5.1.2'),
         ...iamfChannelLabels(channelCount: 10, layoutHint: '7.1.2'),
-        ...iamfChannelLabels(channelCount: 16, layoutHint: '7.1.5.4'),
         ...ambisonicsLabels(25),
         'Ch 1', //
       };
@@ -139,6 +148,28 @@ void main() {
           reason: '"$label" must have a distinct full name',
         );
       }
+    });
+
+    test('lane tooltips are by index within a 9.1.6 layout (ES-960)', () {
+      final alt = channelLaneTooltips('9.1.6', byCount(16));
+      expect(alt[0], 'L (IAMF bitstream FLc)');
+      expect(alt[4], 'Lw (IAMF bitstream FL)');
+      expect(alt[12], 'Lts (IAMF bitstream TpSiL)');
+      // LFE has one name, so its lane falls back to the full name.
+      expect(alt[3], 'Low-frequency effects');
+      // A 7.1.4 lane labelled L is Left: the familiar names are also
+      // other layouts' labels, so nothing is looked up by label text.
+      final l714 = channelLaneTooltips('7.1.4', byCount(12));
+      expect(l714[0], 'Left');
+      expect(l714[4], 'Left side surround');
+      expect(l714[8], 'Left top front');
+      expect(channelLaneTooltips('3OA', ['ACN 3']), [
+        'Ambisonics channel 3 (ACN order)',
+      ]);
+      // Lanes past the layout (a 20-channel WAV declared 9.1.6 without
+      // routing) keep the count-based full name.
+      final wide = channelLaneTooltips('9.1.6', [...byCount(16), 'Ch 17']);
+      expect(wide[16], 'Channel 17');
     });
 
     test('spot checks', () {

@@ -18,6 +18,7 @@ import 'package:eclipsa_studio/export/user_metadata_builder.dart';
 import 'package:eclipsa_studio/models/audio_element_enums.dart'
     show BinauralProfile;
 import 'package:eclipsa_studio/state.dart';
+import 'package:eclipsa_studio/waveform/wav_decoder.dart' show WavInfo;
 import 'package:flutter_test/flutter_test.dart';
 
 // Fixture helpers — kept close to the validator tests so both files
@@ -30,6 +31,7 @@ AudioElement _channel({
   String codec = 'LPCM',
   String wavPath = '/tmp/bed.wav',
   double gain = 0,
+  WavInfo? wavInfo,
 }) {
   return AudioElement(
     id: id,
@@ -40,6 +42,7 @@ AudioElement _channel({
     color: 0xFF000000,
     gain: gain,
     wavPath: wavPath,
+    wavInfo: wavInfo,
   );
 }
 
@@ -92,6 +95,8 @@ IamfExportConfig _configWith({
   List<Mix>? mixes,
   Map<int, String>? wavBasenames,
   IamfCodec codec = IamfCodec.lpcm,
+  int paddedFrames = 0,
+  int longestSourceFrames = 0,
 }) {
   final wavs =
       wavBasenames ??
@@ -134,6 +139,8 @@ IamfExportConfig _configWith({
         ],
     wavBasenames: wavs,
     outputPath: '/tmp/session_export.iamf',
+    paddedFrames: paddedFrames,
+    longestSourceFrames: longestSourceFrames,
   );
 }
 
@@ -172,7 +179,7 @@ void main() {
         _configWith(elements: [_channel()]),
       );
       expect('codec_config_metadata {'.allMatches(out).length, 1);
-      expect(out, contains('codec_id: CODEC_ID_LPCM'));
+      expect(out, contains('decoder_config_lpcm {'));
       expect(out, contains('sample_rate: 48000'));
       expect(out, contains('num_samples_per_frame: 1024'));
     });
@@ -193,14 +200,27 @@ void main() {
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_channel()], codec: IamfCodec.opus),
       );
-      expect(out, contains('codec_id: CODEC_ID_OPUS'));
       expect(out, contains('num_samples_per_frame: 960'));
-      expect(out, contains('audio_roll_distance: -4'));
       expect(out, contains('decoder_config_opus {'));
       expect(out, contains('input_sample_rate: 48000'));
       expect(out, contains('target_bitrate_per_channel: 64000'));
       expect(out, contains('application: APPLICATION_AUDIO'));
       expect(out, isNot(contains('decoder_config_lpcm')));
+    });
+
+    test('omits the codec config fields iamf-tools 3.0.0 ignores', () {
+      for (final codec in IamfCodec.values) {
+        final out = buildUserMetadataTextproto(
+          _configWith(elements: [_channel()], codec: codec),
+        );
+        expect(out, isNot(contains('codec_id')), reason: codec.label);
+        expect(
+          out,
+          isNot(contains('audio_roll_distance')),
+          reason: codec.label,
+        );
+        expect(out, isNot(contains('pre_skip')), reason: codec.label);
+      }
     });
 
     test('Opus dedups mixed-bit-depth sources into one config', () {
@@ -220,18 +240,18 @@ void main() {
   });
 
   group('UserMetadataBuilder — channel-based element', () {
-    test('stereo -> LOUDSPEAKER_LAYOUT_STEREO with 1 coupled substream', () {
+    test('stereo -> LOUDSPEAKER_LAYOUT_STEREO with 1 substream ID', () {
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_channel(layout: 'Stereo')]),
       );
       expect(out, contains('audio_element_type: AUDIO_ELEMENT_CHANNEL_BASED'));
       expect(out, contains('loudspeaker_layout: LOUDSPEAKER_LAYOUT_STEREO'));
       expect(out, contains('audio_substream_ids: [0]'));
-      expect(out, contains('substream_count: 1'));
-      expect(out, contains('coupled_substream_count: 1'));
+      // iamf-tools derives both counts from the loudspeaker layout.
+      expect(out, isNot(contains('substream_count')));
     });
 
-    test('7.1.4 -> LOUDSPEAKER_LAYOUT_7_1_4_CH with 5 coupled substreams', () {
+    test('7.1.4 -> LOUDSPEAKER_LAYOUT_7_1_4_CH with 7 substream IDs', () {
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_channel(layout: '7.1.4')]),
       );
@@ -239,11 +259,9 @@ void main() {
       // iamf-tools groups 7.1.4 as 7 substreams with 5 coupled pairs
       // (C and LFE ride as uncoupled mono substreams).
       expect(out, contains('audio_substream_ids: [0, 1, 2, 3, 4, 5, 6]'));
-      expect(out, contains('substream_count: 7'));
-      expect(out, contains('coupled_substream_count: 5'));
     });
 
-    test('9.1.6 -> EXPANDED + 9_1_6_CH with 9 substreams (7 coupled)', () {
+    test('9.1.6 -> EXPANDED + 9_1_6_CH with 9 substream IDs', () {
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_channel(layout: '9.1.6')]),
       );
@@ -257,27 +275,26 @@ void main() {
       );
       // 16 channels: 7 coupled stereo pairs + C and LFE as mono = 9 total.
       expect(out, contains('audio_substream_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8]'));
-      expect(out, contains('substream_count: 9'));
-      expect(out, contains('coupled_substream_count: 7'));
-      // All 16 channel labels, in OAR render order (= iamf-tools canonical
-      // 9.1.6 order). Pinned exactly so a mid-list transposition is caught.
+      // All 16 channel labels per WAV index, in the app's 9.1.6 order
+      // (OBR's alt order, ES-960). Pinned exactly so a mid-list
+      // transposition is caught.
       const expectedLabels = [
-        'FL',
-        'FR',
-        'FC',
-        'LFE',
-        'BL',
-        'BR',
         'FLC',
         'FRC',
+        'FC',
+        'LFE',
+        'FL',
+        'FR',
         'SI_L',
         'SI_R',
+        'BL',
+        'BR',
         'TP_FL',
         'TP_FR',
-        'TP_BL',
-        'TP_BR',
         'TP_SI_L',
         'TP_SI_R',
+        'TP_BL',
+        'TP_BR',
       ];
       for (final (i, label) in expectedLabels.indexed) {
         expect(
@@ -298,12 +315,14 @@ void main() {
   });
 
   group('UserMetadataBuilder — scene-based element', () {
-    test('3OA -> AMBISONICS_MODE_MONO with 16 channels', () {
+    test('3OA -> ambisonics_mono_config with 16 channels', () {
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_scene(order: 3)]),
       );
       expect(out, contains('audio_element_type: AUDIO_ELEMENT_SCENE_BASED'));
-      expect(out, contains('ambisonics_mode: AMBISONICS_MODE_MONO'));
+      // iamf-tools takes the mode from the config that is set.
+      expect(out, contains('ambisonics_mono_config {'));
+      expect(out, isNot(contains('ambisonics_mode')));
       expect(out, contains('output_channel_count: 16'));
       expect(
         out,
@@ -599,10 +618,89 @@ void main() {
     });
   });
 
+  group('UserMetadataBuilder — audio frame trim', () {
+    test('both codecs let iamf-tools add the codec delay and padding', () {
+      for (final codec in IamfCodec.values) {
+        final out = buildUserMetadataTextproto(
+          _configWith(elements: [_channel()], codec: codec),
+        );
+        expect(
+          out,
+          contains('samples_to_trim_at_start_includes_codec_delay: false'),
+          reason: codec.label,
+        );
+        expect(
+          out,
+          contains('samples_to_trim_at_end_includes_padding: false'),
+          reason: codec.label,
+        );
+      }
+    });
+
+    test('end trim is the pad the dialog added', () {
+      final out = buildUserMetadataTextproto(
+        _configWith(
+          elements: [_channel()],
+          paddedFrames: 25600,
+          longestSourceFrames: 25000,
+        ),
+      );
+      expect(out, contains('samples_to_trim_at_end: 600\n'));
+    });
+
+    test('end trim is 0 without the dialog values', () {
+      // iamf-tools pads the partial final frame and trims the pad, so
+      // a trim written here would be added to it.
+      final element = _channel(
+        wavInfo: const WavInfo(
+          channels: 2,
+          sampleRate: 48000,
+          bitsPerSample: 24,
+          audioFormat: 1,
+          dataOffset: 44,
+          dataSize: 25000 * 6,
+          totalSamples: 25000,
+        ),
+      );
+      final out = buildUserMetadataTextproto(_configWith(elements: [element]));
+      expect(out, contains('samples_to_trim_at_end: 0\n'));
+    });
+  });
+
   group('UserMetadataBuilder — parameter blocks', () {
+    test('writes mix gains as default_mix_gain_db in Q7.8', () {
+      final out = buildUserMetadataTextproto(
+        _configWith(
+          elements: [_channel()],
+          mixes: const [
+            Mix(
+              id: 1,
+              name: 'Main',
+              subMixes: [
+                SubMix(
+                  outputMixGain: 6,
+                  elementSettings: [
+                    MixElementSettings(elementId: 1, mixGain: -3),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      // element_mix_gain -3 dB, then output_mix_gain +6 dB.
+      final gains = RegExp(
+        r'default_mix_gain_db \{\s*q7_dot8: (-?\d+)\s*\}',
+      ).allMatches(out).map((m) => m.group(1)).toList();
+      expect(gains, ['-768', '1536']);
+      // The top-level default_mix_gain field is deprecated in iamf-tools
+      // 3.0.0; the Q7.8 value now goes in default_mix_gain_db.
+      expect(out, isNot(contains('default_mix_gain:')));
+    });
+
     test('omits parameter_block_metadata (constant default gain)', () {
       // All parameter definitions use param_definition_mode=1 with a
-      // constant default_mix_gain, so iamf-tools uses that default for
+      // constant default_mix_gain_db, so iamf-tools uses that default for
       // every frame and no explicit per-frame blocks are needed.
       final out = buildUserMetadataTextproto(
         _configWith(elements: [_channel()]),

@@ -23,42 +23,10 @@
 #include <vector>
 
 #include "bounce/element_stream.h"
+#include "mix_renderer/loudness_analysis_sink.h"
 #include "renderer/oar_renderer.h"
 
 namespace eclipsa_studio {
-
-/// Result of an offline loudness measurement.
-struct LoudnessResult {
-  float integrated_lufs = -120.0f;    ///< BS.1770-4 integrated (LUFS)
-  float true_peak_dbtp = -120.0f;     ///< True peak, 4x upsampled (dBTP)
-  float digital_peak_dbfs = -120.0f;  ///< Sample peak, no upsampling (dBFS)
-};
-
-/// Time-series identifiers for post-measurement trace access. Values are
-/// part of the C ABI (eclipsa_studio_mix_renderer_copy_trace) — do not
-/// renumber. Every series steps at [OfflineMixRenderer::kTraceStepMs]. The
-/// analyzer series (0-3) have fewer entries than program-length/step because
-/// their first entry lands only once the analysis window fills (400 ms
-/// momentary, 3 s the rest); the limiter GR series has no warmup window
-/// and runs from t=0 for ceil(program/step) entries.
-enum MixTraceSeries : uint8_t {
-  kTraceMomentaryLufs = 0,      ///< 400 ms window, ungated (LUFS)
-  kTraceShortTermLufs = 1,      ///< 3 s sliding window, ungated (LUFS)
-  kTraceShortTermPeakDbfs = 2,  ///< Max sample peak per 3 s window (dBFS)
-  kTraceShortTermPsrDb = 3,     ///< Peak minus short-term loudness (dB)
-  /// Limiter envelope sampled once per render block (its end-of-block
-  /// value), converted to gain reduction (dB, >= 0) and max-reduced
-  /// per 100 ms step. Sustained limiting reads accurately; isolated
-  /// transients are understated, because each step sees only a few
-  /// point samples of the 50 ms-release envelope — resolution is
-  /// bounded by the render block size (exact per-sample tracking is
-  /// ES-541). An entry > 0 means the unlimited render — what the
-  /// exported file ships — exceeds -1 dBFS at or shortly after an
-  /// engagement near that step (the release tail smears into the
-  /// following steps). NO warmup window: entries from t=0, length =
-  /// ceil(program/step), unlike the analyzer series above.
-  kTraceLimiterGrDb = 4,
-};
 
 /// Per-element configuration for a mix render.
 struct MixElementConfig {
@@ -90,6 +58,13 @@ struct MixElementConfig {
   float azimuth_deg[2] = {0.0f, 0.0f};
   float elevation_deg[2] = {0.0f, 0.0f};
   float distance[2] = {1.0f, 1.0f};
+
+  /// The order of the element's channels after routing
+  /// (renderer/channel_order.h: kChannelOrderOar feeds OAR as it is,
+  /// kChannelOrder916Alt is a 9.1.6 element in OBR's alt order, which
+  /// the feed permutes into OAR's order). Set via
+  /// SetElementChannelOrder().
+  uint32_t channel_order = 0;
 };
 
 /// Renders a mix presentation at a specific output layout and measures
@@ -134,8 +109,24 @@ class OfflineMixRenderer {
                          const float* az_deg, const float* el_deg,
                          const float* dist);
 
+  /// Declare the order of an element's channels after routing, after
+  /// AddElement(). Returns false for an unknown element id. See
+  /// MixElementConfig::channel_order.
+  bool SetElementChannelOrder(uint32_t element_id, uint32_t order);
+
   /// Set the output (master) mix gain in dB.
   void SetOutputMixGain(float gain_db);
+
+  /// Render with OAR's -1 dBFS limiter on (the default) or off. With it
+  /// off, RenderAndMeasure() measures the unlimited render, the limiter
+  /// GR trace is all zeros and the render has no limiter delay. The app
+  /// always measures limited; the measure CLI's --no-limiter turns it
+  /// off for a WAV input. Call before RenderAndMeasure(), before or
+  /// after Init(); the setting holds for every later pass. Returns false
+  /// when the renderer refuses the change
+  /// (OarRenderer::set_limiter_enabled), which an offline instance does
+  /// not do.
+  bool SetLimiterEnabled(bool enabled);
 
   /// Run the full render and loudness measurement. Blocking.
   /// Opens an ElementStream per element (gain → routing → resample →
@@ -151,7 +142,7 @@ class OfflineMixRenderer {
   std::optional<LoudnessResult> RenderAndMeasure();
 
   /// Step between consecutive trace entries, uniform across series.
-  static constexpr uint32_t kTraceStepMs = 100;
+  static constexpr uint32_t kTraceStepMs = LoudnessAnalysisSink::kTraceStepMs;
 
   /// Number of recorded entries for a series. 0 before RenderAndMeasure()
   /// has succeeded, or for an unknown series id.

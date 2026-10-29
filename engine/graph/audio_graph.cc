@@ -39,26 +39,46 @@ static constexpr float kMaxMixGainDbPerCallback = 12.0f;
 static constexpr float kMonitorDimGain = 0.1f;
 static constexpr float kMonitorDimRampMs = 15.0f;
 
+// Output-channel solo and mute (ES-999): the ramp time between unity and
+// silence, in each direction.
+static constexpr float kOutputSoloMuteRampMs = 15.0f;
+
 #include "dsp/gain.h"
 #include "dsp/resampler.h"
 #include "engine_log.h"
 #include "graph/routing_scatter.h"
 #include "iamf/iamf_playback_session.h"
 #include "iamf/iamf_ring_source.h"
-#include "io/wav_reader.h"
+#include "io/wav_stream.h"
 #include "meters/channel_stats.h"
-#include "meters/loudness_meter.h"
+#include "meters/live_loudness_meter.h"
 #include "meters/peak_meter.h"
 #include "meters/rms_meter.h"
 #include "renderer/oar_renderer.h"
 
-// LoudnessMeter::process() feeds blocks longer than its scratch capacity
-// in chunks; keeping every graph block within that capacity keeps the
-// audio thread on the single-chunk path.
-static_assert(kGraphMaxFrames <= LoudnessMeter::kMaxBlockFrames,
-              "graph blocks must fit the loudness meter's scratch");
+// The live loudness meter's ring holds at least one analyzer chunk, so a
+// graph block always fits the ring when the meter thread has drained it.
+static_assert(kGraphMaxFrames <= LiveLoudnessMeter::kChunkFrames,
+              "graph blocks must fit the live loudness meter's ring");
 
 namespace {
+
+// Multiplies the first `frames` frames of every channel of `buf` by a
+// linear ramp starting at g0. The step divides by `frames`, not
+// frames - 1, so the ramp of the next block, starting at g1, joins this
+// one continuously. Same form as the OAR output fade.
+void ramp_buffer(AudioBuffer& buf, uint32_t frames, float g0, float g1) {
+  if (frames == 0) return;
+  const float step = (g1 - g0) / static_cast<float>(frames);
+  for (uint32_t c = 0; c < buf.channels; ++c) {
+    float* d = buf.channel(c);
+    float g = g0;
+    for (uint32_t f = 0; f < frames; ++f) {
+      d[f] *= g;
+      g += step;
+    }
+  }
+}
 
 // Pink-noise injection is published from the control thread to the audio
 // thread as a single packed 64-bit atomic — lock-free on every 64-bit target,
@@ -122,7 +142,7 @@ void move_meter_slot(EclipsaStudioMeterState& state, uint32_t dst,
 void ElementChain::reset() {
   id = 0;
   ctrl.reset();
-  wav_reader.reset();
+  wav_stream.reset();
   resampler.reset();
   iamf_ring_source.reset();
   gain.reset();
@@ -131,15 +151,20 @@ void ElementChain::reset() {
   rms_meter.reset();
   channel_stats.reset();
   buf = AudioBuffer{};
-  routing_map.store(nullptr, std::memory_order_relaxed);
-  routing_active_slot = 0;
-  routing_len = 0;
+  routing_slots = {};
+  routing_shared.store(kRoutingInitialShared, std::memory_order_relaxed);
+  routing_front = kRoutingInitialFront;
+  routing_back = kRoutingInitialBack;
+  join_pending = false;
+  joining = false;
+  join_frame = 0;
+  join_attempts = 0;
 }
 
 void ElementChain::move_from(ElementChain& src) {
   id = src.id;
   ctrl.copy_from(src.ctrl);
-  wav_reader = std::move(src.wav_reader);
+  wav_stream = std::move(src.wav_stream);
   resampler = std::move(src.resampler);
   iamf_ring_source = std::move(src.iamf_ring_source);
   gain = std::move(src.gain);
@@ -148,25 +173,43 @@ void ElementChain::move_from(ElementChain& src) {
   rms_meter = std::move(src.rms_meter);
   channel_stats = std::move(src.channel_stats);
   buf = src.buf;
-  // Move routing state. Note: routing_map pointer is recomputed below
-  // to reference THIS chain's storage (pointers into src's storage are
-  // about to become invalid when src.reset() clears them).
-  std::memcpy(routing_storage_a, src.routing_storage_a,
-              sizeof(routing_storage_a));
-  std::memcpy(routing_storage_b, src.routing_storage_b,
-              sizeof(routing_storage_b));
-  routing_active_slot = src.routing_active_slot;
-  routing_len = src.routing_len;
-  const bool had_routing =
-      src.routing_map.load(std::memory_order_relaxed) != nullptr;
-  if (had_routing) {
-    const int8_t* new_ptr =
-        routing_active_slot == 0 ? routing_storage_a : routing_storage_b;
-    routing_map.store(new_ptr, std::memory_order_release);
-  } else {
-    routing_map.store(nullptr, std::memory_order_relaxed);
-  }
+  // Routing state is slot contents plus slot indices, so it copies as
+  // it is, a published-but-untaken map included. Callers hold the audio
+  // thread out of process() (remove_element and close_iamf run under
+  // the pause and quiescence barrier), so neither side of the slot
+  // protocol runs during the copy.
+  routing_slots = src.routing_slots;
+  routing_shared.store(src.routing_shared.load(std::memory_order_relaxed),
+                       std::memory_order_relaxed);
+  routing_front = src.routing_front;
+  routing_back = src.routing_back;
+  join_pending = src.join_pending;
+  joining = src.joining;
+  join_frame = src.join_frame;
+  join_attempts = src.join_attempts;
   src.reset();
+}
+
+void ElementChain::publish_routing() {
+  // Release: the writes to the slot happen before the audio thread's
+  // exchange that takes it. Acquire: the parked slot taken here may be
+  // one the audio thread read during an earlier block, and its exchange
+  // (release) put it there after those reads.
+  routing_back = routing_shared.exchange(routing_back | kRoutingFresh,
+                                         std::memory_order_acq_rel) &
+                 kRoutingSlotMask;
+}
+
+const ElementChain::RoutingSlot& ElementChain::routing_for_block() {
+  // Only the audio thread clears kRoutingFresh, so a set bit seen here
+  // is still set at the exchange (which may return a newer slot than
+  // the one first seen, if the control thread published again).
+  if (routing_shared.load(std::memory_order_relaxed) & kRoutingFresh) {
+    routing_front =
+        routing_shared.exchange(routing_front, std::memory_order_acq_rel) &
+        kRoutingSlotMask;
+  }
+  return routing_slots[routing_front];
 }
 
 AudioGraph::AudioGraph() = default;
@@ -185,19 +228,29 @@ bool AudioGraph::init(uint32_t sample_rate, uint32_t max_frames,
     routing_[i].store(1ull << i, std::memory_order_relaxed);
   }
   noise_.store(0, std::memory_order_relaxed);  // calibration off.
+  // Output-channel solo and mute (ES-999) off: nothing silenced, unity gain.
+  output_silenced_.store(0, std::memory_order_relaxed);
+  for (uint32_t i = 0; i < kMaxRoutingChannels; ++i) {
+    output_channel_gains_[i] = 1.0f;
+  }
   update_output_rms_alpha();
 
   // OAR renderer — default to stereo layout.
   oar_renderer_ = std::make_unique<OarRenderer>();
   oar_renderer_->init(sample_rate_, max_frames_,
                       /*layout=*/2 /*ck_oar_layout_stereo*/);
+  // A new OarRenderer counts its instances from 1 again, so the first
+  // block rendered by this one is ramped in too. Written before the
+  // audio thread starts.
+  oar_generation_fed_ = 0;
 
   // Mix-bus loudness meter. Measures the post-OAR rendered output so the
   // number matches what iamf-tools would report for the same signal. Sized
   // to OAR's current layout; layout switches go through
   // set_monitoring_layout().
-  mix_loudness_meter_ = std::make_unique<LoudnessMeter>(
-      sample_rate_, oar_renderer_->channel_count(), oar_renderer_->layout());
+  mix_loudness_meter_ = std::make_unique<LiveLoudnessMeter>(
+      sample_rate_, oar_renderer_->channel_count(), oar_renderer_->layout(),
+      &global_meter_state_.loudness);
 
   initialized_ = true;
   return true;
@@ -211,16 +264,26 @@ bool AudioGraph::set_sample_rate(uint32_t new_rate) {
 
   bool ok = true;
   update_output_rms_alpha();
+  // The program position is in engine-rate frames (ES-986). A join in
+  // progress targets a frame at the old rate, so it starts again; the
+  // caller seeks after a rate change anyway (engine.cc does), which
+  // aligns every chain.
+  program_frame_ = (program_frame_ * new_rate + old_rate / 2) / old_rate;
   const uint32_t count = element_count_.load(std::memory_order_acquire);
   for (uint32_t i = 0; i < count; ++i) {
     ElementChain& chain = elements_[i];
     if (chain.peak_meter) chain.peak_meter->set_sample_rate(new_rate);
     if (chain.rms_meter) chain.rms_meter->set_sample_rate(new_rate);
     if (chain.channel_stats) chain.channel_stats->set_sample_rate(new_rate);
+    if (chain.joining) {
+      chain.joining = false;
+      chain.join_pending = true;
+    }
+    chain.join_attempts = 0;
 
     uint32_t src_sr = 0;
-    if (chain.wav_reader) {
-      src_sr = chain.wav_reader->sample_rate();
+    if (chain.wav_stream) {
+      src_sr = chain.wav_stream->sample_rate();
     } else if (chain.iamf_ring_source) {
       src_sr = chain.iamf_ring_source->sample_rate();
     } else {
@@ -250,10 +313,11 @@ bool AudioGraph::set_sample_rate(uint32_t new_rate) {
     }
   }
 
-  // set_sample_rate() also rebuilds the analyzer, but unlike reset_meters()
-  // / set_monitoring_layout() it is only ever called with the audio thread
-  // stopped (engine.cc stops the device, retargets, then restarts), so it
-  // cannot race process() and needs no loudness fence. See issue ES-145.
+  // set_sample_rate() also resizes the meter's ring, but unlike
+  // reset_meters() / set_monitoring_layout() it is only ever called with
+  // the audio thread stopped (engine.cc stops the device, retargets, then
+  // restarts), so it cannot race push() and needs no loudness fence. See
+  // issue ES-145.
   if (mix_loudness_meter_) mix_loudness_meter_->set_sample_rate(new_rate);
 
   {
@@ -280,6 +344,15 @@ void AudioGraph::shutdown() {
   }
   element_count_.store(0, std::memory_order_release);
   global_meter_state_.element_count = 0;
+  program_frame_ = 0;
+  // The chain resets above released every WavStream; stop the disk
+  // thread too (add_element() starts a new one).
+  wav_streamer_.reset();
+  // Stop and join the loudness meter's thread here, in the engine's
+  // shutdown call, rather than in a static destructor at process exit
+  // (g_graph is a static). init() creates a new meter. Every user of the
+  // meter checks for null.
+  mix_loudness_meter_.reset();
   initialized_ = false;
 }
 
@@ -297,7 +370,6 @@ int32_t AudioGraph::add_element(uint32_t id, const char* wav_path) {
 
   // Allocate processing components (heap-allocated once, no audio-thread
   // alloc).
-  chain.wav_reader = std::make_unique<WavReader>();
   chain.gain = std::make_unique<dsp::Gain>();
   chain.mute_gain = std::make_unique<dsp::Gain>();
   // Start unmuted — gain at unity. set_element_mute() and the solo pass
@@ -308,10 +380,13 @@ int32_t AudioGraph::add_element(uint32_t id, const char* wav_path) {
   chain.channel_stats = std::make_unique<ChannelStats>();
   chain.channel_stats->set_sample_rate(sample_rate_);
 
-  // Lenient: a damaged-but-playable file (truncated recording, junk
-  // tail) plays its intact prefix rather than refusing to load. Export
-  // and ADM import stay strict — see wav::OpenMode.
-  if (!chain.wav_reader->open(wav_path, wav::OpenMode::kLenient)) {
+  // WavStream opens lenient: a damaged-but-playable file (truncated
+  // recording, junk tail) plays its intact prefix rather than refusing
+  // to load. Export and ADM import stay strict — see wav::OpenMode. It
+  // also reads the file's first 4096 frames here, on the control thread,
+  // so the element has data before the disk thread first wakes.
+  chain.wav_stream = std::make_shared<WavStream>();
+  if (!chain.wav_stream->open(wav_path, kGraphMaxChannels)) {
     char buf[512];
     snprintf(buf, sizeof(buf), "WAV open FAILED: id=%u, path=%s", id, wav_path);
     engine_log(ECLIPSA_STUDIO_LOG_WARN, "graph", buf);
@@ -322,15 +397,15 @@ int32_t AudioGraph::add_element(uint32_t id, const char* wav_path) {
   {
     char buf[256];
     snprintf(buf, sizeof(buf), "WAV opened: id=%u, ch=%u, sr=%u, frames=%llu",
-             id, chain.wav_reader->channels(), chain.wav_reader->sample_rate(),
-             static_cast<unsigned long long>(chain.wav_reader->total_frames()));
+             id, chain.wav_stream->channels(), chain.wav_stream->sample_rate(),
+             static_cast<unsigned long long>(chain.wav_stream->total_frames()));
     engine_log(ECLIPSA_STUDIO_LOG_DEBUG, "graph", buf);
   }
 
   // Set up element buffer view — use the WAV's actual channel count
-  // so meters report the correct number of channels.
-  const uint32_t wav_ch =
-      std::min(chain.wav_reader->channels(), kGraphMaxChannels);
+  // (capped at kGraphMaxChannels by WavStream::open) so meters report
+  // the correct number of channels.
+  const uint32_t wav_ch = chain.wav_stream->channels();
   chain.buf.data = chain.buf_storage;
   chain.buf.channels = wav_ch;
   chain.buf.frames = 0;
@@ -341,7 +416,7 @@ int32_t AudioGraph::add_element(uint32_t id, const char* wav_path) {
   // graph and audio thread both clock at sample_rate_; without this,
   // a 44.1 kHz file would be consumed at the engine cadence, playing
   // back ~8.8 % pitched up and desyncing the timeline.
-  const uint32_t wav_sr = chain.wav_reader->sample_rate();
+  const uint32_t wav_sr = chain.wav_stream->sample_rate();
   if (wav_sr != 0 && wav_sr != sample_rate_) {
     auto resampler = std::make_unique<dsp::Resampler>();
     // Size for the graph-wide max so the chain survives a later
@@ -359,24 +434,34 @@ int32_t AudioGraph::add_element(uint32_t id, const char* wav_path) {
     chain.resampler = std::move(resampler);
   }
 
+  // The disk thread keeps the ring filled from here on.
+  if (!wav_streamer_) wav_streamer_ = std::make_unique<WavStreamer>();
+  wav_streamer_->add(chain.wav_stream);
+  // Start at the program position, not at frame 0 (ES-986): the audio
+  // thread seeks the chain there at its first playing block. A seek
+  // before then (the one sent on play, for an element added while
+  // paused) moves it instead.
+  chain.join_pending = true;
+
+  // Log before the publish below: from then on process() rewrites
+  // chain.buf every block, and this thread must not read it.
+  {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "add_element: id=%u wav_ch=%u wav_rate=%u buf_ch=%u "
+             "capacity=%u max_frames=%u engine_rate=%u slot=%u resample=%s",
+             id, chain.wav_stream->channels(), chain.wav_stream->sample_rate(),
+             chain.buf.channels, chain.buf.capacity_frames, max_frames_,
+             sample_rate_, count, chain.resampler ? "yes" : "no");
+    engine_log(ECLIPSA_STUDIO_LOG_INFO, "graph", buf);
+  }
+
   chain.ctrl.active.store(true, std::memory_order_relaxed);
   const uint32_t new_count = count + 1;
   element_count_.store(new_count, std::memory_order_release);
 
   // Keep element_count in the shared state in sync with the graph.
   global_meter_state_.element_count = new_count;
-
-  {
-    char buf[256];
-    snprintf(buf, sizeof(buf),
-             "add_element: id=%u wav_ch=%u wav_rate=%u buf_ch=%u "
-             "capacity=%u max_frames=%u engine_rate=%u slot=%u resample=%s",
-             id, chain.wav_reader ? chain.wav_reader->channels() : 0,
-             chain.wav_reader ? chain.wav_reader->sample_rate() : 0,
-             chain.buf.channels, chain.buf.capacity_frames, max_frames_,
-             sample_rate_, count, chain.resampler ? "yes" : "no");
-    engine_log(ECLIPSA_STUDIO_LOG_INFO, "graph", buf);
-  }
 
   return 0;
 }
@@ -683,6 +768,11 @@ void AudioGraph::set_element_object_position(uint32_t id, uint32_t count,
   // callback for object chains (mirrors set_element_mix_gain).
 }
 
+void AudioGraph::set_element_channel_order(uint32_t id, uint32_t order) {
+  ElementChain* chain = find_element(id);
+  if (chain) chain->ctrl.channel_order.store(order, std::memory_order_relaxed);
+}
+
 void AudioGraph::set_element_mix_gain(uint32_t id, float gain_db) {
   ElementChain* chain = find_element(id);
   if (chain) {
@@ -712,13 +802,12 @@ void AudioGraph::set_element_routing(uint32_t id, const int8_t* map,
     return;
   }
 
-  // Clearing to identity: publish nullptr. The audio thread's
-  // acquire-load sees this next callback and takes the fast path.
-  // Write metadata BEFORE the release-store so the invariant
-  // "metadata precedes pointer publish" holds on both branches.
+  // Fill the control thread's own slot, then publish it (see
+  // ElementChain). len 0 is identity: the audio thread skips the remap.
+  ElementChain::RoutingSlot& slot = chain->routing_back_slot();
   if (map == nullptr || len == 0) {
-    chain->routing_len = 0;
-    chain->routing_map.store(nullptr, std::memory_order_release);
+    slot.len = 0;
+    chain->publish_routing();
     return;
   }
 
@@ -730,24 +819,13 @@ void AudioGraph::set_element_routing(uint32_t id, const int8_t* map,
     engine_log(ECLIPSA_STUDIO_LOG_WARN, "graph", buf);
   }
 
-  // Double-buffered publish: write to the inactive slot, then flip the
-  // published pointer via release-store. The audio thread either sees
-  // the old pointer (still valid) or the new one, never a torn write.
-  const uint8_t inactive = chain->routing_active_slot == 0 ? 1 : 0;
-  int8_t* inactive_storage =
-      inactive == 0 ? chain->routing_storage_a : chain->routing_storage_b;
   const uint32_t clamped_len = std::min(len, kGraphMaxChannels);
   const uint32_t src_ch = chain->ctrl.wav_channels;
   bool any_oob = false;
   for (uint32_t i = 0; i < clamped_len; ++i) {
     const int8_t s = map[i];
     if (s >= 0 && static_cast<uint32_t>(s) >= src_ch) any_oob = true;
-    inactive_storage[i] = s;
-  }
-  // Zero out any tail so audio thread doesn't read stale data if routing_len
-  // later shrinks without being re-published.
-  for (uint32_t i = clamped_len; i < kGraphMaxChannels; ++i) {
-    inactive_storage[i] = -1;
+    slot.map[i] = s;
   }
   if (any_oob) {
     char buf[96];
@@ -757,9 +835,8 @@ void AudioGraph::set_element_routing(uint32_t id, const int8_t* map,
              id, src_ch);
     engine_log(ECLIPSA_STUDIO_LOG_WARN, "graph", buf);
   }
-  chain->routing_len = static_cast<uint8_t>(clamped_len);
-  chain->routing_active_slot = inactive;
-  chain->routing_map.store(inactive_storage, std::memory_order_release);
+  slot.len = static_cast<uint8_t>(clamped_len);
+  chain->publish_routing();
 }
 
 void AudioGraph::seed_element_mix_gain(uint32_t id, float gain_db) {
@@ -804,6 +881,18 @@ void AudioGraph::apply_monitor_dim(float* out, uint32_t frames,
   monitor_dim_gain_ = g;
 }
 
+void AudioGraph::set_output_solo_mute(uint64_t soloed, uint64_t muted) {
+  output_silenced_.store(muted | (soloed != 0 ? ~soloed : 0),
+                         std::memory_order_relaxed);
+}
+
+void AudioGraph::settle_output_solo_mute(uint32_t from) {
+  const uint64_t silenced = output_silenced_.load(std::memory_order_relaxed);
+  for (uint32_t c = from; c < kMaxRoutingChannels; ++c) {
+    output_channel_gains_[c] = ((silenced >> c) & 1u) != 0 ? 0.0f : 1.0f;
+  }
+}
+
 void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   if (!initialized_ || !out) return;
   ++process_call_count_;
@@ -826,6 +915,9 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   // run before the element loop: the loop consults the state to skip
   // ring reads while priming and to apply the fade.
   update_seek_mute_state(fr);
+  // The WAV chains' reads move the program position this block unless
+  // the seek hold skips them (ES-986).
+  const bool program_moves = seek_mute_state_ != SeekMuteState::kPriming;
 
   // Defensive: the device callback should never request more than the
   // pre-allocated kGraphMaxFrames, but every render path below only fills
@@ -844,10 +936,9 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   }
 
   // Snapshot element count (acquire pairs with release in add/remove).
+  // The shared meter state's element_count is the control thread's to
+  // write (meters/meter_state.h).
   const uint32_t n = element_count_.load(std::memory_order_acquire);
-
-  // Sync element count into the shared meter state.
-  global_meter_state_.element_count = n;
 
   // Determine if any element is soloed.
   bool any_solo = false;
@@ -917,95 +1008,117 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
 
     // Always read from the active source — the mute_gain node will
     // ramp the buffer to silence when appropriate, and OAR expects
-    // continuous data. Exactly one of {wav_reader, iamf_ring_source}
-    // is non-null per active chain. When the source's native sample
-    // rate differs from the engine rate, a dsp::Resampler stage
-    // converts it; consume() updates chain.buf.frames to the
-    // actually-produced count so downstream DSP / metering processes
-    // a valid range.
-    // While the seek state machine holds IAMF chains in the priming
+    // continuous data. Exactly one of {wav_stream, iamf_ring_source}
+    // is non-null per active chain, and both read a ring: the
+    // WavStreamer's disk thread fills a WAV chain's (ES-836), the IAMF
+    // session's I/O thread an IAMF chain's. A short read without EOF
+    // means that thread fell behind and is counted as an underrun.
+    // When the source's native sample rate differs from the engine
+    // rate, a dsp::Resampler stage converts it; consume() updates
+    // chain.buf.frames to the actually-produced count so downstream
+    // DSP / metering processes a valid range.
+    // While the seek state machine holds the chains in the priming
     // mute (ES-473), skip their ring reads entirely: the output is
     // silent anyway, and consuming the freshly-refilled frames while
-    // inaudible would burn the first ~40 ms of post-seek program. The
+    // inaudible would burn the first post-seek program. The
     // pre-zeroed buffer plays as silence; reads resume on fade-in.
     // Short reads during the hold are expected, so the underrun
-    // accounting is skipped along with the read.
-    const bool skip_iamf_read = seek_mute_state_ == SeekMuteState::kPriming &&
-                                chain.iamf_ring_source != nullptr;
-
-    if (chain.resampler) {
-      AudioBuffer& rin = chain.resampler->input_buffer();
-      // required_input() is steady-state at init plus filter warm-up
-      // headroom, but a transient query could theoretically exceed
-      // the input buffer's capacity. Clamp to the buffer's actual
-      // capacity so the source read can't write past the scratch.
-      // consume() also re-clamps internally as belt-and-suspenders.
-      const uint64_t in_needed_raw = chain.resampler->required_input(fr);
-      const uint32_t in_needed = static_cast<uint32_t>(
-          std::min<uint64_t>(in_needed_raw, rin.capacity_frames));
-      if (chain.wav_reader) {
-        chain.wav_reader->read(rin, in_needed);
-      } else if (chain.iamf_ring_source && !skip_iamf_read) {
-        const uint32_t got = chain.iamf_ring_source->read(rin, in_needed);
-        if (got < in_needed && !chain.iamf_ring_source->eof()) {
-          note_ring_underrun(i, in_needed - got);
+    // accounting is skipped along with the read. A WAV chain beside an
+    // IAMF session also skips during the session's hold; it is not
+    // seeked, and its output is muted then anyway. A WAV chain whose
+    // stream has not applied the last posted seek when the hold ends
+    // (the watchdog in update_seek_mute_state() gave up) joins the
+    // program again (step_join_rt()), as its ring still holds frames
+    // from before the seek.
+    //
+    // A WAV chain added while the program plays joins it in step (ES-986;
+    // see ElementChain::join_pending and step_join_rt()), skipping its
+    // reads until it starts. So does a WAV chain that underruns: the
+    // program moves on by the whole block while the chain's ring stays
+    // where the disk thread left it, so the chain is behind by the
+    // frames it missed and joins again (read_source below).
+    const bool join_hold =
+        chain.wav_stream != nullptr &&
+        step_join_rt(chain, fr, program_moves, effectively_muted);
+    const bool has_source =
+        chain.wav_stream != nullptr || chain.iamf_ring_source != nullptr;
+    const bool skip_read =
+        has_source &&
+        (seek_mute_state_ == SeekMuteState::kPriming || join_hold ||
+         (chain.wav_stream && !chain.wav_stream->seek_applied()));
+    auto read_source = [&](AudioBuffer& dst, uint32_t want) {
+      uint32_t got = 0;
+      bool eof = false;
+      if (chain.wav_stream) {
+        got = chain.wav_stream->read(dst, want);
+        eof = chain.wav_stream->eof();
+      } else {
+        got = chain.iamf_ring_source->read(dst, want);
+        eof = chain.iamf_ring_source->eof();
+      }
+      if (got < want && !eof) {
+        note_ring_underrun(i, want - got);
+        if (chain.wav_stream) {
+          // The frames read play; the rest of the block is silence, and
+          // the chain is silent from the next block until it has joined
+          // the program again. At the end of the file a short read is
+          // not an underrun and the chain plays out.
+          char buf[128];
+          snprintf(buf, sizeof(buf),
+                   "join: element %u fell %u frames behind the program at "
+                   "frame %llu; joining again",
+                   chain.id, want - got,
+                   static_cast<unsigned long long>(program_frame_));
+          engine_log_rt(ECLIPSA_STUDIO_LOG_WARN, "audio", buf);
+          chain.join_pending = true;
         }
       }
-      if (!skip_iamf_read) {
+    };
+
+    if (has_source && !skip_read) {
+      if (chain.resampler) {
+        AudioBuffer& rin = chain.resampler->input_buffer();
+        // required_input() is steady-state at init plus filter warm-up
+        // headroom, but a transient query could theoretically exceed
+        // the input buffer's capacity. Clamp to the buffer's actual
+        // capacity so the source read can't write past the scratch.
+        // consume() also re-clamps internally as belt-and-suspenders.
+        const uint64_t in_needed_raw = chain.resampler->required_input(fr);
+        const uint32_t in_needed = static_cast<uint32_t>(
+            std::min<uint64_t>(in_needed_raw, rin.capacity_frames));
+        read_source(rin, in_needed);
         chain.resampler->consume(chain.buf, rin.frames, fr);
-      }
-    } else if (chain.wav_reader) {
-      chain.wav_reader->read(chain.buf, fr);
-    } else if (chain.iamf_ring_source && !skip_iamf_read) {
-      const uint32_t got = chain.iamf_ring_source->read(chain.buf, fr);
-      if (got < fr && !chain.iamf_ring_source->eof()) {
-        note_ring_underrun(i, fr - got);
+      } else {
+        read_source(chain.buf, fr);
       }
     }
 
     // Apply the seek de-click fade: a linear ramp across the block
     // from seek_fade_g0_ to seek_fade_g1_ (unity in steady state —
-    // skipped, as is the IAMF priming hold, whose buffer is already
-    // zeroed; WAV chains read normally during the one-block hold and
-    // the zero gain mutes them). Applied straight after the source
-    // read, before DSP and metering, so meters show the audible
-    // (faded) level. The per-sample step divides by nf (not nf-1) so
-    // consecutive blocks' ramps join continuously — the same
-    // application form as the OAR output fade further down.
-    // skip_iamf_read implies an IAMF chain, and a chain with neither
-    // source has a zeroed buffer — so the gain bracket plus the skip
+    // skipped, as is the priming hold, whose buffer is already
+    // zeroed). Applied straight after the source read, before DSP and
+    // metering, so meters show the audible (faded) level. A chain with
+    // no source has a zeroed buffer, so the gain bracket plus the skip
     // flag is the whole predicate. Bracket first: the steady-state
     // early-out costs two scalar compares.
-    if ((seek_fade_g0_ != 1.0f || seek_fade_g1_ != 1.0f) && !skip_iamf_read) {
-      const uint32_t nf = chain.buf.frames;
-      if (nf > 0) {
-        const float step =
-            (seek_fade_g1_ - seek_fade_g0_) / static_cast<float>(nf);
-        for (uint32_t c = 0; c < chain.buf.channels; ++c) {
-          float* d = chain.buf.channel(c);
-          float g = seek_fade_g0_;
-          for (uint32_t f = 0; f < nf; ++f) {
-            d[f] *= g;
-            g += step;
-          }
-        }
-      }
+    if ((seek_fade_g0_ != 1.0f || seek_fade_g1_ != 1.0f) && !skip_read) {
+      ramp_buffer(chain.buf, chain.buf.frames, seek_fade_g0_, seek_fade_g1_);
     }
 
-    // Input-channel remap (lock-free fast path if routing_map==nullptr).
-    // Convention: rmap[dest] = src; -1 silences the dest. The WAV-shaped
-    // source is in chain.buf_storage; the remapped dest-shaped buffer
-    // goes into chain.buf_remap_storage. We then swap the view.
+    // Input-channel remap (skipped for identity, route.len == 0).
+    // Convention: route.map[dest] = src; -1 silences the dest. The
+    // WAV-shaped source is in chain.buf_storage; the remapped dest-shaped
+    // buffer goes into chain.buf_remap_storage. We then swap the view.
     {
-      const int8_t* rmap = chain.routing_map.load(std::memory_order_acquire);
-      if (rmap != nullptr) {
+      const ElementChain::RoutingSlot& route = chain.routing_for_block();
+      if (route.len != 0) {
         const uint32_t src_ch = chain.ctrl.wav_channels;
         const uint32_t dest_ch =
-            std::min<uint32_t>(chain.routing_len, kGraphMaxChannels);
+            std::min<uint32_t>(route.len, kGraphMaxChannels);
         for (uint32_t d = 0; d < dest_ch; ++d) {
           float* dst = chain.buf_remap_storage +
                        static_cast<size_t>(d) * kGraphMaxFrames;
-          const int8_t s = rmap[d];
+          const int8_t s = route.map[d];
           if (s < 0 || static_cast<uint32_t>(s) >= src_ch) {
             std::memset(dst, 0, fr * sizeof(float));
           } else {
@@ -1104,6 +1217,9 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   // in which case the device buffer is metered instead.
   const float* output_render = nullptr;
   uint32_t output_render_ch = 0;
+  // Channels the program scatter ramped this block (ES-999); 0 when no
+  // program reached the device buffer through it.
+  uint32_t scattered_channels = 0;
 
   const bool bypass = bypass_oar_.load(std::memory_order_relaxed);
 
@@ -1148,9 +1264,29 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
       // limited target; OAR interpolates sample-accurately within the
       // block. Between blocks, continuity is guaranteed by using the
       // previous callback's end as this callback's start.
+      //
+      // A new OAR instance takes its first blocks ramped up from
+      // silence (see oar_input_fade_gain_). The ramp goes on the
+      // element buffers after metering, so it is the instance's input
+      // only. The ramp state advances only once the block is rendered
+      // (below): an instance fed but not rendered starts its ramp again
+      // on the next block, whose element data replaces this one's.
+      const uint32_t generation = oar_renderer_->instance_generation();
+      const float in_g0 =
+          generation == oar_generation_fed_ ? oar_input_fade_gain_ : 0.0f;
+      float in_g1 = in_g0;
+      if (in_g0 < 1.0f) {
+        const float step =
+            (sample_rate_ > 0)
+                ? static_cast<float>(fr) /
+                      (kOarInputFadeSeconds * static_cast<float>(sample_rate_))
+                : 1.0f;
+        in_g1 = std::min(1.0f, in_g0 + step);
+      }
       for (uint32_t i = 0; i < n; ++i) {
         auto& chain = elements_[i];
         if (!chain.ctrl.active.load(std::memory_order_relaxed)) continue;
+        if (in_g0 < 1.0f) ramp_buffer(chain.buf, fr, in_g0, in_g1);
 
         // Slew-limit the target before emitting the ramp. Big jumps
         // (text-edit commits) fade over multiple callbacks instead of
@@ -1190,14 +1326,22 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
                                                       dist, fr);
         }
 
-        oar_renderer_->update_element_data(chain.id, chain.buf.data,
-                                           chain.buf.channels, fr,
-                                           chain.buf.capacity_frames);
+        // A 9.1.6 element in OBR's alt order is permuted into OLR's
+        // order here, after its routing, gains and meters (ES-960):
+        // ElementInputOrder() returns a table only for the matching
+        // channel count, so a mismatch feeds the block as it is.
+        const eclipsa_studio::ChannelOrder* input_order =
+            eclipsa_studio::ElementInputOrder(
+                chain.ctrl.channel_order.load(std::memory_order_relaxed),
+                chain.buf.channels);
+        oar_renderer_->update_element_data(
+            chain.id, chain.buf.data, chain.buf.channels, fr,
+            chain.buf.capacity_frames, input_order);
       }
 
-      // Push the group-level output mix gain (master fader) using the
-      // same slew-and-ramp pattern so text-edit commits on the master
-      // fader don't click either.
+      // Push the group-level output mix gain with the same slew-and-ramp
+      // pattern, so a large jump committed from the Mix view's output
+      // mix gain knob or dB field does not click either.
       {
         const float target_db =
             output_mix_gain_db_.load(std::memory_order_relaxed);
@@ -1219,6 +1363,30 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
         const float* rendered = oar_renderer_->render(fr);
         const uint32_t rch = oar_renderer_->channel_count();
         if (rendered && rch > 0) {
+          oar_generation_fed_ = generation;
+          oar_input_fade_gain_ = in_g1;
+          // The block in monitoring channel order (ES-960): for 9.1.6 a
+          // planar copy of OAR's output with the channels permuted into
+          // OBR's alternative order, so the routing matrix rows, the
+          // identity patch and the output meters follow that order.
+          // Every other layout is monitored as OLR renders it. The
+          // table is keyed on the layout the current OAR instance
+          // renders, and its channel count must match the render's,
+          // so a stale pair during a layout switch falls back to the
+          // unpermuted block rather than reading past either buffer.
+          const float* monitored = rendered;
+          const eclipsa_studio::ChannelOrder* order =
+              eclipsa_studio::MonitoringChannelOrder(
+                  oar_renderer_->rendered_layout());
+          if (order != nullptr && order->channels == rch) {
+            for (uint32_t c = 0; c < rch; ++c) {
+              std::memcpy(monitoring_storage_ + static_cast<size_t>(c) * fr,
+                          rendered + static_cast<size_t>(order->source[c]) * fr,
+                          static_cast<size_t>(fr) * sizeof(float));
+            }
+            monitored = monitoring_storage_;
+          }
+
           // OAR output is planar (rendered[c * fr + f]); the device buffer is
           // interleaved (out[f * channels + c]). Scatter each OAR channel to
           // its routed device channel(s) per the routing matrix. Snapshot the
@@ -1238,12 +1406,34 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
           std::memset(out, 0,
                       static_cast<size_t>(fr) * channels * sizeof(float));
           if (nd.mode == 0) {
-            scatter_routed(out, rendered, local, n, fr, channels);
+            // Output-channel solo and mute (ES-999) are applied here, on
+            // the way into the device buffer, so `monitored` and
+            // `rendered` stay whole for the meters below. The plain
+            // scatter runs while none of the n channels is silenced or
+            // ramping; the channels above n are settled after the block.
+            const uint64_t silenced =
+                output_silenced_.load(std::memory_order_relaxed) &
+                (n >= 64 ? ~0ull : (1ull << n) - 1);
+            bool unity = silenced == 0;
+            for (uint32_t c = 0; unity && c < n; ++c) {
+              unity = output_channel_gains_[c] == 1.0f;
+            }
+            if (unity) {
+              scatter_routed(out, monitored, local, n, fr, channels);
+            } else {
+              const float step =
+                  1.0f / (kOutputSoloMuteRampMs * 0.001f *
+                          static_cast<float>(std::max(sample_rate_, 1u)));
+              scatter_routed_ramped(out, monitored, local, silenced,
+                                    output_channel_gains_, step, n, fr,
+                                    channels);
+            }
+            scattered_channels = n;
           } else {
             // A calibration cell is lit: mute the program and inject pink
-            // noise at the fixed reference level (bypasses the master fader).
-            // Row noise fans out through the patch; column noise goes straight
-            // to the device channel.
+            // noise at the fixed reference level, bypassing the output mix
+            // gain. Row noise fans out through the patch; column noise goes
+            // straight to the device channel.
             for (uint32_t f = 0; f < fr; ++f) {
               noise_storage_[f] = noise_gen_.next() * nd.amp;
             }
@@ -1267,7 +1457,8 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
             }
           }
           rendered_ok = true;
-          output_render = rendered;  // meter the render, not the patch.
+          // Meter the render, not the patch, in monitoring order.
+          output_render = monitored;
           output_render_ch = rch;
           oar_renderer_->snapshot_limiter_env();
           global_meter_state_.limiter_gr =
@@ -1276,12 +1467,16 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
           // Post-OAR loudness meter — the rendered buffer is planar at
           // OAR's output channel count, with stride == fr (render packs
           // the block tightly). Wrap it as an AudioBuffer view; the
-          // meter only reads, the const_cast is safe.
+          // meter only reads, the const_cast is safe. It reads OAR's
+          // own order, not the monitoring order: the meter's BS.1770
+          // channel weights (meters/bs1770_weights.cc) follow OLR's.
+          // push() copies the block into the meter's ring; the meter's
+          // own thread runs the analyzer (ES-905).
           if (mix_loudness_meter_ && rch) {
             loudness_site_reached = true;
-            // Skip + acknowledge while the control thread is rebuilding the
-            // analyzer (reset/reconfigure), so it never frees the
-            // EbuR128Analyzer out from under this call. See issue ES-145.
+            // Skip + acknowledge while the control thread is reconfiguring
+            // the meter (reset/reconfigure), so it never reallocates the
+            // ring out from under this call. See issue ES-145.
             // seq_cst: see loudness_reconfiguring_ in the header.
             if (loudness_reconfiguring_.load(std::memory_order_seq_cst)) {
               loudness_ack_.fetch_add(1, std::memory_order_seq_cst);
@@ -1291,7 +1486,7 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
               rv.channels = rch;
               rv.frames = fr;
               rv.capacity_frames = fr;
-              mix_loudness_meter_->process(rv, fr, global_meter_state_);
+              mix_loudness_meter_->push(rv, fr);
             }
           }
         }
@@ -1313,6 +1508,12 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   // the OAR rebuild, during which the audio thread skips OAR).
   if (!loudness_site_reached) ack_loudness_reconfigure_if_pending();
 
+  // Output-channel solo and mute (ES-999): the channels the scatter did
+  // not ramp, all of them when no program reached it (bypass,
+  // calibration noise, no render), go straight to their target, so a
+  // change made meanwhile is complete when program reaches them.
+  settle_output_solo_mute(scattered_channels);
+
   // Compute output peak + RMS levels (exposed via
   // eclipsa_studio_get_output_peaks() / eclipsa_studio_get_output_rms()). When
   // OAR rendered, meter its planar per-channel output (pre-routing) so the
@@ -1320,14 +1521,16 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   // loudness meter. On bypass / silence there is no render, so fall back to
   // metering the interleaved device buffer.
   if (output_render != nullptr) {
-    output_channel_count_ = std::min(output_render_ch, kMaxOutputChannels);
-    for (uint32_t c = 0; c < output_channel_count_; ++c) {
+    const uint32_t metered = std::min(output_render_ch, kMaxOutputChannels);
+    output_channel_count_ = metered;
+    for (uint32_t c = 0; c < metered; ++c) {
       const float* src = output_render + static_cast<size_t>(c) * fr;
       meter_output_channel(src, fr, /*stride=*/1, c);
     }
   } else {
-    output_channel_count_ = std::min(channels, kMaxOutputChannels);
-    for (uint32_t c = 0; c < output_channel_count_; ++c) {
+    const uint32_t metered = std::min(channels, kMaxOutputChannels);
+    output_channel_count_ = metered;
+    for (uint32_t c = 0; c < metered; ++c) {
       meter_output_channel(out + c, fr, /*stride=*/channels, c);
     }
   }
@@ -1335,6 +1538,8 @@ void AudioGraph::process(float* out, uint32_t frames, uint32_t channels) {
   // Monitor DIM last (ES-629): after the render, the limiter, the
   // loudness tap and the output meters above, so none of them see it.
   apply_monitor_dim(out, frames, channels);
+
+  if (program_moves) program_frame_ += fr;
 }
 
 void AudioGraph::update_output_rms_alpha() {
@@ -1368,19 +1573,19 @@ void AudioGraph::meter_output_channel(const float* samples, uint32_t frames,
 }
 
 uint32_t AudioGraph::get_output_peaks(float* dst, uint32_t max_ch) const {
-  const uint32_t n = std::min(output_channel_count_, max_ch);
+  const uint32_t n = std::min<uint32_t>(output_channel_count_, max_ch);
   for (uint32_t i = 0; i < n; ++i) dst[i] = output_peaks_[i];
   return n;
 }
 
 uint32_t AudioGraph::get_output_rms(float* dst, uint32_t max_ch) const {
-  const uint32_t n = std::min(output_channel_count_, max_ch);
+  const uint32_t n = std::min<uint32_t>(output_channel_count_, max_ch);
   for (uint32_t i = 0; i < n; ++i) dst[i] = output_rms_[i];
   return n;
 }
 
 uint32_t AudioGraph::get_output_clips(uint8_t* dst, uint32_t max_ch) const {
-  const uint32_t n = std::min(output_channel_count_, max_ch);
+  const uint32_t n = std::min<uint32_t>(output_channel_count_, max_ch);
   for (uint32_t i = 0; i < n; ++i) dst[i] = output_clip_[i];
   return n;
 }
@@ -1441,13 +1646,12 @@ void AudioGraph::seek(uint64_t frame_pos) {
   }
   // WAV sessions stage too (ES-536): repositioning the readers here, on
   // the control thread, hard-spliced old program to new mid-callback —
-  // the last unfaded transport edge. The audio thread now runs the
-  // same fade-out → apply → fade-in machinery as IAMF; the priming
-  // hold degenerates (iamf_rings_primed() is trivially true with no
-  // IAMF session), so a WAV seek costs fade-out + one held block +
-  // fade-in. Staged in ENGINE-rate frames; apply_wav_seek_rt converts
-  // per chain. Paused seeks are consumed by the paused hook, which
-  // skips the fade — nothing is audible while paused.
+  // the last unfaded transport edge. The audio thread runs the same
+  // fade-out → post → hold → fade-in machinery as IAMF; the hold lasts
+  // until every WAV chain's disk-thread ring has applied the seek and
+  // refilled (ES-836). Staged in ENGINE-rate frames; apply_wav_seek_rt
+  // converts per chain. Paused seeks are consumed by the paused hook,
+  // which skips the fade — nothing is audible while paused.
   pending_seek_file_pos_.store(frame_pos, std::memory_order_release);
   pending_seek_count_.fetch_add(1, std::memory_order_release);
 }
@@ -1456,26 +1660,121 @@ void AudioGraph::apply_wav_seek_rt(uint64_t engine_frame_pos) {
   const uint32_t n = element_count_.load(std::memory_order_acquire);
   for (uint32_t i = 0; i < n; ++i) {
     ElementChain& chain = elements_[i];
-    if (!chain.wav_reader) continue;
-    uint64_t wav_pos = engine_frame_pos;
-    if (chain.resampler) {
-      // engine-rate frames → the WAV's file-rate cursor. Convert by
-      // ratio so the chain restarts at the same playhead position the
-      // user requested, regardless of which side of the resampler
-      // we're indexing.
-      const uint32_t in_sr = chain.resampler->in_rate();
-      const uint32_t out_sr = chain.resampler->out_rate();
-      if (out_sr > 0) {
-        wav_pos = (engine_frame_pos * in_sr + (out_sr / 2)) / out_sr;
-      }
-    }
+    if (!chain.wav_stream) continue;
     // No clamp needed (unlike the IAMF branch's control-side clamp):
-    // WavReader::seek is a bounds-clamped cursor assignment — no I/O
-    // at all — so an out-of-range target lands at EOF and reads
-    // return silence. Resampler history is dropped by the shared loop
-    // in post_staged_seek_rt().
-    chain.wav_reader->seek(wav_pos);
+    // the disk thread clamps to the file's length, so an out-of-range
+    // target lands at EOF and reads return silence. post_seek_rt() only
+    // stores the request (no I/O, no lock). Resampler history is
+    // dropped by the shared loop in post_staged_seek_rt().
+    chain.wav_stream->post_seek_rt(wav_file_frame(chain, engine_frame_pos));
+    // The seek moves this chain with the others, so a join in progress
+    // is no longer needed (ES-986), and the next join starts with the
+    // plain lead again.
+    chain.join_pending = false;
+    chain.joining = false;
+    chain.join_attempts = 0;
   }
+}
+
+uint64_t AudioGraph::wav_file_frame(const ElementChain& chain,
+                                    uint64_t engine_frame) {
+  if (!chain.resampler) return engine_frame;
+  // engine-rate frames → the WAV's file-rate cursor. Convert by ratio
+  // so the chain lands at the same playhead position regardless of
+  // which side of the resampler we're indexing.
+  const uint32_t in_sr = chain.resampler->in_rate();
+  const uint32_t out_sr = chain.resampler->out_rate();
+  if (out_sr == 0) return engine_frame;
+  return (engine_frame * in_sr + (out_sr / 2)) / out_sr;
+}
+
+void AudioGraph::start_join_rt(ElementChain& chain, uint32_t frames) {
+  if (frames == 0) return;
+  const uint64_t lead =
+      static_cast<uint64_t>(kJoinLeadSeconds * static_cast<float>(sample_rate_))
+      << chain.join_attempts;
+  const uint64_t blocks = (lead + frames - 1) / frames;
+  chain.join_frame = program_frame_ + blocks * frames;
+  chain.wav_stream->post_seek_rt(wav_file_frame(chain, chain.join_frame));
+  chain.join_pending = false;
+  chain.joining = true;
+}
+
+bool AudioGraph::step_join_rt(ElementChain& chain, uint32_t frames,
+                              bool program_moves, bool muted) {
+  // At program frame 0 a chain that has not been seeked is already in
+  // step: its stream starts at frame 0 of the file.
+  if (chain.join_pending && program_frame_ == 0) chain.join_pending = false;
+  if (!chain.joining && program_moves && !iamf_session_ &&
+      !chain.wav_stream->seek_applied()) {
+    // The seek hold ended (its watchdog gave up) before the disk thread
+    // applied this chain's seek: the ring still holds frames from
+    // before it, and the program has moved on from the target. Join
+    // the program ahead instead of playing from the target once the
+    // seek lands.
+    if (!chain.join_pending) {
+      char buf[128];
+      snprintf(buf, sizeof(buf),
+               "join: element %u seek unapplied at frame %llu; joining again",
+               chain.id, static_cast<unsigned long long>(program_frame_));
+      engine_log_rt(ECLIPSA_STUDIO_LOG_WARN, "audio", buf);
+    }
+    chain.join_pending = true;
+  }
+  if (!chain.join_pending && !chain.joining) return false;
+  if (iamf_session_) {
+    // Beside an IAMF session the WAV chains are not seeked; the chain
+    // plays from where its stream is.
+    chain.join_pending = false;
+    chain.joining = false;
+    chain.join_attempts = 0;
+    return false;
+  }
+  if (!program_moves) {
+    // During a seek hold program_frame_ is the hold's target. A chain
+    // added now joins the hold: rings_primed() waits for its refill as
+    // for the others, and it fades in with them. The hold skips its
+    // reads meanwhile. The hold's watchdog starts again, so the chain
+    // gets the full kSeekPrimeTimeoutSeconds for its refill.
+    if (chain.join_pending) {
+      chain.wav_stream->post_seek_rt(wav_file_frame(chain, program_frame_));
+      chain.join_pending = false;
+      seek_prime_hold_frames_ = 0;
+    }
+    return false;
+  }
+  if (chain.join_pending) start_join_rt(chain, frames);
+  const bool at_join_frame = program_frame_ == chain.join_frame;
+  if (at_join_frame &&
+      chain.wav_stream->primed(wav_prime_frames(chain, frames))) {
+    chain.joining = false;
+    chain.join_attempts = 0;
+    // Start from silence: snap the mute gain down, then restore this
+    // block's target so it ramps up instead of stepping in mid-signal.
+    if (chain.mute_gain) {
+      chain.mute_gain->set_gain_db(-120.0f);
+      chain.mute_gain->reset();
+      chain.mute_gain->set_gain_db(muted ? -120.0f : 0.0f);
+    }
+    return false;
+  }
+  if (program_frame_ >= chain.join_frame) {
+    // The ring was not primed in time (a slow disk), or the program
+    // passed join_frame (the block size changed): join again further
+    // ahead, with a longer lead after an unprimed ring.
+    if (at_join_frame && chain.join_attempts < kMaxJoinLeadDoublings) {
+      ++chain.join_attempts;
+    }
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "join: element %u not in step at frame %llu; joining again "
+             "(lead x%u)",
+             chain.id, static_cast<unsigned long long>(program_frame_),
+             1u << chain.join_attempts);
+    engine_log_rt(ECLIPSA_STUDIO_LOG_WARN, "audio", buf);
+    start_join_rt(chain, frames);
+  }
+  return true;
 }
 
 void AudioGraph::post_staged_seek_rt() {
@@ -1489,6 +1788,7 @@ void AudioGraph::post_staged_seek_rt() {
     seek_posted_request_count_ = iamf_session_->seeks_requested();
   } else {
     apply_wav_seek_rt(pos);
+    program_frame_ = pos;
     seek_posted_request_count_ = 0;
   }
   pending_seek_consumed_ = count;
@@ -1502,18 +1802,50 @@ void AudioGraph::post_staged_seek_rt() {
   }
 }
 
-bool AudioGraph::iamf_rings_primed() const {
-  // WAV sessions have nothing to refill — the reader reposition in
-  // post_staged_seek_rt() is the whole apply, so the priming hold
-  // completes on the next block (ES-536).
-  if (!iamf_session_) return true;
+uint32_t AudioGraph::wav_prime_frames(const ElementChain& chain,
+                                      uint32_t frames) {
+  uint64_t input = frames;
+  if (chain.resampler && chain.resampler->out_rate() > 0) {
+    input = static_cast<uint64_t>(frames) * chain.resampler->in_rate() /
+                chain.resampler->out_rate() +
+            1;
+  }
+  // The disk thread stops filling a ring once less than a chunk is
+  // free, so a larger threshold could never be reached.
+  return static_cast<uint32_t>(
+      std::min<uint64_t>(std::max<uint64_t>(kWavPrimeFrames, 2 * input),
+                         WavStream::kRingFrames - WavStream::kChunkFrames));
+}
+
+bool AudioGraph::wav_join_pending() const {
+  const uint32_t n = element_count_.load(std::memory_order_acquire);
+  for (uint32_t i = 0; i < n; ++i) {
+    if (elements_[i].wav_stream && elements_[i].join_pending) return true;
+  }
+  return false;
+}
+
+bool AudioGraph::rings_primed(uint32_t frames) const {
+  const uint32_t n = element_count_.load(std::memory_order_acquire);
+  if (!iamf_session_) {
+    // post_staged_seek_rt() posted to every WAV chain's stream; each
+    // checks that its disk-thread ring has applied the seek (discard
+    // floor published) and refilled, or reached the end (ES-836).
+    for (uint32_t i = 0; i < n; ++i) {
+      const ElementChain& chain = elements_[i];
+      if (!chain.wav_stream) continue;
+      if (!chain.wav_stream->primed(wav_prime_frames(chain, frames))) {
+        return false;
+      }
+    }
+    return true;
+  }
   // Until the I/O thread has applied the posted seek (upstream Seek
   // done, discard floors published), buffered_frames() still counts
   // the stale pre-seek backlog — never trust it before then.
   if (iamf_session_->seeks_applied() < seek_posted_request_count_) {
     return false;
   }
-  const uint32_t n = element_count_.load(std::memory_order_acquire);
   for (uint32_t i = 0; i < n; ++i) {
     const ElementChain& chain = elements_[i];
     if (!chain.iamf_ring_source) continue;
@@ -1528,10 +1860,38 @@ bool AudioGraph::iamf_rings_primed() const {
   return true;
 }
 
+bool AudioGraph::wait_for_wav_streams(uint32_t frames,
+                                      uint32_t timeout_ms) const {
+  if (iamf_session_) return true;
+  // The WAV branch of rings_primed(), less the streams a test has
+  // stalled.
+  const auto ready = [&] {
+    const uint32_t n = element_count_.load(std::memory_order_acquire);
+    for (uint32_t i = 0; i < n; ++i) {
+      const ElementChain& chain = elements_[i];
+      if (!chain.wav_stream || chain.wav_stream->stalled_for_testing()) {
+        continue;
+      }
+      if (!chain.wav_stream->primed(wav_prime_frames(chain, frames))) {
+        return false;
+      }
+    }
+    return true;
+  };
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (!ready()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
 void AudioGraph::update_seek_mute_state(uint32_t frames) {
   // WAV sessions run the same machine (ES-536): their seeks are staged
-  // like IAMF's, and iamf_rings_primed() is trivially true with no
-  // IAMF session, so the priming hold lasts exactly one block.
+  // like IAMF's and posted to each chain's WavStream, and
+  // rings_primed() waits for every WAV chain's disk-thread ring to
+  // refill (ES-836).
   const uint32_t pending = pending_seek_count_.load(std::memory_order_acquire);
   switch (seek_mute_state_) {
     case SeekMuteState::kIdle:
@@ -1553,19 +1913,21 @@ void AudioGraph::update_seek_mute_state(uint32_t frames) {
         // A newer seek arrived mid-prime (scrub drag): re-post and
         // keep holding. Naturally coalesces a seek storm.
         post_staged_seek_rt();
-      } else if (iamf_rings_primed()) {
+      } else if (rings_primed(frames) && !wav_join_pending()) {
         seek_mute_state_ = SeekMuteState::kIdle;  // fade back in below
       } else {
         // Watchdog: a ring can starve without EOF (see
-        // kSeekPrimeTimeoutSeconds) — give up rather than hold the
-        // whole mix muted forever.
+        // kSeekPrimeTimeoutSeconds), or a slow disk can refill a WAV
+        // ring late — give up rather than hold the whole mix muted
+        // forever. A WAV chain whose seek is still unapplied then joins
+        // the program again (step_join_rt()).
         seek_prime_hold_frames_ += frames;
         if (static_cast<float>(seek_prime_hold_frames_) >=
             kSeekPrimeTimeoutSeconds * static_cast<float>(sample_rate_)) {
           engine_log_rt(ECLIPSA_STUDIO_LOG_WARN, "audio",
-                        "seek prime timeout: a ring never refilled — "
-                        "resuming unprimed (expect underruns on the "
-                        "starved element; see ES-238)");
+                        "seek prime timeout: a ring did not refill within "
+                        "250 ms; resuming unprimed (an IAMF element "
+                        "underruns, a WAV element joins again)");
           seek_mute_state_ = SeekMuteState::kIdle;
         }
       }
@@ -1612,7 +1974,9 @@ void AudioGraph::drain_oar_tail_paused() {
     // tail must still be drained once that window closes.
     return;
   }
-  // limiter_delay() is 0 only before the first init; any built
+  // limiter_delay() is 0 only before the first init: the live graph
+  // never turns the limiter off, and set_limiter_enabled() refuses any
+  // instance not marked set_no_audio_thread(), so any built live
   // instance carries the limiter's 5 ms delay line.
   if (bypass_oar_.load(std::memory_order_relaxed) ||
       oar_renderer_->limiter_delay() == 0) {
@@ -1678,18 +2042,8 @@ void AudioGraph::consume_pending_seek_paused() {
   if (paused_drain_disarm_count_.load(std::memory_order_acquire) != 0) return;
   const uint32_t pending = pending_seek_count_.load(std::memory_order_acquire);
   if (pending == pending_seek_consumed_) return;
-  if (paused_seek_hook_armed_.load(std::memory_order_acquire)) {
-    // Armed implies a valid session (armed only at the end of a
-    // successful open, disarmed before every teardown). Paused output
-    // is silent — no fade-out needed. Post and enter the priming hold
-    // with the gain already at zero, so a resume stays muted until the
-    // refill is primed, then fades in.
-    post_staged_seek_rt();
-    seek_mute_state_ = SeekMuteState::kPriming;
-    seek_fade_gain_ = seek_fade_g0_ = seek_fade_g1_ = 0.0f;
-    return;
-  }
-  if (iamf_session_ != nullptr) {
+  if (!paused_seek_hook_armed_.load(std::memory_order_acquire) &&
+      iamf_session_ != nullptr) {
     // Should be unreachable: every disarmed-while-attached window sits
     // inside a PausedDrainDisarmScope (caught by the gate above) or
     // runs with no audio thread. If an engine change breaks that
@@ -1699,12 +2053,18 @@ void AudioGraph::consume_pending_seek_paused() {
                   "barrier invariant broken; retrying");
     return;
   }
-  // WAV session (ES-536): reposition the readers now, while nothing is
-  // audible, and stay transparent — no fade states to run, and the
-  // transport fade-in covers the resume edge.
+  // Armed implies a valid IAMF session (armed only at the end of a
+  // successful open, disarmed before every teardown); with no session,
+  // the seek goes to the WAV chains' streams (ES-536, ES-836). Paused
+  // output is silent — no fade-out needed. Post and enter the priming
+  // hold with the gain already at zero, so a resume stays muted until
+  // the refill is primed, then fades in. The hold matters for WAV too:
+  // a resume before the disk thread applies the seek would otherwise
+  // read frames from before it. If the refill landed while paused, the
+  // first playing block is the fade-in block.
   post_staged_seek_rt();
-  seek_mute_state_ = SeekMuteState::kIdle;
-  seek_fade_gain_ = seek_fade_g0_ = seek_fade_g1_ = 1.0f;
+  seek_mute_state_ = SeekMuteState::kPriming;
+  seek_fade_gain_ = seek_fade_g0_ = seek_fade_g1_ = 0.0f;
 }
 
 void AudioGraph::note_ring_underrun(uint32_t element_index, uint32_t missing) {
@@ -1768,15 +2128,11 @@ void AudioGraph::reset_meters(bool preserve_clips) {
       elements_[i].rms_meter->reset(global_meter_state_, i);
     }
   }
-  // The loudness meter rebuilds its analyzer here; fence the audio thread
-  // out first so it isn't freed mid-process() (issue ES-145). The loudness
-  // state clear rides inside the fence so the audio thread never observes
-  // a partially-reset meter.
+  // The loudness meter rewinds its ring here; fence the audio thread out
+  // of push() first (issue ES-145). reset() also clears
+  // global_meter_state_.loudness, under the meter's mutex.
   if (mix_loudness_meter_) {
-    with_loudness_fenced([this] {
-      mix_loudness_meter_->reset();
-      global_meter_state_.loudness = {};
-    });
+    with_loudness_fenced([this] { mix_loudness_meter_->reset(); });
   } else {
     global_meter_state_.loudness = {};
   }
@@ -1798,9 +2154,12 @@ void AudioGraph::reset_meters(bool preserve_clips) {
 
 bool AudioGraph::set_monitoring_layout(uint32_t layout) {
   if (!oar_renderer_) return false;
-  // Always reconfigure on an applied switch, even to the same channel
-  // count: the old integrated measurement belongs to the old layout and
-  // channel weighting.
+  // Always reconfigure the meter, which clears its readings. After a
+  // switch, even to the same channel count, the old integrated
+  // measurement belongs to the old layout and channel weighting. A call
+  // with the current layout keeps the OAR instance (ES-987) but still
+  // clears them: Playback makes that call on every mix-presentation
+  // switch, and the measurement belongs to the previous mix.
   return change_oar_loudness_fenced(
       [this, layout] { return oar_renderer_->set_layout(layout); },
       /*force_meter_reconfigure=*/true);
@@ -1837,11 +2196,15 @@ void AudioGraph::resync_loudness_meter_locked(bool force) {
   const uint32_t layout = oar_renderer_->layout();
   if (channels == 0) return;
   if (!force && loudness_meter_matches_oar()) return;
-  // reconfigure() frees and rebuilds the analyzer (issue ES-145); the caller's
-  // fence keeps the audio thread out of it. Clear the loudness-accumulated
-  // state too: the old integrated measurement belongs to the old layout.
+  // reconfigure() reallocates the meter's ring (issue ES-145); the caller's
+  // fence keeps the audio thread out of it. It also rebuilds the analyzer
+  // and clears the readings: the old integrated measurement belongs to
+  // the old layout.
   mix_loudness_meter_->reconfigure(channels, layout);
-  global_meter_state_.loudness = {};
+}
+
+void AudioGraph::drain_loudness_meter() {
+  if (mix_loudness_meter_) mix_loudness_meter_->drain();
 }
 
 void AudioGraph::wait_for_loudness_ack() {
@@ -1946,8 +2309,9 @@ void AudioGraph::render_noise(float* out, uint32_t frames, uint32_t channels) {
 
   // Keep the master output meter alive while paused so the calibration level
   // is visible on the UI.
-  output_channel_count_ = std::min(channels, kMaxOutputChannels);
-  for (uint32_t c = 0; c < output_channel_count_; ++c) {
+  const uint32_t metered = std::min(channels, kMaxOutputChannels);
+  output_channel_count_ = metered;
+  for (uint32_t c = 0; c < metered; ++c) {
     meter_output_channel(out + c, fr, /*stride=*/channels, c);
   }
 

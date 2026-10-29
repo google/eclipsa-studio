@@ -25,6 +25,21 @@ cc_library(
     ],
 )
 
+# Header-only: muxes a bare .iamf fixture into an IAMF-in-MP4 file through
+# a libgpac filter session, for tests that need an MP4 input.
+cc_library(
+    name = "iamf_test_mux",
+    hdrs = ["iamf_test_mux.h"],
+    deps = ["//deps/gpac:libgpac"],
+)
+
+# Counts one thread's heap allocations through the sanitizer malloc hooks
+# (asan and tsan builds), for tests of real-time paths.
+cc_library(
+    name = "alloc_counter",
+    hdrs = ["alloc_counter.h"],
+)
+
 # Output-level (post-OAR) test harness (ES-88) — header-only. Mirrors the
 # app's element-registration recipe and provides rendered-PCM
 # signal-integrity analysis (level / continuity / pitch).
@@ -34,6 +49,7 @@ cc_library(
     deps = [
         "//graph:audio_graph",
         "//renderer:oar_renderer",
+        "@googletest//:gtest",
     ],
 )
 
@@ -45,6 +61,22 @@ cc_test(
         ":test_wav_helper",
         "//io:wav_reader",
         "//wav:fixture",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# WavStream and WavStreamer: the disk-thread WAV ring (ES-836).
+# AudioThreadCallsDoNotAllocate counts allocations only under
+# --config=asan or --config=tsan.
+cc_test(
+    name = "wav_stream_test",
+    size = "small",
+    srcs = ["wav_stream_test.cc"],
+    deps = [
+        ":alloc_counter",
+        ":test_wav_helper",
+        "//graph:audio_buffer",
+        "//io:wav_stream",
         "@googletest//:gtest_main",
     ],
 )
@@ -115,16 +147,37 @@ cc_test(
 # Pins OAR's output channel order and speaker geometry (ES-592): renders one
 # object at each speaker's nominal angles on every target layout and checks
 # it comes out of that speaker's channel alone. The expectations live in
-# renderer/oar_output_channels.txt, which the app's Dart pin reads too, so
+# renderer/channel_layouts.txt, which the app's Dart pin reads too, so
 # an oar bump that reorders a layout fails here rather than silently
-# relabelling the meters.
+# relabelling the meters. It also pins the table's binaural sections to
+# the virtual loudspeaker positions ObrImpl lists for each element layout.
 cc_test(
-    name = "oar_output_channels_test",
+    name = "channel_layouts_test",
     size = "small",
-    srcs = ["oar_output_channels_test.cc"],
-    data = ["//renderer:oar_output_channels.txt"],
+    srcs = ["channel_layouts_test.cc"],
+    data = ["//renderer:channel_layouts.txt"],
     deps = [
         "//adm_import/scene:layouts",
+        "//renderer:channel_order",
+        "@abseil-cpp//absl/status",
+        "@googletest//:gtest_main",
+        "@oar//:oar",
+        "@obr//obr/renderer:audio_element_type",
+        "@obr//obr/renderer:obr_impl",
+    ],
+)
+
+# The per-block OAR calls of the audio thread must not allocate, from
+# the first block after a rebuild (ES-835). Counts allocations through the
+# sanitizer malloc hooks: runs in the asan and tsan configs, skipped in
+# the others.
+cc_test(
+    name = "oar_render_alloc_test",
+    size = "small",
+    srcs = ["oar_render_alloc_test.cc"],
+    deps = [
+        ":alloc_counter",
+        "//renderer:oar_renderer",
         "@googletest//:gtest_main",
         "@oar//:oar",
     ],
@@ -241,6 +294,8 @@ cc_test(
         ":test_output_helper",
         ":test_wav_helper",
         "//graph:audio_graph",
+        "//io:wav_stream",
+        "//meters:bs1770_weights",
         "@googletest//:gtest_main",
     ],
 )
@@ -253,9 +308,41 @@ cc_test(
     size = "small",
     srcs = ["audio_graph_loudness_race_test.cc"],
     deps = [
+        ":alloc_counter",
         ":test_wav_helper",
         "//graph:audio_graph",
-        "//meters:loudness_meter",
+        "//meters:live_loudness_meter",
+        "//renderer:oar_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Control-thread calls that race AudioGraph::process() with no barrier
+# (ES-837). Run under --config=tsan; see the file header.
+cc_test(
+    name = "audio_graph_control_race_test",
+    size = "small",
+    srcs = ["audio_graph_control_race_test.cc"],
+    deps = [
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "//meters:meter_state",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# Output continuity across OAR rebuilds during playback (ES-987): a new
+# instance takes its input ramped up from silence, and setting the
+# current layout keeps the instance.
+cc_test(
+    name = "audio_graph_rebuild_fade_test",
+    size = "small",
+    srcs = ["audio_graph_rebuild_fade_test.cc"],
+    deps = [
+        ":test_output_helper",
+        ":test_wav_helper",
+        "//graph:audio_graph",
+        "//meters:meter_state",
         "//renderer:oar_renderer",
         "@googletest//:gtest_main",
     ],
@@ -302,6 +389,23 @@ cc_test(
     srcs = ["loudness_meter_test.cc"],
     deps = [
         "//graph:audio_buffer",
+        "//meters:loudness_meter",
+        "//meters:meter_state",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# The live mix-bus meter's ring, meter thread and reconfiguration (ES-905).
+# PushDoesNotAllocate counts allocations only under --config=asan or
+# --config=tsan.
+cc_test(
+    name = "live_loudness_meter_test",
+    size = "small",
+    srcs = ["live_loudness_meter_test.cc"],
+    deps = [
+        ":alloc_counter",
+        "//graph:audio_buffer",
+        "//meters:live_loudness_meter",
         "//meters:loudness_meter",
         "//meters:meter_state",
         "@googletest//:gtest_main",
@@ -416,12 +520,15 @@ cc_test(
     name = "iamf_demuxer_test",
     size = "small",
     srcs = ["iamf_demuxer_test.cc"],
-    data = glob(["fixtures/*.iamf"]),
+    data = glob(["fixtures/*.iamf"]) + ["fixtures/stts_zero_tail_h264.mp4"],
     deps = [
+        ":iamf_test_mux",
         "//iamf:iamf_demuxer",
         "//iamf:iamf_playback_session",
-        "//deps/gpac:libgpac",
         "@googletest//:gtest_main",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_interface",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_tools_api_types",
     ],
 )
 
@@ -465,9 +572,12 @@ cc_test(
     # keep the run inaudible (ES-348).
     env = {"ECLIPSA_STUDIO_MUTE_OUTPUT": "1"},
     deps = [
+        ":test_output_helper",
+        ":test_wav_helper",
         "//:engine_lib",
         "//graph:audio_graph",
         "//graph:routing_scatter",
+        "//renderer:channel_order",
         "@googletest//:gtest_main",
     ],
 )
@@ -487,6 +597,7 @@ cc_test(
         ":test_wav_helper",
         "//:engine_lib",
         "//:transport_fade",
+        "//renderer:oar_renderer",
         "@googletest//:gtest_main",
     ],
 )
@@ -515,11 +626,17 @@ cc_test(
     data = glob([
         "fixtures/*.iamf",
         "fixtures/golden/*.textproto",
-    ]),
+    ]) + ["fixtures/stts_zero_tail_h264.mp4"],
     deps = [
+        ":iamf_test_mux",
         ":test_wav_helper",
+        "//:engine_log",
+        "//deps/gpac:libgpac",
         "//graph:audio_buffer",
+        "//iamf:gpac_system",
+        "//iamf:iamf_stream_reader",
         "//io:wav_reader",
+        "//mix_renderer:offline_iamf_measurer",
         "//tools:cli_commands",
         "@googletest//:gtest_main",
     ],
@@ -570,15 +687,17 @@ cc_test(
 
 cc_test(
     name = "iamf_loudness_agreement_test",
-    # `medium`: three full golden encodes + four measures; ~4 s
-    # fastbuild but longer under tsan, past a small target's 60 s
-    # budget headroom.
+    # `medium`: nine full golden encodes, the WAV-side measures and
+    # the decoded-IAMF measures; ~12 s fastbuild and ~110 s under tsan,
+    # past a small target's 60 s budget.
     size = "medium",
     srcs = ["iamf_loudness_agreement_test.cc"],
     data = glob(["fixtures/golden/*.textproto"]),
     deps = [
+        ":iamf_test_mux",
         ":test_wav_helper",
         "//iamf:iamf_exporter",
+        "//mix_renderer:offline_iamf_measurer",
         "//mix_renderer:offline_mix_renderer",
         "@googletest//:gtest_main",
         "@iamf_tools//iamf/cli:probe",
@@ -624,6 +743,23 @@ cc_test(
         ":test_wav_helper",
         "//:engine_lib",
         "//mix_renderer:offline_mix_renderer",
+        "@googletest//:gtest_main",
+    ],
+)
+
+# C ABI of the offline IAMF measurer (eclipsa_studio_iamf_measurer_*):
+# return codes, NULL-handle behaviour and the trace queries. Encodes the
+# multi_mix golden once and measures it three times.
+cc_test(
+    name = "iamf_measurer_ffi_test",
+    size = "small",
+    srcs = ["iamf_measurer_ffi_test.cc"],
+    data = glob(["fixtures/golden/*.textproto"]),
+    deps = [
+        ":test_wav_helper",
+        "//:engine_lib",
+        "//iamf:iamf_exporter",
+        "//mix_renderer:offline_iamf_measurer",
         "@googletest//:gtest_main",
     ],
 )
@@ -686,6 +822,7 @@ test_suite(
         ":oar_offline_exclusive_test",
         ":oar_ack_protocol_test",
         ":mix_renderer_ffi_test",
+        ":iamf_measurer_ffi_test",
         ":ffi_exports_lint_test",
     ],
 )

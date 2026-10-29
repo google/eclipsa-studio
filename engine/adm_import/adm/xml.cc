@@ -67,11 +67,18 @@ std::string DecodeEntities(absl::string_view s) {
       out.push_back(s[i++]);
       continue;
     }
-    auto semi = s.find(';', i);
-    if (semi == absl::string_view::npos) {
+    // A reference runs to the first `;`. An `&` before that `;` means this
+    // `&` starts no reference and is kept literally, and the next `&` is
+    // tried on its own. Each search therefore ends at or before the next
+    // `&`, so no byte is searched twice and the decode is linear in the
+    // input size (ES-849).
+    size_t end = i + 1;
+    while (end < s.size() && s[end] != ';' && s[end] != '&') ++end;
+    if (end == s.size() || s[end] == '&') {
       out.push_back(s[i++]);
       continue;
     }
+    const size_t semi = end;  // s[end] is the `;`.
     absl::string_view ent = s.substr(i + 1, semi - i - 1);
     if (ent == "lt") {
       out.push_back('<');

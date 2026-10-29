@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Pins the return-on-stop semantics from ES-277: a mid-playback user
-// seek becomes the new play-start, a selected loop region always wins
-// on stop, and clearing the loop region disarms the loop toggle only
+// Pins the return-on-stop semantics from ES-277 and ES-564: a user seek
+// while playing or paused becomes the new play-start, a pause keeps
+// the play-start and a stop clears it, a selected loop region always
+// wins on stop, and clearing the loop region disarms the loop toggle only
 // when a region actually existed (a region-less toggle is the
 // deliberate whole-timeline loop mode).
 //
@@ -49,13 +50,19 @@ void main() {
       expect(container.read(transportProvider).playStartPosition, 48000 * 5);
     });
 
-    test('seeking while stopped keeps the existing mark', () {
+    test('seeking while paused moves the play-start to the target', () {
       transport.seekSeconds(2.0);
-      transport.markPlayStart();
+      transport.markPlayStart(); // a play pass, now paused
 
       transport.seek(0.5);
 
-      expect(container.read(transportProvider).playStartPosition, 48000 * 2);
+      expect(container.read(transportProvider).playStartPosition, 48000 * 5);
+    });
+
+    test('seeking while stopped sets no mark', () {
+      transport.seek(0.5);
+
+      expect(container.read(transportProvider).playStartPosition, isNull);
     });
 
     test('internal seekSample never moves the mark (loop wrap)', () {
@@ -101,6 +108,108 @@ void main() {
       transport.returnToPlayStart();
 
       expect(container.read(transportProvider).samplePosition, 48000 * 2);
+    });
+  });
+
+  group('pause, resume and stop (ES-564)', () {
+    late PlayingNotifier playing;
+
+    // Play from 2 s, pause at 6 s.
+    void playThenPause() {
+      transport.seekSeconds(2.0);
+      playing.start();
+      transport.setSamplePosition(48000 * 6);
+      playing.pause();
+    }
+
+    // Resume, play to the end of the timeline and stop there; returns
+    // where the playhead lands.
+    int resumeToEndAndStop() {
+      playing.start();
+      transport.setSamplePosition(48000 * 10);
+      playing.stop();
+      return container.read(transportProvider).samplePosition;
+    }
+
+    setUp(() => playing = container.read(playingProvider.notifier));
+
+    test('resuming after a pause keeps the play-start', () {
+      playThenPause();
+
+      playing.start();
+
+      expect(container.read(playingProvider), isTrue);
+      expect(container.read(transportProvider).playStartPosition, 48000 * 2);
+    });
+
+    test('a Space-bar resume keeps the play-start too', () {
+      playThenPause();
+
+      playing.toggleTransport();
+
+      expect(container.read(transportProvider).playStartPosition, 48000 * 2);
+    });
+
+    test('a stop after a resume returns to where playback started', () {
+      playThenPause();
+
+      expect(resumeToEndAndStop(), 48000 * 2);
+      expect(container.read(playingProvider), isFalse);
+      expect(container.read(transportProvider).playStartPosition, isNull);
+    });
+
+    test('a hold that stops playback keeps the play-start', () {
+      transport.seekSeconds(2.0);
+      playing.start();
+      transport.setSamplePosition(48000 * 6);
+      playing.set(false); // export, Loudness Report or ADM import
+
+      expect(resumeToEndAndStop(), 48000 * 2);
+    });
+
+    test('Return to start while playing makes 0 the play-start', () {
+      // The whole-timeline loop wrap calls resetPosition the same way.
+      transport.seekSeconds(3.0);
+      playing.start();
+      transport.setSamplePosition(48000 * 5);
+      transport.resetPosition();
+      transport.setSamplePosition(48000 * 4);
+      playing.pause();
+
+      expect(resumeToEndAndStop(), 0);
+    });
+
+    test('Return to start while paused clears the play-start', () {
+      playThenPause();
+
+      transport.resetPosition();
+
+      expect(container.read(transportProvider).playStartPosition, isNull);
+      playing.start();
+      expect(container.read(transportProvider).playStartPosition, 0);
+    });
+
+    test('a stop with return-on-stop off stays put and drops the mark', () {
+      container.read(returnOnStopProvider.notifier).restore(false);
+      playThenPause();
+      playing.start();
+      transport.setSamplePosition(48000 * 8);
+
+      playing.stop();
+      playing.start();
+
+      final s = container.read(transportProvider);
+      expect(s.samplePosition, 48000 * 8);
+      expect(s.playStartPosition, 48000 * 8);
+    });
+
+    test('a mark past a shortened timeline returns to its end', () {
+      playThenPause();
+      transport.updateDuration(48000 * 1, 48000);
+
+      playing.stop();
+
+      expect(container.read(transportProvider).samplePosition, 48000);
     });
   });
 

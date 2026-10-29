@@ -17,19 +17,24 @@
 // The bulk drives the pure scatter_routed / scatter_noise helpers (no OAR
 // renderer needed) so the matrix maths is checked in isolation. A couple of
 // cases go through AudioGraph::process() and the engine FFI to cover the
-// audio-thread wiring and the size-mismatch guard.
+// audio-thread wiring and the size-mismatch guard. ElementInputRoutingTest
+// covers the per-element input routing map (set_element_routing).
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "engine.h"
 #include "graph/audio_graph.h"
 #include "graph/routing_scatter.h"
 #include "gtest/gtest.h"
+#include "renderer/channel_order.h"
+#include "test_output_helper.h"
+#include "test_wav_helper.h"
 
 namespace {
 
@@ -167,6 +172,142 @@ TEST(RoutingScatter, OutOfRangeBitsAreSkipped) {
   }
 }
 
+// ── scatter_routed_ramped (output-channel solo and mute, ES-999) ───────────
+
+TEST(RampedScatter, AtUnityMatchesThePlainScatter) {
+  const auto rendered = MakePlanar(/*rch=*/2, kFr, 10.0f);
+  const uint64_t masks[2] = {1ull << 1, 1ull << 0};  // swapped
+  const uint32_t channels = 2;
+  std::vector<float> plain(static_cast<size_t>(kFr) * channels, 0.0f);
+  std::vector<float> ramped(plain.size(), 0.0f);
+  float gains[2] = {1.0f, 1.0f};
+
+  scatter_routed(plain.data(), rendered.data(), masks, 2, kFr, channels);
+  scatter_routed_ramped(ramped.data(), rendered.data(), masks,
+                        /*silenced=*/0, gains, /*step=*/0.25f, 2, kFr,
+                        channels);
+
+  EXPECT_EQ(ramped, plain);
+  EXPECT_FLOAT_EQ(gains[0], 1.0f);
+  EXPECT_FLOAT_EQ(gains[1], 1.0f);
+}
+
+TEST(RampedScatter, RampsASilencedChannelDownAndKeepsTheGain) {
+  const auto rendered = MakePlanar(/*rch=*/2, kFr, 10.0f);
+  const uint64_t masks[2] = {1ull << 0, 1ull << 1};
+  const uint32_t channels = 2;
+  std::vector<float> out(static_cast<size_t>(kFr) * channels, 0.0f);
+  float gains[2] = {1.0f, 1.0f};
+
+  scatter_routed_ramped(out.data(), rendered.data(), masks,
+                        /*silenced=*/1ull << 1, gains, /*step=*/0.25f, 2, kFr,
+                        channels);
+
+  const float ramp[kFr] = {0.75f, 0.5f, 0.25f, 0.0f};
+  for (uint32_t f = 0; f < kFr; ++f) {
+    EXPECT_FLOAT_EQ(out[f * channels + 0], rendered[f]);
+    EXPECT_FLOAT_EQ(out[f * channels + 1], rendered[kFr + f] * ramp[f]);
+  }
+  EXPECT_FLOAT_EQ(gains[0], 1.0f);
+  EXPECT_FLOAT_EQ(gains[1], 0.0f);
+
+  // The next block starts from the gain reached: silent throughout.
+  std::fill(out.begin(), out.end(), 0.0f);
+  scatter_routed_ramped(out.data(), rendered.data(), masks,
+                        /*silenced=*/1ull << 1, gains, /*step=*/0.25f, 2, kFr,
+                        channels);
+  for (uint32_t f = 0; f < kFr; ++f) {
+    EXPECT_FLOAT_EQ(out[f * channels + 0], rendered[f]);
+    EXPECT_FLOAT_EQ(out[f * channels + 1], 0.0f);
+  }
+}
+
+TEST(RampedScatter, RampsARestoredChannelBackUp) {
+  const auto rendered = MakePlanar(/*rch=*/1, kFr, 10.0f);
+  const uint64_t masks[1] = {1ull << 0};
+  const uint32_t channels = 1;
+  std::vector<float> out(kFr, 0.0f);
+  float gains[1] = {0.0f};
+
+  scatter_routed_ramped(out.data(), rendered.data(), masks, /*silenced=*/0,
+                        gains, /*step=*/0.4f, 1, kFr, channels);
+
+  // Stops at unity rather than overshooting it.
+  const float ramp[kFr] = {0.4f, 0.8f, 1.0f, 1.0f};
+  for (uint32_t f = 0; f < kFr; ++f) {
+    EXPECT_FLOAT_EQ(out[f], rendered[f] * ramp[f]);
+  }
+  EXPECT_FLOAT_EQ(gains[0], 1.0f);
+}
+
+TEST(RampedScatter, SplitAndSumCarryTheChannelGain) {
+  // OAR ch0 splits to device ch0 and ch1; OAR ch1 sums into device ch1.
+  const auto rendered = MakePlanar(/*rch=*/2, kFr, 10.0f);
+  const uint64_t masks[2] = {(1ull << 0) | (1ull << 1), 1ull << 1};
+  const uint32_t channels = 2;
+  std::vector<float> out(static_cast<size_t>(kFr) * channels, 0.0f);
+  float gains[2] = {1.0f, 1.0f};
+
+  scatter_routed_ramped(out.data(), rendered.data(), masks,
+                        /*silenced=*/1ull << 0, gains, /*step=*/0.5f, 2, kFr,
+                        channels);
+
+  const float ramp[kFr] = {0.5f, 0.0f, 0.0f, 0.0f};
+  for (uint32_t f = 0; f < kFr; ++f) {
+    const float ch0 = rendered[f] * ramp[f];
+    EXPECT_FLOAT_EQ(out[f * channels + 0], ch0);
+    EXPECT_FLOAT_EQ(out[f * channels + 1], ch0 + rendered[kFr + f]);
+  }
+}
+
+TEST(RampedScatter, RampsChannel63) {
+  // The top bit of the mask: channel 63 ramps, channel 62 does not.
+  constexpr uint32_t kRch = 64;
+  const auto rendered = MakePlanar(kRch, kFr, 1.0f);
+  uint64_t masks[kRch] = {};
+  masks[62] = 1ull << 1;
+  masks[63] = 1ull << 0;
+  const uint32_t channels = 2;
+  std::vector<float> out(static_cast<size_t>(kFr) * channels, 0.0f);
+  std::vector<float> gains(kRch, 1.0f);
+
+  scatter_routed_ramped(out.data(), rendered.data(), masks,
+                        /*silenced=*/1ull << 63, gains.data(),
+                        /*step=*/0.25f, kRch, kFr, channels);
+
+  const float ramp[kFr] = {0.75f, 0.5f, 0.25f, 0.0f};
+  for (uint32_t f = 0; f < kFr; ++f) {
+    EXPECT_FLOAT_EQ(out[f * channels + 0], rendered[63 * kFr + f] * ramp[f]);
+    EXPECT_FLOAT_EQ(out[f * channels + 1], rendered[62 * kFr + f]);
+  }
+  EXPECT_FLOAT_EQ(gains[63], 0.0f);
+  EXPECT_FLOAT_EQ(gains[62], 1.0f);
+}
+
+TEST(RampedScatter, OutOfRangeBitsAreSkipped) {
+  const auto rendered = MakePlanar(/*rch=*/1, kFr, 10.0f);
+  // bit 0 (in range) + bit 5 (past a 2-channel device, must be ignored).
+  const uint64_t masks[1] = {(1ull << 0) | (1ull << 5)};
+  const uint32_t channels = 2;
+  constexpr float kSentinel = 999.0f;
+  std::vector<float> out(static_cast<size_t>(kFr) * channels + 8, kSentinel);
+  for (uint32_t i = 0; i < kFr * channels; ++i) out[i] = 0.0f;
+  float gains[1] = {1.0f};
+
+  scatter_routed_ramped(out.data(), rendered.data(), masks,
+                        /*silenced=*/1ull << 0, gains, /*step=*/0.25f, 1, kFr,
+                        channels);
+
+  const float ramp[kFr] = {0.75f, 0.5f, 0.25f, 0.0f};
+  for (uint32_t f = 0; f < kFr; ++f) {
+    EXPECT_FLOAT_EQ(out[f * channels + 0], rendered[f] * ramp[f]);
+    EXPECT_FLOAT_EQ(out[f * channels + 1], 0.0f);
+  }
+  for (uint32_t i = kFr * channels; i < out.size(); ++i) {
+    EXPECT_FLOAT_EQ(out[i], kSentinel);
+  }
+}
+
 // ── scatter_noise ─────────────────────────────────────────────────────────
 
 TEST(NoiseScatter, RowFollowsThePatch) {
@@ -267,6 +408,31 @@ TEST(NoiseProcess, ColInjectionReachesDeviceAndMutesElsewhere) {
   EXPECT_FLOAT_EQ(peak_off, 0.0f);
 }
 
+TEST(NoiseProcess, OutputMuteDoesNotCutCalibrationNoise) {
+  // Output-channel mute (ES-999) cuts the program; a lit calibration cell
+  // on the muted channel still reaches the device.
+  auto graph = std::make_unique<AudioGraph>();
+  ASSERT_TRUE(graph->init(48000, 512, 2));
+
+  constexpr uint32_t kFrames = 512, kChannels = 2;
+  std::vector<float> out(kFrames * kChannels, 0.0f);
+
+  graph->set_output_solo_mute(/*soloed=*/0, /*muted=*/1ull << 0);
+  graph->set_noise(/*row=*/1, /*channel=*/0, /*amp=*/1.0f);
+
+  // Past the 15 ms a cut would take to ramp out (two blocks), then
+  // measure.
+  for (int i = 0; i < 4; ++i) graph->process(out.data(), kFrames, kChannels);
+  float peak0 = 0.0f;
+  for (int i = 0; i < 4; ++i) {
+    graph->process(out.data(), kFrames, kChannels);
+    for (uint32_t f = 0; f < kFrames; ++f) {
+      peak0 = std::max(peak0, std::fabs(out[f * kChannels + 0]));
+    }
+  }
+  EXPECT_GT(peak0, 0.1f);
+}
+
 TEST(NoiseProcess, RenderNoiseWorksWhilePaused) {
   // render_noise is the paused-transport path: it must inject calibration
   // noise without the graph running process(), so calibration works with no
@@ -364,6 +530,305 @@ TEST(NoiseProcess, LiveSetRoutingTakesEffect) {
   for (int i = 0; i < 4; ++i) graph->process(out.data(), kFrames, kCh);
   EXPECT_FLOAT_EQ(peak(0), 0.0f);  // old route fell silent
   EXPECT_GT(peak(1), 0.0f);        // noise followed the new patch
+}
+
+// ── Per-element input routing (ES-838) ──────────────────────────────────────
+
+// A 3-channel element whose channels carry the constant levels 0.5,
+// 0.25 and 0.125, so the element meters show which source channel
+// reached each destination channel after the remap.
+class ElementInputRoutingTest : public ::testing::Test {
+ protected:
+  static constexpr uint32_t kFrames = 512;
+  static constexpr uint32_t kCh = 2;
+  static constexpr float kLevels[3] = {0.5f, 0.25f, 0.125f};
+
+  void SetUp() override {
+    wav_ = test_wav::temp_dir() + "/element_routing_3ch.wav";
+    std::vector<int16_t> frames;
+    for (int f = 0; f < 48000; ++f) {
+      for (float level : kLevels) {
+        frames.push_back(static_cast<int16_t>(level * 32768.0f));
+      }
+    }
+    ASSERT_TRUE(test_wav::write_frames_s16(wav_, 3, 48000, frames));
+    graph_ = std::make_unique<AudioGraph>();
+    ASSERT_TRUE(graph_->init(48000, kFrames, kCh));
+    ASSERT_EQ(graph_->add_element(1, wav_.c_str()), 0);
+  }
+
+  // Runs one block and returns the per-channel peaks of the element in
+  // meter slot `slot`.
+  std::vector<float> ProcessAndReadPeaks(uint32_t slot = 0) {
+    std::vector<float> out(kFrames * kCh);
+    EXPECT_TRUE(graph_->wait_for_wav_streams(kFrames));
+    graph_->process(out.data(), kFrames, kCh);
+    const EclipsaStudioMeterData& m = graph_->meter_state()->elements[slot];
+    std::vector<float> peaks(m.channel_count);
+    for (uint32_t c = 0; c < peaks.size(); ++c) peaks[c] = m.peak[c];
+    return peaks;
+  }
+
+  std::string wav_;
+  std::unique_ptr<AudioGraph> graph_;
+};
+
+TEST_F(ElementInputRoutingTest, IdentityWithoutAMap) {
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.5f, 0.25f, 0.125f}));
+}
+
+TEST_F(ElementInputRoutingTest, MapReordersAndSilencesChannels) {
+  // dest 0 <- src 2, dest 1 <- src 0, dest 2 silent, dest 3 <- src 1.
+  const int8_t map[4] = {2, 0, -1, 1};
+  graph_->set_element_routing(1, map, 4);
+  EXPECT_EQ(ProcessAndReadPeaks(),
+            (std::vector<float>{0.125f, 0.5f, 0.0f, 0.25f}));
+}
+
+TEST_F(ElementInputRoutingTest, SourceIndexPastTheFileIsSilent) {
+  const int8_t map[2] = {5, 0};
+  graph_->set_element_routing(1, map, 2);
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.0f, 0.5f}));
+}
+
+TEST_F(ElementInputRoutingTest, ClearRestoresIdentity) {
+  const int8_t swap[2] = {1, 0};
+  graph_->set_element_routing(1, swap, 2);
+  ASSERT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.25f, 0.5f}));
+
+  graph_->set_element_routing(1, nullptr, 0);
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.5f, 0.25f, 0.125f}));
+
+  graph_->set_element_routing(1, swap, 2);
+  ASSERT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.25f, 0.5f}));
+  graph_->set_element_routing(1, swap, 0);  // len 0 clears as well
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.5f, 0.25f, 0.125f}));
+}
+
+// Several updates between two blocks: the block applies the last one,
+// whatever the earlier ones were.
+TEST_F(ElementInputRoutingTest, BlockAppliesTheLatestOfSeveralUpdates) {
+  const int8_t first[1] = {0};
+  const int8_t second[2] = {2, 2};
+  graph_->set_element_routing(1, first, 1);
+  graph_->set_element_routing(1, second, 2);
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.125f, 0.125f}));
+
+  const int8_t third[1] = {1};
+  const int8_t fourth[2] = {0, 1};
+  graph_->set_element_routing(1, third, 1);
+  graph_->set_element_routing(1, nullptr, 0);
+  graph_->set_element_routing(1, fourth, 2);
+  EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{0.5f, 0.25f}));
+
+  // Six rounds of one update and one block: the audio thread reads each
+  // of the three slots twice.
+  for (int i = 0; i < 6; ++i) {
+    const int8_t map[1] = {static_cast<int8_t>(i % 3)};
+    graph_->set_element_routing(1, map, 1);
+    EXPECT_EQ(ProcessAndReadPeaks(), (std::vector<float>{kLevels[i % 3]}));
+  }
+}
+
+// remove_element() moves the last chain into the freed slot; the moved
+// chain keeps its routing.
+TEST_F(ElementInputRoutingTest, RoutingMovesWithItsChainOnRemove) {
+  ASSERT_EQ(graph_->add_element(2, wav_.c_str()), 0);
+  const int8_t map[2] = {2, 1};
+  graph_->set_element_routing(2, map, 2);
+  ASSERT_EQ(ProcessAndReadPeaks(/*slot=*/1),
+            (std::vector<float>{0.125f, 0.25f}));
+
+  graph_->remove_element(1);
+  EXPECT_EQ(ProcessAndReadPeaks(/*slot=*/0),
+            (std::vector<float>{0.125f, 0.25f}));
+  // A later update reaches the moved chain.
+  const int8_t swap[2] = {1, 0};
+  graph_->set_element_routing(2, swap, 2);
+  EXPECT_EQ(ProcessAndReadPeaks(/*slot=*/0), (std::vector<float>{0.25f, 0.5f}));
+}
+
+// A map published while no block runs (the transport is paused) is still
+// pending when remove_element() compacts; the moved chain applies it.
+TEST_F(ElementInputRoutingTest, PendingRoutingMovesWithItsChainOnRemove) {
+  ASSERT_EQ(graph_->add_element(2, wav_.c_str()), 0);
+  const int8_t map[2] = {2, 1};
+  graph_->set_element_routing(2, map, 2);  // No block before the remove.
+  graph_->remove_element(1);
+  EXPECT_EQ(ProcessAndReadPeaks(/*slot=*/0),
+            (std::vector<float>{0.125f, 0.25f}));
+}
+
+// ── 9.1.6 monitoring channel order (ES-960) ─────────────────────────────────
+
+// Per-device-channel peak over one block of interleaved output.
+std::vector<float> DevicePeaks(const std::vector<float>& out, uint32_t frames,
+                               uint32_t channels) {
+  std::vector<float> peaks(channels, 0.0f);
+  for (uint32_t f = 0; f < frames; ++f) {
+    for (uint32_t c = 0; c < channels; ++c) {
+      peaks[c] = std::max(peaks[c], std::fabs(out[f * channels + c]));
+    }
+  }
+  return peaks;
+}
+
+// A mono object on a 9.1.6 target with the identity patch. OLR renders
+// the layout in Sound System H order (L60 R60 C LFE1 L135 R135 L30 R30
+// ...), so an object at +30 degrees lands on OLR channel 6 and one at
+// +60 degrees on OLR channel 0. The monitoring path reorders the block
+// into OBR's alternative order before the scatter and the output
+// meters, so the +30 degree source reaches device channel 0 (FLc) and
+// the +60 degree source device channel 4 (FL), and the output meter
+// indices follow the same order.
+TEST(MonitoringOrder, Alt916ReordersRoutingAndOutputMeters) {
+  const std::string wav = test_wav::temp_dir() + "/routing_916_object.wav";
+  ASSERT_TRUE(test_wav::write_sine_frames(wav, 1, 48000, 16, 440.f, 4 * 48000,
+                                          /*amplitude=*/0.25f));
+
+  constexpr uint32_t kFrames = 512;
+  constexpr uint32_t kCh = 16;
+  constexpr uint32_t k916 = eclipsa_studio::kOarLayout916;
+  auto graph = std::make_unique<AudioGraph>();
+  ASSERT_TRUE(graph->init(48000, kFrames, kCh));
+  ASSERT_EQ(graph->add_element(1, wav.c_str()), 0);
+  ASSERT_TRUE(graph->oar_renderer()->add_element(1, /*type=object*/ 2,
+                                                 /*num_objects=*/1,
+                                                 /*channels=*/1));
+  graph->set_element_object(1, true);
+  ASSERT_TRUE(test_output::set_layout_identity(*graph, k916, kCh));
+  ASSERT_EQ(graph->oar_renderer()->channel_count(), kCh);
+  ASSERT_EQ(graph->oar_renderer()->rendered_layout(), k916);
+
+  // (azimuth, expected device channel): FLc is output 0, FL output 4.
+  const struct {
+    float az;
+    uint32_t device;
+  } cases[] = {{30.0f, 0}, {60.0f, 4}};
+  for (const auto& c : cases) {
+    graph->set_element_object_position(1, 1, c.az, 0.0f, 1.0f, 0.0f, 0.0f,
+                                       0.0f);
+    // Past the element mute ramp and OLR's position gain ramp.
+    test_output::run_blocks(*graph, test_output::kWarmupBlocks, kFrames, kCh);
+
+    std::vector<float> out(static_cast<size_t>(kFrames) * kCh, 0.0f);
+    graph->process(out.data(), kFrames, kCh);
+    const std::vector<float> device = DevicePeaks(out, kFrames, kCh);
+    float meters[kCh] = {};
+    ASSERT_EQ(graph->get_output_peaks(meters, kCh), kCh);
+
+    for (uint32_t d = 0; d < kCh; ++d) {
+      if (d == c.device) {
+        EXPECT_GT(device[d], 0.1f) << "az " << c.az << ": device " << d;
+        EXPECT_GT(meters[d], 0.1f) << "az " << c.az << ": meter " << d;
+      } else {
+        EXPECT_LT(device[d], 0.005f) << "az " << c.az << ": device " << d;
+        EXPECT_LT(meters[d], 0.005f) << "az " << c.az << ": meter " << d;
+      }
+    }
+  }
+}
+
+// A 16-channel WAV with a tone on channel 0 only.
+std::string WriteTone16(const std::string& name) {
+  constexpr int kCh = 16;
+  constexpr int kFrames = 4 * 48000;
+  std::vector<int16_t> frames(static_cast<size_t>(kFrames) * kCh, 0);
+  for (int i = 0; i < kFrames; ++i) {
+    const float t = static_cast<float>(i) / 48000.0f;
+    frames[static_cast<size_t>(i) * kCh] = static_cast<int16_t>(
+        std::sin(2.0f * 3.14159265f * 440.0f * t) * 0.25f * 32767.0f);
+  }
+  const std::string path = test_wav::temp_dir() + "/" + name;
+  if (!test_wav::write_frames_s16(path, kCh, 48000, frames)) return {};
+  return path;
+}
+
+// A 9.1.6 channel element on a 9.1.6 target with the identity patch.
+// Declared in OBR's alt order, WAV channel 0 is FLc: the engine feeds
+// it to OLR channel 6 (L30), which the monitoring path sends to device
+// channel 0. Declared in OAR's order, the same WAV channel is FL (L60,
+// OLR channel 0), which reaches device channel 4. The element's own
+// meters stay in the element's order either way: slot 0 carries the
+// tone, slot 6 stays silent.
+TEST(MonitoringOrder, Alt916ElementIsFedToOlrInItsOrder) {
+  const std::string wav = WriteTone16("routing_916_alt_element.wav");
+  ASSERT_FALSE(wav.empty());
+
+  constexpr uint32_t kFrames = 512;
+  constexpr uint32_t kCh = 16;
+  constexpr uint32_t k916 = eclipsa_studio::kOarLayout916;
+  auto graph = std::make_unique<AudioGraph>();
+  ASSERT_TRUE(graph->init(48000, kFrames, kCh));
+  ASSERT_TRUE(test_output::add_wav_element(*graph, 1, wav, k916, kCh));
+  ASSERT_TRUE(test_output::set_layout_identity(*graph, k916, kCh));
+
+  const struct {
+    uint32_t order;
+    uint32_t device;
+  } cases[] = {{eclipsa_studio::kChannelOrder916Alt, 0},
+               {eclipsa_studio::kChannelOrderOar, 4}};
+  for (const auto& c : cases) {
+    graph->set_element_channel_order(1, c.order);
+    test_output::run_blocks(*graph, test_output::kWarmupBlocks, kFrames, kCh);
+
+    std::vector<float> out(static_cast<size_t>(kFrames) * kCh, 0.0f);
+    graph->process(out.data(), kFrames, kCh);
+    const std::vector<float> device = DevicePeaks(out, kFrames, kCh);
+    for (uint32_t d = 0; d < kCh; ++d) {
+      if (d == c.device) {
+        EXPECT_GT(device[d], 0.1f) << "order " << c.order << ": device " << d;
+      } else {
+        EXPECT_LT(device[d], 0.005f) << "order " << c.order << ": device " << d;
+      }
+    }
+    const EclipsaStudioMeterState* state = graph->meter_state();
+    ASSERT_NE(state, nullptr);
+    EXPECT_GT(state->elements[0].peak[0], 0.1f) << "order " << c.order;
+    EXPECT_FLOAT_EQ(state->elements[0].peak[6], 0.0f) << "order " << c.order;
+  }
+}
+
+// The element input order on another target, where only the input
+// semantic matters: OLR takes a 9.1.6 element in the same Sound System
+// H order it renders. On a 7.1.4 target (L30 R30 C LFE L90 R90 L135
+// R135 and four tops) with the identity patch, a WAV tone on channel 0
+// declared in the alt order is FLc at 30 degrees and lands on device
+// channel 0 alone; declared in OAR's order it is FL at 60 degrees,
+// which OLR pans between L30 (device 0) and L90 (device 4).
+TEST(MonitoringOrder, Alt916ElementOnA714Target) {
+  const std::string wav = WriteTone16("routing_916_alt_on_714.wav");
+  ASSERT_FALSE(wav.empty());
+
+  constexpr uint32_t kFrames = 512;
+  constexpr uint32_t kCh = 12;
+  constexpr uint32_t k916 = eclipsa_studio::kOarLayout916;
+  auto graph = std::make_unique<AudioGraph>();
+  ASSERT_TRUE(graph->init(48000, kFrames, kCh));
+  ASSERT_TRUE(test_output::add_wav_element(*graph, 1, wav, k916, 16));
+  ASSERT_TRUE(
+      test_output::set_layout_identity(*graph, test_output::kLayout714, kCh));
+
+  std::vector<float> out(static_cast<size_t>(kFrames) * kCh, 0.0f);
+
+  graph->set_element_channel_order(1, eclipsa_studio::kChannelOrder916Alt);
+  test_output::run_blocks(*graph, test_output::kWarmupBlocks, kFrames, kCh);
+  graph->process(out.data(), kFrames, kCh);
+  const std::vector<float> alt = DevicePeaks(out, kFrames, kCh);
+  EXPECT_GT(alt[0], 0.1f);
+  for (uint32_t d = 1; d < kCh; ++d) EXPECT_LT(alt[d], 0.005f) << d;
+
+  graph->set_element_channel_order(1, eclipsa_studio::kChannelOrderOar);
+  test_output::run_blocks(*graph, test_output::kWarmupBlocks, kFrames, kCh);
+  graph->process(out.data(), kFrames, kCh);
+  const std::vector<float> oar = DevicePeaks(out, kFrames, kCh);
+  EXPECT_GT(oar[0], 0.01f);
+  EXPECT_GT(oar[4], 0.01f);
+  EXPECT_LT(oar[0], alt[0]);
+  for (uint32_t d = 1; d < kCh; ++d) {
+    if (d == 4) continue;
+    EXPECT_LT(oar[d], 0.005f) << d;
+  }
 }
 
 // ── Engine FFI size-mismatch guard ────────────────────────────────────────

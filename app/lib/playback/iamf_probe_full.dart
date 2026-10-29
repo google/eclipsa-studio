@@ -38,6 +38,7 @@ import 'package:ffi/ffi.dart' as ffi_pkg;
 import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../ffi/engine_bindings.dart';
+import '../ffi/engine_strings.dart';
 import '../ffi_bridge.dart' show EclipsaStudioEngine;
 
 // ---------------------------------------------------------------------------
@@ -318,9 +319,7 @@ class IamfMixPresentation {
     required this.annotations,
     required this.subMixes,
     required this.tags,
-    this.integratedLoudnessLkfs,
     this.digitalPeakDbfs,
-    this.truePeakDbfs,
   });
 
   final int id;
@@ -329,9 +328,7 @@ class IamfMixPresentation {
   final List<IamfAnnotation> annotations;
   final List<IamfSubMix> subMixes;
   final List<IamfTag> tags;
-  final double? integratedLoudnessLkfs;
   final double? digitalPeakDbfs;
-  final double? truePeakDbfs;
 }
 
 class IamfAnnotation {
@@ -377,12 +374,10 @@ class IamfSubMixAudioElement {
 class IamfMixGain {
   const IamfMixGain({
     required this.paramDefinition,
-    required this.defaultMixGainQ7_8,
     required this.defaultMixGain,
   });
 
   final IamfParamDefinition paramDefinition;
-  final int defaultMixGainQ7_8;
   final double defaultMixGain; // Already in dB.
 }
 
@@ -599,9 +594,7 @@ IamfMixPresentation _parseMixPresentation(Map<String, dynamic> j) =>
       annotations: _list(j, 'annotations', _parseAnnotation),
       subMixes: _list(j, 'sub_mixes', _parseSubMix),
       tags: _list(j, 'tags', _parseTag),
-      integratedLoudnessLkfs: _double(j, 'integrated_loudness_lkfs'),
       digitalPeakDbfs: _double(j, 'digital_peak_dbfs'),
-      truePeakDbfs: _double(j, 'true_peak_dbfs'),
     );
 
 IamfAnnotation _parseAnnotation(Map<String, dynamic> j) => IamfAnnotation(
@@ -626,7 +619,6 @@ IamfSubMix _parseSubMix(Map<String, dynamic> j) => IamfSubMix(
           duration: 0,
           constantSubblockDuration: 0,
         ),
-        defaultMixGainQ7_8: 0,
         defaultMixGain: 0,
       ),
   layouts: _list(j, 'layouts', _parseLayout),
@@ -652,7 +644,6 @@ IamfSubMixAudioElement _parseSubMixAe(Map<String, dynamic> j) {
             duration: 0,
             constantSubblockDuration: 0,
           ),
-          defaultMixGainQ7_8: 0,
           defaultMixGain: 0,
         ),
   );
@@ -668,7 +659,6 @@ IamfMixGain _parseMixGain(Map<String, dynamic> j) => IamfMixGain(
         duration: 0,
         constantSubblockDuration: 0,
       ),
-  defaultMixGainQ7_8: _int(j, 'default_mix_gain_q7_8') ?? 0,
   defaultMixGain: _double(j, 'default_mix_gain') ?? 0,
 );
 
@@ -780,13 +770,15 @@ T? _obj<T>(
 // ---------------------------------------------------------------------------
 
 /// Probe `path` and return the full descriptor-OBU dump. Runs the FFI
-/// call on a background isolate via `compute()` so the UI thread stays
-/// responsive on large files (the slurp + descriptor parse is the
-/// dominant cost).
+/// call on a background isolate via `compute()` so the UI isolate does
+/// not block on the file read.
 Future<IamfFullProbe> probeIamfFull(String path) =>
-    compute(_probeIamfFullInIsolate, path);
+    compute(probeIamfFullSync, path);
 
-IamfFullProbe _probeIamfFullInIsolate(String path) {
+/// Synchronous body of [probeIamfFull], for a caller already on a
+/// background isolate. It blocks for the length of the FFI call, so it
+/// must not run on the UI isolate.
+IamfFullProbe probeIamfFullSync(String path) {
   final bindings = EngineBindings(
     DynamicLibrary.open(EclipsaStudioEngine.dylibPath),
   );
@@ -804,7 +796,9 @@ IamfFullProbe _probeIamfFullInIsolate(String path) {
     return IamfFullProbe.error('probe_json: native allocation failed');
   }
   try {
-    return parseProbeJson(resultPtr.toDartString());
+    // The JSON carries the file's annotation strings byte for byte, so it
+    // is not necessarily UTF-8.
+    return parseProbeJson(decodeEngineString(resultPtr));
   } finally {
     freeFn(resultPtr);
   }

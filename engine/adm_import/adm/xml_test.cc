@@ -14,6 +14,7 @@
 
 #include "adm_import/adm/xml.h"
 
+#include <chrono>
 #include <string>
 
 #include "gtest/gtest.h"
@@ -56,6 +57,37 @@ TEST(Xml, DecodesEntitiesAndCdata) {
   // trailing space is dropped accordingly.
   EXPECT_EQ(root->Child("b")->text, "<raw> &");
   EXPECT_EQ(root->Child("c")->text, "AB");
+}
+
+TEST(Xml, StrayAmpersandIsKeptAndLaterReferencesDecode) {
+  const std::string doc =
+      "<r><a>x & y &amp; z</a><b>&& &lt;</b><c>tail &</c>"
+      "<d>&foo bar; baz</d><e>&#x0000000000041;</e>"
+      "<f n=\"1 & &amp; 2\"/></r>";
+  auto root = ParseXml(doc);
+  ASSERT_TRUE(root.ok()) << root.status();
+  EXPECT_EQ(root->Child("a")->text, "x & y & z");
+  EXPECT_EQ(root->Child("b")->text, "&& <");
+  EXPECT_EQ(root->Child("c")->text, "tail &");
+  // The `;` closes "&foo bar;", an unknown entity, which stays verbatim.
+  EXPECT_EQ(root->Child("d")->text, "&foo bar; baz");
+  // Leading zeros are allowed in a character reference.
+  EXPECT_EQ(root->Child("e")->text, "A");
+  EXPECT_EQ(*root->Child("f")->Attr("n"), "1 & & 2");
+}
+
+// Each `&` used to search the rest of its text run for a `;`, so a run of
+// N `&` with no `;` cost N^2/2 byte comparisons (ES-849).
+TEST(Xml, AmpersandsWithoutSemicolonParseInLinearTime) {
+  const std::string amps(size_t{1} << 21, '&');
+  const std::string doc = "<r a=\"" + amps + "\">" + amps + "</r>";
+  const auto start = std::chrono::steady_clock::now();
+  auto root = ParseXml(doc);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  ASSERT_TRUE(root.ok()) << root.status();
+  EXPECT_EQ(root->text, amps);
+  EXPECT_EQ(*root->Attr("a"), amps);
+  EXPECT_LT(elapsed, std::chrono::seconds(5));
 }
 
 TEST(Xml, NumericCharRefsAreValidatedAgainstUntrustedInput) {

@@ -51,23 +51,22 @@ class EbuR128Analyzer;
 ///
 /// ## Threading
 ///
-/// process() MUST be called from a single thread. In the engine that is
-/// the audio thread: AudioGraph::process() runs it on the post-OAR
-/// rendered buffer each callback (guarded against concurrent
-/// reconfigure — see issue ES-145).
-/// Writes to EclipsaStudioLoudnessData are plain float stores — the struct is
-/// read by Dart via FFI at ~10 Hz, and the values are display-only so
-/// slight tearing is acceptable.
+/// Not thread-safe: every call must come from one thread at a time. In
+/// the engine the caller is LiveLoudnessMeter, which runs feed() and
+/// publish() on its meter thread and serializes them with the
+/// reconfiguration calls. The analyzer appends to its per-block history
+/// vectors as blocks complete, so feed() allocates and must not run on
+/// the audio thread.
 class LoudnessMeter {
  public:
   /// Scratch capacity per channel, in frames. rebuild_analyzer() allocates
-  /// it so the wrapper does not allocate in process(); process() feeds
-  /// longer blocks to the analyzer in chunks of this size.
+  /// it so the wrapper does not allocate in feed(); feed() passes longer
+  /// blocks to the analyzer in chunks of this size.
   static constexpr uint32_t kMaxBlockFrames = 4096;
 
   /// @param sample_rate    Input sample rate.
   /// @param num_channels   Number of channels the analyzer sees. Must match
-  ///                       the AudioBuffer passed to process().
+  ///                       the AudioBuffer passed to feed().
   /// @param layout         oar_layout_t value used to pick per-channel
   ///                       BS.1770 weights. If the layout's weight vector
   ///                       size doesn't match `num_channels`, the meter
@@ -81,29 +80,39 @@ class LoudnessMeter {
 
   /// Reconfigure the meter for a new channel count + layout (e.g. when the
   /// OAR output layout changes). Rebuilds the analyzer and resets all
-  /// accumulated gating blocks — caller is responsible for also clearing
-  /// any loudness fields in EclipsaStudioMeterState on the next process() call.
+  /// accumulated gating blocks. Does not touch any readings already
+  /// written; the next publish() writes the new configuration's.
   void reconfigure(uint32_t num_channels, uint32_t layout);
 
-  /// Feed one block of planar float PCM (channel × frame). Updates
-  /// state.loudness after each call. A block whose channel count differs
-  /// from the configured count is skipped, counted and (first one per
-  /// configuration) logged. The wrapper does not allocate; the
-  /// EbuR128Analyzer still appends to its per-block history vectors as
-  /// blocks complete.
+  /// Feed one block of planar float PCM (channel × frame) to the
+  /// analyzer. A block whose channel count differs from the configured
+  /// count is skipped, counted and (first one per configuration) logged.
+  /// The wrapper does not allocate; the EbuR128Analyzer appends to its
+  /// per-block history vectors as blocks complete.
+  /// @returns true if the block reached the analyzer.
+  bool feed(const AudioBuffer& buffer, uint32_t frames);
+
+  /// Write the current readings to `out`. The integrated loudness is
+  /// recomputed only when a 400 ms block has completed since the last
+  /// call: the analyzer computes it from its whole block history, and
+  /// the value changes only when that history grows.
+  void publish(EclipsaStudioLoudnessData& out);
+
+  /// feed(), then publish() to state.loudness if the block reached the
+  /// analyzer.
   void process(const AudioBuffer& buffer, uint32_t frames,
                EclipsaStudioMeterState& state);
 
   /// Rebuild the underlying analyzer, dropping every accumulated momentary,
   /// short-term and integrated block. Does NOT touch any
   /// EclipsaStudioMeterState — the loudness fields are only refreshed on the
-  /// next process() call.
+  /// next publish() call.
   void reset();
 
   uint32_t num_channels() const { return num_channels_; }
   uint32_t layout() const { return layout_; }
 
-  /// Blocks process() skipped because their channel count differed from
+  /// Blocks feed() skipped because their channel count differed from
   /// num_channels(). Safe to read from any thread.
   uint64_t mismatched_blocks() const {
     return mismatched_blocks_.load(std::memory_order_relaxed);
@@ -121,16 +130,17 @@ class LoudnessMeter {
   // Channel pointer table handed to the analyzer; entry c points at plane
   // c of planar_. Filled by rebuild_analyzer().
   std::vector<double*> channel_ptrs_;
-  // Set by process() after it logs the first mismatched block; cleared by
-  // rebuild_analyzer(). Written on the audio thread and on the control
-  // thread only while the caller keeps process() from running (the
-  // AudioGraph loudness fence), like the rest of the configuration.
+  // Set by feed() after it logs the first mismatched block; cleared by
+  // rebuild_analyzer().
   bool mismatch_logged_ = false;
-  // Written by process() (audio thread), read by any thread.
+  // Written by feed(), read by any thread.
   std::atomic<uint64_t> mismatched_blocks_{0};
+  // publish()'s cached integrated loudness and the number of 400 ms
+  // blocks it was computed from. Cleared by rebuild_analyzer().
+  size_t integrated_blocks_ = 0;
+  float integrated_lufs_ = -120.0f;
 
   void rebuild_analyzer();
-  void update_state(EclipsaStudioMeterState& state) const;
 };
 
 #endif  // ECLIPSA_STUDIO_METERS_LOUDNESS_METER_H_

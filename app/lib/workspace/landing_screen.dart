@@ -13,14 +13,12 @@
 // limitations under the License.
 
 import 'dart:async';
-import 'dart:math' as math;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
-import '../eclipsa_audio_palette.dart';
 import '../import/adm_detect.dart';
 import '../import/adm_import_flow.dart';
 import '../logging/log.dart';
@@ -51,19 +49,6 @@ class LandingScreen extends ConsumerWidget {
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
 
-    // Both cards render the same number of Recent slots so their
-    // bottom-anchored Recent blocks are equal-height and aligned, even
-    // when the two lists differ in length (unfilled slots stay blank).
-    final slotCount = math.min(
-      5,
-      math.max(
-        1,
-        math.max(
-          ref.watch(recentSessionsProvider).length,
-          ref.watch(recentQcFilesProvider).length,
-        ),
-      ),
-    );
     return Scaffold(
       // Transparent over the ground the app root paints behind the
       // window while this screen shows (LandingGround).
@@ -117,17 +102,13 @@ class LandingScreen extends ConsumerWidget {
                             const SizedBox(height: 12),
                             const _EclipsaAudioAttribution(),
                             const SizedBox(height: 40),
-                            IntrinsicHeight(
+                            const IntrinsicHeight(
                               child: Row(
                                 crossAxisAlignment: CrossAxisAlignment.stretch,
                                 children: [
-                                  Expanded(
-                                    child: _CreatorCard(slotCount: slotCount),
-                                  ),
-                                  const SizedBox(width: 24),
-                                  Expanded(
-                                    child: _PlaybackCard(slotCount: slotCount),
-                                  ),
+                                  Expanded(child: _CreatorCard()),
+                                  SizedBox(width: 24),
+                                  Expanded(child: _PlaybackCard()),
                                 ],
                               ),
                             ),
@@ -254,15 +235,21 @@ class _CardInk {
 /// The Eclipsa Audio lockup under the app's own lockup, after the
 /// caption "Authoring for": the format's brand beneath the app's.
 ///
-/// The lockup keeps the brand's fixed greys in the colourway for
-/// the theme's ground, and the caption takes the same palette rather
-/// than the theme's text tokens: Grey 500 over a dark ground (7.6:1
-/// on Dark's bgBase) and Grey 700 over a light one (5.9:1 on
-/// white), at `fontBodyL` so it reads as a line of its own, on the
-/// wordmark's baseline. The gap between the caption and the lockup is
-/// half the symbol's width, 18 px at this size; the brand files in
-/// app/design/brand record no clear-space rule, and a full symbol width
-/// read as a break between the two.
+/// The lockup keeps the brand's fixed greys, in the colourway for the
+/// landing ground it is drawn on: `landingGroundTop`, the end of the
+/// ground nearer the lockup. Both ends of every theme's ground pick
+/// the same colourway, so where the column sits in the window does not
+/// change it.
+///
+/// The caption is `textSecondary`, at `fontBodyL` so it reads as a line
+/// of its own, on the wordmark's baseline. contrast.json holds
+/// `textSecondary` at 4.5:1 or more on `landingGroundBottom` in every
+/// theme, which on Light is the darker end of the gradient.
+///
+/// The gap between the caption and the lockup is half the symbol's
+/// width, 18 px at this size; the brand files in app/design/brand
+/// record no clear-space rule, and a full symbol width read as a break
+/// between the two.
 ///
 /// Reads `T.*` and is constructed `const`, so no parent rebuild reaches
 /// it and it watches theme mode itself.
@@ -281,10 +268,7 @@ class _EclipsaAudioAttribution extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
-    final colorway = EclipsaAudioColorway.forGround(T.bgBase);
-    final caption = colorway == EclipsaAudioColorway.reverse
-        ? EclipsaAudioPalette.grey500
-        : EclipsaAudioPalette.grey700;
+    final colorway = EclipsaAudioColorway.forGround(T.landingGroundTop);
     final height = T.fs(_symbolHeight);
     // The caption shares the wordmark's baseline, which the brand
     // geometry fixes at 265/324 of the symbol's height. Baseline places
@@ -303,11 +287,11 @@ class _EclipsaAudioAttribution extends ConsumerWidget {
           baselineType: TextBaseline.alphabetic,
           child: Text(
             'Authoring for',
-            style: TextStyle(color: caption, fontSize: T.fontBodyL),
+            style: TextStyle(color: T.textSecondary, fontSize: T.fontBodyL),
           ),
         ),
         SizedBox(width: height * EclipsaAudioGeometry.symbolAspect / 2),
-        EclipsaAudioLockup(height: height),
+        EclipsaAudioLockup(height: height, colorway: colorway),
       ],
     );
   }
@@ -406,12 +390,14 @@ class _VersionButton extends StatelessWidget {
 }
 
 class _CreatorCard extends ConsumerWidget {
-  const _CreatorCard({required this.slotCount});
-
-  final int slotCount;
+  const _CreatorCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Constructed const in LandingScreen, so it watches theme and font
+    // mode itself.
+    ref.watch(themeModeProvider);
+    ref.watch(fontSizeModeProvider);
     final recents = ref.watch(recentSessionsProvider);
 
     // Three peer entry points into the Creator workflow, distinguished
@@ -448,7 +434,6 @@ class _CreatorCard extends ConsumerWidget {
           ],
         ),
         recents: recents,
-        slotCount: slotCount,
         onRecentTap: (path) => openCreatorSession(context, ref, path: path),
         recentEmptyLabel: 'No recent sessions',
         recentEmptyHint: 'Open or create a session to see it here.',
@@ -483,12 +468,14 @@ Future<void> _handleCreatorDrop(
 }
 
 class _PlaybackCard extends ConsumerWidget {
-  const _PlaybackCard({required this.slotCount});
-
-  final int slotCount;
+  const _PlaybackCard();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Constructed const in LandingScreen, so it watches theme and font
+    // mode itself.
+    ref.watch(themeModeProvider);
+    ref.watch(fontSizeModeProvider);
     final recents = ref.watch(recentQcFilesProvider);
 
     // Single entry point, but styled as a peer of the Creator card's
@@ -513,7 +500,6 @@ class _PlaybackCard extends ConsumerWidget {
           ],
         ),
         recents: recents,
-        slotCount: slotCount,
         onRecentTap: (path) => openIamfForQc(context, ref, path: path),
         recentEmptyLabel: 'No recent files',
         recentEmptyHint: 'Open an IAMF or MP4 file to see it here.',
@@ -642,7 +628,6 @@ class _LandingCard extends StatelessWidget {
     required this.subtitle,
     required this.actions,
     required this.recents,
-    required this.slotCount,
     required this.onRecentTap,
     required this.recentEmptyLabel,
     this.recentEmptyHint,
@@ -654,11 +639,6 @@ class _LandingCard extends StatelessWidget {
   final String subtitle;
   final Widget actions;
   final List<String> recents;
-
-  /// Number of Recent slots to render (shared across both cards so
-  /// their Recent blocks stay equal-height); slots beyond
-  /// [recents.length] stay blank.
-  final int slotCount;
 
   final Future<void> Function(String path)? onRecentTap;
   final String recentEmptyLabel;
@@ -672,6 +652,12 @@ class _LandingCard extends StatelessWidget {
   /// Subtitle line height, explicit so the reserved two-line block
   /// below is exact arithmetic at every font scale.
   static const double _subtitleLineHeight = 1.35;
+
+  /// The number of Recent rows each card reserves, filled or not. The
+  /// recent stores keep up to 10 entries and a card shows the first 5.
+  /// A fixed count keeps both cards, and the lockup above them, at the
+  /// same size and position whatever the lists hold.
+  static const int _recentSlots = 5;
 
   @override
   Widget build(BuildContext context) {
@@ -798,9 +784,10 @@ class _LandingCard extends StatelessWidget {
     );
   }
 
-  /// The Recent list. Sized by [slotCount] rather than by how many
-  /// entries exist, so both cards' blocks are the same height and the
-  /// section boundary lines up across the pair.
+  /// The Recent list. Always [_recentSlots] rows tall, so both cards'
+  /// blocks are the same height and the section boundary lines up
+  /// across the pair. An empty list shows its empty state in the first
+  /// row; rows past the last entry stay blank.
   Widget _recents(BuildContext context, _CardInk ink) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
@@ -812,7 +799,7 @@ class _LandingCard extends StatelessWidget {
           const SizedBox(height: 12),
           EyebrowLabel('Recent', color: ink.secondary),
           const SizedBox(height: 4),
-          for (var i = 0; i < slotCount; i++)
+          for (var i = 0; i < _recentSlots; i++)
             if (recents.isEmpty && i == 0)
               _EmptyRecents(
                 label: recentEmptyLabel,

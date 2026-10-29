@@ -80,8 +80,10 @@ void main() {
 
   // The Renderer view's output meter at 9.1.6: 16 bars in a 192 px
   // meter (a 240 px panel less its padding and the gain-reduction bar),
-  // a 9.8 px bar pitch. Labels: one rotated row at Small, two staggered
-  // horizontal rows at Medium, two staggered rotated rows at Large.
+  // a 9.8 px bar pitch, labelled with the familiar names in OBR's alt
+  // order (L R C LFE Lw Rw Lss Rss Lrs Rrs Ltf Rtf Lts Rts Ltr Rtr,
+  // ES-960). Labels: one rotated row at Small, two staggered horizontal
+  // rows at Medium and Large.
   final levels916 = List.generate(
     16,
     (i) => math.pow(10, -3.0 * i / 20).toDouble(),
@@ -93,7 +95,7 @@ void main() {
         tester,
         () => MultichannelMeter(
           levels: levels916,
-          labels: OarLayout.layout916.speakerLabels,
+          labels: OarLayout.layout916.meterLabels,
         ),
         size: const Size(192, 220),
         theme: theme,

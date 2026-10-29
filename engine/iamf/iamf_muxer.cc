@@ -312,6 +312,33 @@ int32_t IamfMuxer::Mux(const std::string& input_iamf,
   return rc;
 }
 
+int32_t IamfMuxer::MuxAudioOnly(const std::string& input_iamf,
+                                const std::string& output_mp4) {
+  if (input_iamf.empty() || output_mp4.empty()) {
+    LogErr("iamf mux: empty argument");
+    return -1;
+  }
+  std::error_code ec;
+  if (!std::filesystem::exists(Utf8Path(input_iamf), ec)) {
+    LogErr("iamf mux: input .iamf not found: " + input_iamf);
+    return -2;
+  }
+  int32_t rc = 0;
+  {
+    GpacSystem gpac;
+    if (!gpac.ok()) {
+      LogErr("iamf mux: GPAC system init failed");
+      return -10;
+    }
+    if (!MuxAudio(input_iamf, output_mp4)) rc = -11;
+  }
+  if (rc != 0) {
+    std::error_code ignore;
+    std::filesystem::remove(Utf8Path(output_mp4), ignore);
+  }
+  return rc;
+}
+
 int32_t IamfMuxer::ProbeVideo(const std::string& input_video) {
   if (input_video.empty()) {
     LogErr("video probe: empty argument");

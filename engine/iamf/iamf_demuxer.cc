@@ -19,31 +19,19 @@
 #include <gpac/mpeg4_odf.h>
 #include <gpac/tools.h>
 
+#include <cstdio>
 #include <cstring>
-#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "engine_log.h"
 #include "iamf/gpac_system.h"
+#include "iamf/read_only_file_map.h"
 
 namespace eclipsa_studio {
 namespace {
-
-// Backing slot for the probe -> session demux handoff (see header). A single
-// entry keyed by source path; guarded so the probe isolate's stash and the
-// engine session's take never race.
-struct DemuxHandoff {
-  std::mutex mu;
-  std::string path;            // empty => slot is free
-  std::vector<uint8_t> bytes;  // valid only while `path` is non-empty
-};
-
-DemuxHandoff& demux_handoff() {
-  static DemuxHandoff handoff;
-  return handoff;
-}
 
 void LogErr(const std::string& message) {
   engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf", message.c_str());
@@ -85,6 +73,75 @@ void WarnOnLeadingEdit(GF_ISOFile* iso, u32 track) {
   }
 }
 
+// An open MP4 and its IAMF track. Closes the file on destruction.
+class OpenIamfTrack {
+ public:
+  OpenIamfTrack() = default;
+  ~OpenIamfTrack() {
+    if (iso_ != nullptr) gf_isom_close(iso_);
+  }
+  OpenIamfTrack(const OpenIamfTrack&) = delete;
+  OpenIamfTrack& operator=(const OpenIamfTrack&) = delete;
+
+  // Opens `input_mp4`, finds its IAMF track and appends the track's
+  // descriptor OBUs (IA Sequence Header, Codec Config, Audio Element and
+  // Mix Presentation OBUs, serialised from the sample entry's IAMF config)
+  // to `*descriptor_obus`. Returns false and sets `*err` on failure.
+  bool open(const std::string& input_mp4, std::vector<uint8_t>* descriptor_obus,
+            std::string* err) {
+    iso_ = gf_isom_open(input_mp4.c_str(), GF_ISOM_OPEN_READ, nullptr);
+    if (iso_ == nullptr) {
+      *err = "io: failed to open MP4 " + input_mp4;
+      LogErr("iamf demux: " + *err);
+      return false;
+    }
+    track_ = FindIamfTrack(iso_);
+    if (track_ == 0) {
+      *err = "unsupported: no IAMF audio track in " + input_mp4;
+      LogWarn("iamf demux: " + *err);
+      return false;
+    }
+    GF_IAConfig* cfg = gf_isom_iamf_config_get(iso_, track_, 1);
+    if (cfg == nullptr) {
+      *err = "malformed: missing IAMF config on track";
+      LogErr("iamf demux: " + *err);
+      return false;
+    }
+    GF_BitStream* bs = gf_bs_new(nullptr, 0, GF_BITSTREAM_WRITE);
+    if (bs == nullptr) {
+      gf_odf_iamf_cfg_del(cfg);
+      *err = "io: failed to allocate bitstream";
+      LogErr("iamf demux: " + *err);
+      return false;
+    }
+    const GF_Err write_err = gf_odf_iamf_cfg_write_obus(cfg, bs);
+    gf_odf_iamf_cfg_del(cfg);
+    u8* data = nullptr;
+    u32 size = 0;
+    if (write_err >= GF_OK) gf_bs_get_content(bs, &data, &size);
+    gf_bs_del(bs);
+    if (write_err < GF_OK || data == nullptr || size == 0) {
+      if (data != nullptr) gf_free(data);
+      *err = std::string("malformed: write descriptor OBUs failed: ") +
+             gf_error_to_string(write_err < GF_OK ? write_err : GF_BAD_PARAM);
+      LogErr("iamf demux: " + *err);
+      return false;
+    }
+    descriptor_obus->insert(descriptor_obus->end(), data, data + size);
+    gf_free(data);
+    WarnOnLeadingEdit(iso_, track_);
+    return true;
+  }
+
+  GF_ISOFile* iso() const { return iso_; }
+  u32 track() const { return track_; }
+  u32 sample_count() const { return gf_isom_get_sample_count(iso_, track_); }
+
+ private:
+  GF_ISOFile* iso_ = nullptr;
+  u32 track_ = 0;
+};
+
 }  // namespace
 
 bool IamfDemuxer::IsIsoBmff(const uint8_t* bytes, size_t len) {
@@ -115,110 +172,162 @@ bool IamfDemuxer::DemuxToBytes(const std::string& input_mp4,
     return false;
   }
 
-  GF_ISOFile* iso = gf_isom_open(input_mp4.c_str(), GF_ISOM_OPEN_READ, nullptr);
-  if (iso == nullptr) {
-    last_error_ = "io: failed to open MP4 " + input_mp4;
-    LogErr("iamf demux: " + last_error_);
-    return false;
-  }
-
-  const u32 iamf_track = FindIamfTrack(iso);
-  if (iamf_track == 0) {
-    last_error_ = "unsupported: no IAMF audio track in " + input_mp4;
-    LogWarn("iamf demux: " + last_error_);
-    gf_isom_close(iso);
-    return false;
-  }
-
-  // Serialize the descriptor OBUs from the track's IA config — these are
-  // the IA Sequence Header + Codec Config + Audio Element + Mix
-  // Presentation OBUs that prefix a standalone .iamf bitstream.
-  GF_IAConfig* cfg = gf_isom_iamf_config_get(iso, iamf_track, 1);
-  if (cfg == nullptr) {
-    last_error_ = "malformed: missing IAMF config on track";
-    LogErr("iamf demux: " + last_error_);
-    gf_isom_close(iso);
-    return false;
-  }
-
-  GF_BitStream* bs = gf_bs_new(nullptr, 0, GF_BITSTREAM_WRITE);
-  if (bs == nullptr) {
-    last_error_ = "io: failed to allocate bitstream";
-    LogErr("iamf demux: " + last_error_);
-    gf_odf_iamf_cfg_del(cfg);
-    gf_isom_close(iso);
-    return false;
-  }
-
-  GF_Err err = gf_odf_iamf_cfg_write_obus(cfg, bs);
-  gf_odf_iamf_cfg_del(cfg);
-  if (err < GF_OK) {
-    last_error_ = std::string("malformed: write descriptor OBUs failed: ") +
-                  gf_error_to_string(err);
-    LogErr("iamf demux: " + last_error_);
-    gf_bs_del(bs);
-    gf_isom_close(iso);
+  // Append in place; on failure, drop what this call appended.
+  const size_t original_size = out_bytes->size();
+  OpenIamfTrack track;
+  if (!track.open(input_mp4, out_bytes, &last_error_)) {
+    out_bytes->resize(original_size);
     return false;
   }
 
   // Append every frame's OBUs (the sample payloads) in sample order, which
-  // is presentation order for an audio track with no reordering.
-  const u32 sample_count = gf_isom_get_sample_count(iso, iamf_track);
+  // is presentation order for an audio track with no reordering. Samples
+  // go straight into `*out_bytes`, so the track is held once and its size
+  // is not limited to 32 bits.
+  const u32 sample_count = track.sample_count();
   for (u32 i = 1; i <= sample_count; ++i) {
     u32 desc_index = 0;
-    GF_ISOSample* sample = gf_isom_get_sample(iso, iamf_track, i, &desc_index);
+    GF_ISOSample* sample =
+        gf_isom_get_sample(track.iso(), track.track(), i, &desc_index);
     if (sample == nullptr) {
       last_error_ = "io: failed to read IAMF sample " + std::to_string(i);
       LogErr("iamf demux: " + last_error_);
-      gf_bs_del(bs);
-      gf_isom_close(iso);
+      out_bytes->resize(original_size);
       return false;
     }
-    gf_bs_write_data(bs, sample->data, sample->dataLength);
+    // As in IndexTrack: the descriptor OBUs come from sample entry 1.
+    if (desc_index != 1) {
+      gf_isom_sample_del(&sample);
+      last_error_ = "unsupported: IAMF track has more than one sample entry";
+      LogWarn("iamf demux: " + last_error_);
+      out_bytes->resize(original_size);
+      return false;
+    }
+    out_bytes->insert(out_bytes->end(), sample->data,
+                      sample->data + sample->dataLength);
     gf_isom_sample_del(&sample);
   }
 
-  WarnOnLeadingEdit(iso, iamf_track);
-
-  u8* data = nullptr;
-  u32 size = 0;
-  gf_bs_get_content(bs, &data, &size);
-  gf_bs_del(bs);
-  gf_isom_close(iso);
-
-  if (data == nullptr || size == 0) {
-    last_error_ = "malformed: empty IAMF bitstream after demux";
-    LogErr("iamf demux: " + last_error_);
-    if (data != nullptr) gf_free(data);
-    return false;
-  }
-  out_bytes->insert(out_bytes->end(), data, data + size);
-  gf_free(data);
-
   char buf[128];
-  std::snprintf(buf, sizeof(buf), "iamf demux: %u frames -> %u bytes",
-                sample_count, size);
+  std::snprintf(buf, sizeof(buf), "iamf demux: %u frames -> %zu bytes",
+                sample_count, out_bytes->size() - original_size);
   engine_log(ECLIPSA_STUDIO_LOG_INFO, "iamf", buf);
   return true;
 }
 
-void StashIamfDemux(const std::string& path,
-                    const std::vector<uint8_t>& bytes) {
-  DemuxHandoff& handoff = demux_handoff();
-  std::lock_guard<std::mutex> lk(handoff.mu);
-  handoff.path = path;
-  handoff.bytes = bytes;  // copy — the producer keeps its own working buffer
+bool IamfDemuxer::IndexTrack(const std::string& input_mp4,
+                             IamfTrackIndex* out_index) {
+  last_error_.clear();
+  sample_data_external_ = false;
+  if (out_index == nullptr) {
+    last_error_ = "invalid_argument: null output";
+    return false;
+  }
+  if (input_mp4.empty()) {
+    last_error_ = "invalid_argument: empty path";
+    return false;
+  }
+  GpacSystem gpac;
+  if (!gpac.ok()) {
+    last_error_ = "io: GPAC system init failed";
+    LogErr("iamf demux: " + last_error_);
+    return false;
+  }
+
+  IamfTrackIndex index;
+  OpenIamfTrack track;
+  if (!track.open(input_mp4, &index.descriptor_obus, &last_error_)) {
+    return false;
+  }
+
+  // Sample offsets and sizes come from the sample table; no sample data is
+  // read. Adjacent samples (one chunk) merge into a single range.
+  const u32 sample_count = track.sample_count();
+  u32 last_desc_index = 0;
+  for (u32 i = 1; i <= sample_count; ++i) {
+    u32 desc_index = 0;
+    u64 offset = 0;
+    GF_ISOSample* sample = gf_isom_get_sample_info(track.iso(), track.track(),
+                                                   i, &desc_index, &offset);
+    if (sample == nullptr) {
+      last_error_ = "io: failed to read IAMF sample info " + std::to_string(i);
+      LogErr("iamf demux: " + last_error_);
+      return false;
+    }
+    const uint64_t size = sample->dataLength;
+    gf_isom_sample_del(&sample);
+    if (desc_index != last_desc_index) {
+      // The descriptor OBUs come from sample entry 1, so samples bound to
+      // another entry (with its own IAMF config) cannot be read with them.
+      if (desc_index != 1) {
+        last_error_ = "unsupported: IAMF track has more than one sample entry";
+        LogWarn("iamf demux: " + last_error_);
+        return false;
+      }
+      if (!gf_isom_is_self_contained(track.iso(), track.track(), desc_index)) {
+        last_error_ =
+            "unsupported: IAMF sample data is stored outside " + input_mp4;
+        LogWarn("iamf demux: " + last_error_);
+        sample_data_external_ = true;
+        return false;
+      }
+      last_desc_index = desc_index;
+    }
+    if (size == 0) continue;
+    if (!index.samples.empty() &&
+        index.samples.back().offset + index.samples.back().size == offset) {
+      index.samples.back().size += size;
+    } else {
+      index.samples.push_back({offset, size});
+    }
+  }
+  *out_index = std::move(index);
+  return true;
 }
 
-bool TakeIamfDemux(const std::string& path, std::vector<uint8_t>* out) {
-  if (out == nullptr) return false;
-  DemuxHandoff& handoff = demux_handoff();
-  std::lock_guard<std::mutex> lk(handoff.mu);
-  if (handoff.path != path || handoff.bytes.empty()) return false;
-  *out = std::move(handoff.bytes);
-  handoff.path.clear();
-  handoff.bytes.clear();  // defined post-move; drop any retained capacity
+bool IamfMp4Source::open(const std::string& path, std::string* err,
+                         bool* sample_data_external) {
+  close();
+  if (sample_data_external != nullptr) *sample_data_external = false;
+  IamfDemuxer demuxer;
+  if (!demuxer.IndexTrack(path, &index_)) {
+    if (err != nullptr) *err = demuxer.last_error();
+    if (sample_data_external != nullptr) {
+      *sample_data_external = demuxer.sample_data_external();
+    }
+    return false;
+  }
+  std::string map_err;
+  if (!map_.open(path.c_str(), &map_err)) {
+    if (err != nullptr) *err = map_err;
+    close();
+    return false;
+  }
+  map_.hint_sequential();
+
+  segments_.reserve(index_.samples.size() + 1);
+  segments_.push_back(absl::MakeConstSpan(index_.descriptor_obus));
+  total_bytes_ = index_.descriptor_obus.size();
+  for (const IamfTrackIndex::Range& range : index_.samples) {
+    if (range.offset > map_.size() || range.size > map_.size() - range.offset) {
+      if (err != nullptr) {
+        *err = "malformed: IAMF sample lies outside the file " + path;
+      }
+      close();
+      return false;
+    }
+    segments_.push_back(
+        absl::MakeConstSpan(map_.data() + range.offset, range.size));
+    total_bytes_ += range.size;
+  }
   return true;
+}
+
+void IamfMp4Source::close() {
+  segments_.clear();
+  index_ = IamfTrackIndex{};
+  map_.close();
+  total_bytes_ = 0;
 }
 
 }  // namespace eclipsa_studio

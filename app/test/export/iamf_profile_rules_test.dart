@@ -402,8 +402,8 @@ void main() {
         profileAllowedConfigsForChannelCount(
           IamfProfile.baseEnhanced,
           16,
-        ).length,
-        2,
+        ).map((c) => c.label),
+        ['Scene · 3OA', 'Channel · 9.1.6'],
       );
       // Mono/stereo lose their Object reading below Base-Advanced, but
       // stereo keeps its Binaural alternative everywhere.
@@ -580,6 +580,197 @@ void main() {
         ),
         isNot(contains(ProfileConflictKind.mixedTypesNotAllowed)),
       );
+    });
+
+    group('object-only mix presentations', () {
+      const mixed = ProfileConflictKind.objectMixedWithOtherTypes;
+      const notFirst = ProfileConflictKind.firstMixNotObjectOnly;
+      List<MixElementSettings> include(List<int> ids, {int? excluded}) => [
+        for (final id in ids)
+          MixElementSettings(elementId: id, included: id != excluded),
+      ];
+      final elements = [_object(id: 1), _channel(id: 2)];
+
+      test('Base-Advanced rejects object + channel in one mix', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [
+              _mix(settings: include([1, 2])),
+            ],
+          ),
+          contains(mixed),
+        );
+      });
+
+      test('Base-Advanced rejects object + scene in one mix', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: [_object(id: 1), _scene(id: 2)],
+            mixes: [
+              _mix(settings: include([1, 2])),
+            ],
+          ),
+          contains(mixed),
+        );
+      });
+
+      test('a channel-based Binaural element counts as channel-based', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: [
+              _object(id: 1),
+              _channel(id: 2, layout: 'Binaural'),
+            ],
+            mixes: [
+              _mix(settings: include([1, 2])),
+            ],
+          ),
+          contains(mixed),
+        );
+      });
+
+      test('types are counted across sub-mixes', () {
+        const twoSubMixes = Mix(
+          id: 1,
+          name: 'Main',
+          subMixes: [
+            SubMix(
+              layouts: [MixLayout(soundSystem: SoundSystem.stereo)],
+              elementSettings: [MixElementSettings(elementId: 1)],
+            ),
+            SubMix(
+              layouts: [MixLayout(soundSystem: SoundSystem.stereo)],
+              elementSettings: [MixElementSettings(elementId: 2)],
+            ),
+          ],
+        );
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [twoSubMixes],
+          ),
+          contains(mixed),
+        );
+      });
+
+      test('Base-Advanced ignores an element the mix excludes', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [
+              _mix(settings: include([1, 2], excluded: 2)),
+            ],
+          ),
+          isNot(contains(mixed)),
+        );
+      });
+
+      test('Base-Advanced ignores an element absent from the pool', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: [_object(id: 1)],
+            mixes: [
+              _mix(settings: include([1, 99])),
+            ],
+          ),
+          isNot(anyOf(contains(mixed), contains(notFirst))),
+        );
+      });
+
+      test(
+        'Base-Advanced accepts an object mix first, a channel mix second',
+        () {
+          final kinds = _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [
+              _mix(id: 1, settings: include([1])),
+              _mix(id: 2, settings: include([2])),
+            ],
+          );
+          expect(kinds, isNot(contains(mixed)));
+          expect(kinds, isNot(contains(notFirst)));
+        },
+      );
+
+      test(
+        'Base-Advanced rejects a channel mix first, an object mix second',
+        () {
+          final kinds = _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [
+              _mix(id: 1, settings: include([2])),
+              _mix(id: 2, settings: include([1])),
+            ],
+          );
+          expect(kinds, contains(notFirst));
+          expect(kinds, isNot(contains(mixed)));
+        },
+      );
+
+      test('Base-Advanced rejects an empty first mix before an object mix', () {
+        expect(
+          _kinds(
+            IamfProfile.baseAdvanced,
+            elements: elements,
+            mixes: [
+              _mix(id: 1),
+              _mix(id: 2, settings: include([1])),
+            ],
+          ),
+          contains(notFirst),
+        );
+      });
+
+      test('Base-Advanced accepts channel mixes when no mix has objects', () {
+        final kinds = _kinds(
+          IamfProfile.baseAdvanced,
+          elements: elements,
+          mixes: [
+            _mix(id: 1, settings: include([2])),
+          ],
+        );
+        expect(kinds, isNot(contains(mixed)));
+        expect(kinds, isNot(contains(notFirst)));
+      });
+
+      test('Advanced-1 has neither rule', () {
+        final kinds = _kinds(
+          IamfProfile.advanced1,
+          elements: elements,
+          mixes: [
+            _mix(id: 1, settings: include([2])),
+            _mix(id: 2, settings: include([1, 2])),
+          ],
+        );
+        expect(kinds, isNot(contains(mixed)));
+        expect(kinds, isNot(contains(notFirst)));
+      });
+
+      test('the lowest fitting profile for either case is Advanced-1', () {
+        for (final mixes in [
+          [
+            _mix(settings: include([1, 2])),
+          ],
+          [
+            _mix(id: 1, settings: include([2])),
+            _mix(id: 2, settings: include([1])),
+          ],
+        ]) {
+          expect(
+            minProfileForSession(elements: elements, mixes: mixes),
+            IamfProfile.advanced1,
+          );
+        }
+      });
     });
 
     test('10.2.9.3 element: layout OK under Base-Advanced but over budget', () {

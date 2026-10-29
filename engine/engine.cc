@@ -32,6 +32,7 @@
 #include "iamf/iamf_playback_session.h"
 #include "io/device_manager.h"
 #include "io/volume_info.h"
+#include "mix_renderer/offline_iamf_measurer.h"
 #include "mix_renderer/offline_mix_renderer.h"
 #include "renderer/oar_capability.h"
 #include "renderer/oar_renderer.h"
@@ -373,6 +374,11 @@ void eclipsa_studio_element_set_input_routing(uint32_t element_id,
   if (g_initialized) g_graph.set_element_routing(element_id, routing, len);
 }
 
+void eclipsa_studio_element_set_channel_order(uint32_t element_id,
+                                              uint32_t order) {
+  if (g_initialized) g_graph.set_element_channel_order(element_id, order);
+}
+
 void eclipsa_studio_set_output_mix_gain(float gain_db) {
   if (g_initialized) g_graph.set_output_mix_gain(gain_db);
 }
@@ -387,6 +393,10 @@ void eclipsa_studio_seed_output_mix_gain(float gain_db) {
 
 void eclipsa_studio_set_monitor_dim(int32_t engaged) {
   if (g_initialized) g_graph.set_monitor_dim(engaged != 0);
+}
+
+void eclipsa_studio_set_output_solo_mute(uint64_t soloed, uint64_t muted) {
+  if (g_initialized) g_graph.set_output_solo_mute(soloed, muted);
 }
 
 int32_t eclipsa_studio_element_set_type(uint32_t element_id, int32_t type,
@@ -466,6 +476,15 @@ static void ClosePlaybackWithHookBarrier() {
   g_graph.close_iamf();
 }
 
+// Remove the IAMF session's elements from OAR. Must run before
+// close_iamf(), which clears the chain ids this reads (ES-906).
+static void RemovePlaybackElementsFromOar(OarRenderer& oar) {
+  uint32_t ids[kEclipsaStudioMaxElements] = {};
+  const uint32_t n = g_graph.iamf_element_ids(ids, kEclipsaStudioMaxElements);
+  for (uint32_t i = 0; i < n; ++i) oar.remove_element(ids[i]);
+  g_graph.resync_loudness_meter_if_stale();
+}
+
 EclipsaStudioPlaybackOpenResult* eclipsa_studio_playback_open(
     const char* path) {
   if (!g_initialized) {
@@ -488,6 +507,14 @@ EclipsaStudioPlaybackOpenResult* eclipsa_studio_playback_open(
   g_audio_thread.set_playing(false);
   g_graph.disarm_paused_seek_hook();
   g_audio_thread.wait_for_callback_quiescent();
+  // open_iamf closes an attached session before it opens `path`, and
+  // close_iamf clears the chain ids. Remove that session's elements from
+  // OAR here, in the state playback_close removes them in, so neither a
+  // failed open nor a file with other element ids leaves them registered
+  // (ES-906).
+  if (auto* oar = g_graph.oar_renderer(); oar != nullptr) {
+    RemovePlaybackElementsFromOar(*oar);
+  }
   const int32_t claimed = g_graph.open_iamf(path);
   const auto t_graph = clock::now();
   if (claimed < 0) {
@@ -574,6 +601,7 @@ EclipsaStudioPlaybackOpenResult* eclipsa_studio_playback_open(
                "playback_open: oar->commit_rendering_config failed; "
                "rolling back");
     std::free(ae_array);
+    RemovePlaybackElementsFromOar(*oar);
     ClosePlaybackWithHookBarrier();
     auto* err = AllocPlaybackResult();
     if (err == nullptr) return nullptr;
@@ -586,6 +614,7 @@ EclipsaStudioPlaybackOpenResult* eclipsa_studio_playback_open(
   auto* r = AllocPlaybackResult();
   if (r == nullptr) {
     std::free(ae_array);
+    RemovePlaybackElementsFromOar(*oar);
     ClosePlaybackWithHookBarrier();
     return nullptr;
   }
@@ -653,12 +682,7 @@ void eclipsa_studio_playback_close(void) {
 
   // Unregister from OAR before AudioGraph resets the chain state.
   auto* oar = g_graph.oar_renderer();
-  if (oar != nullptr) {
-    uint32_t ids[kEclipsaStudioMaxElements] = {};
-    const uint32_t n = g_graph.iamf_element_ids(ids, kEclipsaStudioMaxElements);
-    for (uint32_t i = 0; i < n; ++i) oar->remove_element(ids[i]);
-    g_graph.resync_loudness_meter_if_stale();
-  }
+  if (oar != nullptr) RemovePlaybackElementsFromOar(*oar);
 
   g_graph.close_iamf();
 
@@ -1004,8 +1028,9 @@ int32_t eclipsa_studio_monitoring_set_layout(uint32_t layout) {
   char buf[64];
   snprintf(buf, sizeof(buf), "set_layout(%u)", layout);
   engine_log(ECLIPSA_STUDIO_LOG_INFO, "engine", buf);
-  // Rebuilds OAR and the mix-bus loudness meter (new channel count and
-  // BS.1770 weights) inside one loudness fence; see
+  // Rebuilds OAR, unless it already renders this layout, and
+  // reconfigures the mix-bus loudness meter (channel count and BS.1770
+  // weights) inside one loudness fence; see
   // AudioGraph::set_monitoring_layout().
   return g_graph.set_monitoring_layout(layout) ? 0 : -1;
 }
@@ -1390,6 +1415,11 @@ void eclipsa_studio_mix_renderer_set_object_position(
   r->renderer.SetObjectPosition(element_id, num_objects, az, el, dist);
 }
 
+void eclipsa_studio_mix_renderer_set_element_channel_order(
+    eclipsa_studio_mix_renderer_t* r, uint32_t element_id, uint32_t order) {
+  if (r) r->renderer.SetElementChannelOrder(element_id, order);
+}
+
 void eclipsa_studio_mix_renderer_set_output_gain(
     eclipsa_studio_mix_renderer_t* r, float gain_db) {
   if (r) r->renderer.SetOutputMixGain(gain_db);
@@ -1462,6 +1492,137 @@ int32_t eclipsa_studio_mix_renderer_element_clip_stats(
 
 void eclipsa_studio_mix_renderer_destroy(eclipsa_studio_mix_renderer_t* r) {
   delete r;
+}
+
+// ── Offline IAMF measurer ────────────────────────────────────────────────
+
+struct eclipsa_studio_iamf_measurer {
+  eclipsa_studio::OfflineIamfMeasurer measurer;
+};
+
+eclipsa_studio_iamf_measurer_t* eclipsa_studio_iamf_measurer_create(
+    const char* path, uint32_t buffer_size, uint32_t layout) {
+  if (!path) return nullptr;
+  auto* m = new (std::nothrow) eclipsa_studio_iamf_measurer;
+  if (!m) return nullptr;
+  // Exception firewall: the open runs the upstream decoder's descriptor
+  // parse and scan.
+  try {
+    if (!m->measurer.Open(path, buffer_size, layout)) {
+      delete m;
+      return nullptr;
+    }
+  } catch (const std::exception& e) {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "eclipsa_studio_iamf_measurer_create: exception: %s", e.what());
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure", buf);
+    delete m;
+    return nullptr;
+  } catch (...) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure",
+               "eclipsa_studio_iamf_measurer_create: unknown exception");
+    delete m;
+    return nullptr;
+  }
+  return m;
+}
+
+int32_t eclipsa_studio_iamf_measurer_include_element(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t audio_element_id,
+    float mix_gain_db, uint32_t headphones_mode, uint32_t binaural_profile) {
+  if (!m) return -1;
+  // Exception firewall: including an element adds an OAR sub-renderer
+  // and allocates its block buffer. A throw reports -2 with the reason
+  // in the engine log, the code engine.h documents for an element that
+  // cannot render.
+  try {
+    return m->measurer.IncludeElement(audio_element_id, mix_gain_db,
+                                      headphones_mode, binaural_profile)
+               ? 0
+               : -2;
+  } catch (const std::exception& e) {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "eclipsa_studio_iamf_measurer_include_element: exception: %s",
+             e.what());
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure", buf);
+    return -2;
+  } catch (...) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure",
+               "eclipsa_studio_iamf_measurer_include_element: unknown "
+               "exception");
+    return -2;
+  }
+}
+
+void eclipsa_studio_iamf_measurer_set_output_gain(
+    eclipsa_studio_iamf_measurer_t* m, float gain_db) {
+  if (m) m->measurer.SetOutputMixGain(gain_db);
+}
+
+int32_t eclipsa_studio_iamf_measurer_measure(eclipsa_studio_iamf_measurer_t* m,
+                                             float* out_integrated_lufs,
+                                             float* out_true_peak_dbtp,
+                                             float* out_digital_peak_dbfs) {
+  if (!m) return -1;
+  // Exception firewall.
+  try {
+    const auto result = m->measurer.Measure();
+    if (!result.has_value()) {
+      // Specifics in the engine log and last_error. Distinct code so a
+      // failed measure can never pass for a silent (-120 LUFS) program.
+      return -2;
+    }
+    if (out_integrated_lufs) *out_integrated_lufs = result->integrated_lufs;
+    if (out_true_peak_dbtp) *out_true_peak_dbtp = result->true_peak_dbtp;
+    if (out_digital_peak_dbfs) {
+      *out_digital_peak_dbfs = result->digital_peak_dbfs;
+    }
+    return 0;
+  } catch (const std::exception& e) {
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "eclipsa_studio_iamf_measurer_measure: exception: %s", e.what());
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure", buf);
+    return -5;
+  } catch (...) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf_measure",
+               "eclipsa_studio_iamf_measurer_measure: unknown exception");
+    return -5;
+  }
+}
+
+uint32_t eclipsa_studio_iamf_measurer_trace_len(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t series) {
+  return m ? m->measurer.TraceLength(series) : 0;
+}
+
+uint32_t eclipsa_studio_iamf_measurer_copy_trace(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t series, float* out,
+    uint32_t cap) {
+  return m ? m->measurer.CopyTrace(series, out, cap) : 0;
+}
+
+int32_t eclipsa_studio_iamf_measurer_loudness_range(
+    eclipsa_studio_iamf_measurer_t* m, float* out_lra_lu,
+    int32_t* out_is_stable) {
+  if (!m) return -1;
+  float lra = 0.0f;
+  bool stable = false;
+  if (!m->measurer.GetLoudnessRange(&lra, &stable)) return -1;
+  if (out_lra_lu) *out_lra_lu = lra;
+  if (out_is_stable) *out_is_stable = stable ? 1 : 0;
+  return 0;
+}
+
+const char* eclipsa_studio_iamf_measurer_last_error(
+    eclipsa_studio_iamf_measurer_t* m) {
+  return m ? m->measurer.last_error().c_str() : "";
+}
+
+void eclipsa_studio_iamf_measurer_destroy(eclipsa_studio_iamf_measurer_t* m) {
+  delete m;
 }
 
 // ── Info ──────────────────────────────────────────────────────────────────

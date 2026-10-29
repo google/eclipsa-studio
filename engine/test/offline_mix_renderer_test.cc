@@ -81,6 +81,26 @@ TEST_F(OfflineMixRendererTraceTest, NoTracesBeforeMeasure) {
   EXPECT_FALSE(renderer_.GetLoudnessRange(nullptr, nullptr));
 }
 
+// A run that fails leaves nothing of the previous run readable: the
+// series and the loudness range are reset at the start of every run,
+// before the failure points.
+TEST_F(OfflineMixRendererTraceTest, FailedRemeasureClearsTraces) {
+  ASSERT_TRUE(renderer_.RenderAndMeasure().has_value());
+  ASSERT_GT(renderer_.TraceLength(kTraceLimiterGrDb), 0u);
+  ASSERT_TRUE(renderer_.GetLoudnessRange(nullptr, nullptr));
+
+  MixElementConfig missing;
+  missing.element_id = 2;
+  missing.stream.input_wav_path = test_wav::temp_dir() + "/does_not_exist.wav";
+  missing.element_sub_type = kStereoLayout;
+  missing.channels = 2;
+  ASSERT_TRUE(renderer_.AddElement(missing));
+  EXPECT_FALSE(renderer_.RenderAndMeasure().has_value());
+  EXPECT_EQ(renderer_.TraceLength(kTraceMomentaryLufs), 0u);
+  EXPECT_EQ(renderer_.TraceLength(kTraceLimiterGrDb), 0u);
+  EXPECT_FALSE(renderer_.GetLoudnessRange(nullptr, nullptr));
+}
+
 TEST_F(OfflineMixRendererTraceTest, TracesAfterMeasure) {
   const std::optional<LoudnessResult> measured = renderer_.RenderAndMeasure();
   ASSERT_TRUE(measured.has_value());
@@ -185,6 +205,45 @@ TEST(OfflineMixRendererLimiterGrTest, HotProgramShowsSustainedReduction) {
   }
   // ~1 dB of reduction on a near-full-scale sine against -1 dBFS.
   EXPECT_GT(max_gr, 0.5f);
+}
+
+// Turned off after a limited pass on the same renderer, the limiter
+// reports no reduction in the next pass. A disabled OAR limiter keeps
+// the envelope it ended the last pass with, which would read as
+// reduction in every step.
+TEST(OfflineMixRendererLimiterGrTest, LimiterOffAfterLimitedPassReadsNone) {
+  const std::string src = test_wav::temp_dir() + "/limiter_gr_off_after.wav";
+  ASSERT_TRUE(test_wav::write_sine_frames(src, 2, kSampleRate, 16, 997.0f,
+                                          kSeconds * kSampleRate, 1.0f));
+
+  OfflineMixRenderer renderer;
+  ASSERT_TRUE(renderer.Init(kSampleRate, kBufferSize, kStereoLayout));
+  MixElementConfig cfg;
+  cfg.element_id = 1;
+  cfg.stream.input_wav_path = src;
+  cfg.element_type = 0;  // channel bed
+  cfg.element_sub_type = kStereoLayout;
+  cfg.channels = 2;
+  ASSERT_TRUE(renderer.AddElement(cfg));
+  ASSERT_TRUE(renderer.RenderAndMeasure().has_value());
+  std::vector<float> gr(renderer.TraceLength(kTraceLimiterGrDb));
+  ASSERT_EQ(renderer.CopyTrace(kTraceLimiterGrDb, gr.data(),
+                               static_cast<uint32_t>(gr.size())),
+            gr.size());
+  ASSERT_GT(gr.back(), 0.0f);  // engaged when the limited pass ends
+
+  ASSERT_TRUE(renderer.SetLimiterEnabled(false));
+  const std::optional<LoudnessResult> unlimited = renderer.RenderAndMeasure();
+  ASSERT_TRUE(unlimited.has_value());
+  EXPECT_GT(unlimited->digital_peak_dbfs, -0.5f);  // not limited to -1
+  gr.assign(renderer.TraceLength(kTraceLimiterGrDb), -1.0f);
+  ASSERT_EQ(gr.size(), kTotalSteps);
+  ASSERT_EQ(renderer.CopyTrace(kTraceLimiterGrDb, gr.data(),
+                               static_cast<uint32_t>(gr.size())),
+            gr.size());
+  for (uint32_t i = 0; i < gr.size(); ++i) {
+    EXPECT_EQ(gr[i], 0.0f) << "step " << i;
+  }
 }
 
 // ES-517: a program that is not a whole number of 100 ms steps must
@@ -381,14 +440,6 @@ TEST(OfflineMixRendererStreamTest, StreamFedMeasureMatchesBouncedFileMeasure) {
   EXPECT_NEAR(streamed.digital_peak_dbfs, reference.digital_peak_dbfs, 0.1f);
 }
 
-// ES-491/ES-492: offline measurement runs through OAR's -1 dBFS peak
-// limiter, hardwired on (the "for now" decision — it matches live
-// monitoring and iamf-tools' expected future OAR-with-defaults
-// measurement). A full-scale sine pushed +6 dB past full scale must
-// therefore come back clamped at the ceiling, not at ~+6 dBFS. If the
-// offline limiter is ever disabled again, this fails — it is the
-// regression pin for the decision, the mirror of the shipped-side pin
-// in iamf_loudness_agreement_test (the shipped values stay unlimited).
 // Measurement runs the same limiter as live monitoring, whose 5 ms
 // look-ahead delays the output by limiter_delay() frames. The render
 // loop drains that delay past the program end, so content in the last
@@ -435,6 +486,14 @@ TEST(OfflineMixRendererStreamTest, MeasureSkipsTheLimiterPriming) {
   EXPECT_EQ(renderer.TraceLength(kTraceLimiterGrDb), 10u);
 }
 
+// ES-491/ES-492: offline measurement runs through OAR's -1 dBFS peak
+// limiter, which is on by default and in every app path, as in live
+// monitoring; only the measure CLI's --no-limiter turns it off. A
+// full-scale sine pushed +6 dB past full scale must therefore come back
+// clamped at the ceiling, not at ~+6 dBFS. If the offline limiter's
+// default is ever off again, this fails. It is the regression pin for
+// the decision and the counterpart of the shipped-side pin in
+// iamf_loudness_agreement_test (the shipped values stay unlimited).
 TEST(OfflineMixRendererStreamTest, MeasureIsPostLimiter) {
   const std::string src = test_wav::temp_dir() + "/post_limiter_src.wav";
   ASSERT_TRUE(test_wav::write_sine_frames(src, 2, kSampleRate, 16, 997.0f,
@@ -455,6 +514,86 @@ TEST(OfflineMixRendererStreamTest, MeasureIsPostLimiter) {
   // NOT guarantee -1 dBTP — pin that, it is user-visible in the
   // report and the Inspector.
   EXPECT_GT(result.true_peak_dbtp, result.digital_peak_dbfs);
+}
+
+// Measures one stereo bed at the stereo layout with the limiter off, set
+// before or after Init(), and copies the limiter GR trace into `gr`.
+LoudnessResult MeasureStereoBedUnlimited(const ElementStream::Config& stream,
+                                         bool set_before_init,
+                                         std::vector<float>* gr) {
+  OfflineMixRenderer renderer;
+  if (set_before_init) EXPECT_TRUE(renderer.SetLimiterEnabled(false));
+  EXPECT_TRUE(renderer.Init(kSampleRate, kBufferSize, kStereoLayout));
+  if (!set_before_init) EXPECT_TRUE(renderer.SetLimiterEnabled(false));
+  MixElementConfig cfg;
+  cfg.element_id = 1;
+  cfg.stream = stream;
+  cfg.element_type = 0;  // channel bed
+  cfg.element_sub_type = kStereoLayout;
+  cfg.channels = 2;
+  EXPECT_TRUE(renderer.AddElement(cfg));
+  const std::optional<LoudnessResult> result = renderer.RenderAndMeasure();
+  EXPECT_TRUE(result.has_value());
+  gr->assign(renderer.TraceLength(kTraceLimiterGrDb), -1.0f);
+  renderer.CopyTrace(kTraceLimiterGrDb, gr->data(),
+                     static_cast<uint32_t>(gr->size()));
+  return result.value_or(LoudnessResult{});
+}
+
+// SetLimiterEnabled(false) measures the unlimited render. The +6 dB
+// sine of MeasureIsPostLimiter keeps its +6 dBFS sample peak, its
+// loudness reads 20 dB above the same sine at -14 dB (which the limiter
+// leaves alone), and the GR trace is all zeros.
+TEST(OfflineMixRendererStreamTest, LimiterOffMeasuresTheUnlimitedRender) {
+  const std::string src = test_wav::temp_dir() + "/limiter_off_src.wav";
+  ASSERT_TRUE(test_wav::write_sine_frames(src, 2, kSampleRate, 16, 997.0f,
+                                          2 * kSampleRate, 1.0f));
+
+  ElementStream::Config hot;
+  hot.input_wav_path = src;
+  hot.gain_db = 6.0f;
+  ElementStream::Config quiet = hot;
+  quiet.gain_db = -14.0f;
+
+  const LoudnessResult limited = MeasureStereoBed(hot);
+  const LoudnessResult quiet_limited = MeasureStereoBed(quiet);
+  ASSERT_LT(quiet_limited.digital_peak_dbfs, -13.0f);  // limiter idle
+
+  for (const bool before_init : {true, false}) {
+    std::vector<float> gr;
+    const LoudnessResult unlimited =
+        MeasureStereoBedUnlimited(hot, before_init, &gr);
+    EXPECT_NEAR(unlimited.digital_peak_dbfs, 6.0f, 0.05f) << before_init;
+    EXPECT_NEAR(unlimited.integrated_lufs,
+                quiet_limited.integrated_lufs + 20.0f, 0.02f)
+        << before_init;
+    EXPECT_GT(unlimited.integrated_lufs, limited.integrated_lufs + 1.0f)
+        << before_init;
+    EXPECT_EQ(gr.size(), 20u) << before_init;  // 2 s of 100 ms steps
+    for (const float v : gr) EXPECT_EQ(v, 0.0f) << before_init;
+  }
+}
+
+// With the limiter off the render has no look-ahead delay, and the pass
+// measures the program frames without it: a click on the first and one
+// on the last frame of a 1 s source are measured, and the GR trace keeps
+// one entry per 100 ms of program.
+TEST(OfflineMixRendererStreamTest, LimiterOffMeasuresFirstAndLastFrame) {
+  for (const uint32_t frame : {0u, kSampleRate - 1}) {
+    const std::string src = test_wav::temp_dir() + "/limiter_off_click.wav";
+    std::vector<float> samples(kSampleRate, 0.0f);
+    samples[frame] = 0.5f;
+    ASSERT_TRUE(test_wav::write_float32_frames(src, 2, kSampleRate, samples));
+
+    ElementStream::Config stream;
+    stream.input_wav_path = src;
+    std::vector<float> gr;
+    const LoudnessResult result =
+        MeasureStereoBedUnlimited(stream, /*set_before_init=*/true, &gr);
+    EXPECT_NEAR(result.digital_peak_dbfs, 20.0f * std::log10(0.5f), 0.1f)
+        << "click on frame " << frame << " lost";
+    EXPECT_EQ(gr.size(), 10u) << frame;
+  }
 }
 
 // ES-470: per-element overload stats are counted on each element's own

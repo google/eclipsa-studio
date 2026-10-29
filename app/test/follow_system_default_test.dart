@@ -30,9 +30,29 @@ void main() {
         maxChannels: 2,
       );
 
-  test('no default in the list -> no action', () {
+  test('no default, open device at the same index -> no action', () {
     final devices = [dev(0, 'Speakers'), dev(1, 'Headset')];
     expect(followSystemDefaultAction(devices, 'Speakers', 0), isNull);
+  });
+
+  test('no default, open device reindexed -> re-pin, no reopen', () {
+    // A device without the default flag was plugged in ahead of the
+    // open one (ES-949).
+    final devices = [dev(0, 'Interface'), dev(1, 'Speakers')];
+    final action = followSystemDefaultAction(devices, 'Speakers', 0);
+    expect(action, isNotNull);
+    expect(action!.index, 1);
+    expect(action.reopen, isFalse);
+  });
+
+  test('no default, open device gone -> no action', () {
+    final devices = [dev(0, 'Interface')];
+    expect(followSystemDefaultAction(devices, 'Speakers', 0), isNull);
+  });
+
+  test('no default, nothing resolved (null open name) -> no action', () {
+    final devices = [dev(0, 'Speakers'), dev(1, 'Headset')];
+    expect(followSystemDefaultAction(devices, null, -1), isNull);
   });
 
   test('empty list -> no action', () {

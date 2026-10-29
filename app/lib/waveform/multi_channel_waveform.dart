@@ -17,6 +17,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../logging/log.dart';
+import '../models/layout_916.dart';
 import '../theme.dart';
 import '../util/time_format.dart';
 import '../widgets/track_lanes.dart';
@@ -271,6 +272,11 @@ String fileInfoLabel(WavInfo info, String? fileName, {int? engineRate}) {
 /// callers with a layout hint should use [iamfChannelLabels] in
 /// `widgets/routing_labels.dart` to override.
 String standardChannelLabel(int ch, int total) {
+  // 9.1.6 in the app's order, OBR's alt order (L R C LFE Lw Rw Lss Rss
+  // Lrs Rrs Ltf Rtf Lts Rts Ltr Rtr: the familiar names, FLc FRc FC
+  // LFE FL FR SiL SiR BL BR TpFL TpFR TpSiL TpSiR TpBL TpBR in IAMF
+  // names).
+  if (total == 16) return alt916Labels[ch];
   const labels = {
     // Mono (OBR: C). "M" kept for DAW familiarity.
     1: ['M'],
@@ -278,10 +284,11 @@ String standardChannelLabel(int ch, int total) {
     2: ['L', 'R'],
     // 5.1 (OBR: L30 R30 C LFE L110 R110).
     6: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs'],
-    // 7.1 (OBR: L30 R30 C LFE L90 R90 L135 R135).
+    // 7.1 (OBR: L30 R30 C LFE L90 R90 L135 R135). The side pair is
+    // Lss/Rss, as in IAMF; the 5.1 family's L110/R110 pair is Ls/Rs.
     // 8-channel is also 5.1.2 (L110 surrounds + UL30 heights);
     // see iamfChannelLabels() for that disambiguation.
-    8: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs'],
+    8: ['L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs'],
     // 5.1.4 (OBR: L30 R30 C LFE L110 R110 UL45 UR45 UL135 UR135).
     10: ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Ltf', 'Rtf', 'Ltr', 'Rtr'],
     // 7.1.4 (OBR: ... UL45 UR45 UL135 UR135).
@@ -290,41 +297,22 @@ String standardChannelLabel(int ch, int total) {
       'R',
       'C',
       'LFE',
-      'Ls',
-      'Rs',
-      'Lrs',
-      'Rrs',
-      'Ltf',
-      'Rtf',
-      'Ltr',
-      'Rtr',
-    ],
-    // 9.1.6 (OBR: L60 R60 C LFE1 L135 R135 L30 R30 L90 R90
-    //             UL45 UR45 UL135 UR135 UL90 UR90).
-    // Labels: front wide pair first (L/R = L60/R60), then rear (Lrs/Rrs),
-    // then front-of-center (Lc/Rc = L30/R30), then side (Lss/Rss = L90/R90),
-    // then heights — top front, top rear, top side.
-    16: [
-      'L',
-      'R',
-      'C',
-      'LFE',
-      'Lrs',
-      'Rrs',
-      'Lc',
-      'Rc',
       'Lss',
       'Rss',
+      'Lrs',
+      'Rrs',
       'Ltf',
       'Rtf',
       'Ltr',
       'Rtr',
-      'Ltss',
-      'Rtss',
     ],
+    // 9.1.6 (16 channels) is handled before this table: the app's order
+    // is OBR's alt order, with the familiar names (models/layout_916.dart).
     // 7.1.5.4 (OBR: L30 R30 C LFE L90 R90 L135 R135 UL45 UR45 T
     //               UL135 UR135 BL45 BR45 BL135 BR135).
     // Tc = top center; Lbf/Rbf = bottom front; Lbr/Rbr = bottom rear.
+    // Pinned against engine/renderer/channel_layouts.txt, as is the
+    // 10.2.9.3 table below.
     17: [
       'L',
       'R',
@@ -344,6 +332,38 @@ String standardChannelLabel(int ch, int total) {
       'Lbr',
       'Rbr',
     ],
+    // 10.2.9.3 (OBR: L60 R60 C LFE1 L135 R135 L30 R30 M180 LFE2 L90 R90
+    //                UL45 UR45 UL0 T UL135 UR135 UL90 UR90 UL180 BL0 BL45
+    //                BR45), in OAR's order (no reorder): the 9.1.6
+    // familiar names for the channels it shares with 9.1.6, Cs = back
+    // center, LFE2, Ctf/Ctr = center top front/rear, Cbf = center bottom
+    // front.
+    24: [
+      'Lw',
+      'Rw',
+      'C',
+      'LFE',
+      'Lrs',
+      'Rrs',
+      'L',
+      'R',
+      'Cs',
+      'LFE2',
+      'Lss',
+      'Rss',
+      'Ltf',
+      'Rtf',
+      'Ctf',
+      'Tc',
+      'Ltr',
+      'Rtr',
+      'Lts',
+      'Rts',
+      'Ctr',
+      'Cbf',
+      'Lbf',
+      'Rbf',
+    ],
   };
 
   if (labels.containsKey(total) && ch < labels[total]!.length) {
@@ -356,54 +376,69 @@ String standardChannelLabel(int ch, int total) {
 List<String> ambisonicsLabels(int channels) =>
     List.generate(channels, (i) => 'ACN $i');
 
+/// [channelFullName]'s table, built once.
+final Map<String, String> _channelFullNames = {
+  'M': 'Mono',
+  'L': 'Left',
+  'R': 'Right',
+  'C': 'Center',
+  'LFE': 'Low-frequency effects',
+  'Ls': 'Left surround',
+  'Rs': 'Right surround',
+  'Lrs': 'Left rear surround',
+  'Rrs': 'Right rear surround',
+  'Lss': 'Left side surround',
+  'Rss': 'Right side surround',
+  'Ltf': 'Left top front',
+  'Rtf': 'Right top front',
+  'Ltr': 'Left top rear',
+  'Rtr': 'Right top rear',
+  'Tc': 'Top center',
+  'Lbf': 'Left bottom front',
+  'Rbf': 'Right bottom front',
+  'Lbr': 'Left bottom rear',
+  'Rbr': 'Right bottom rear',
+  'Cs': 'Center surround',
+  'LFE2': 'Low-frequency effects 2',
+  'Ctf': 'Center top front',
+  'Ctr': 'Center top rear',
+  'Cbf': 'Center bottom front',
+  // The 9.1.6 names no other layout uses (models/layout_916.dart).
+  ...k916ChannelFullNames,
+};
+
 /// Full name for a short channel label, for tooltips. Covers the fixed
 /// vocabulary of [standardChannelLabel] / `iamfChannelLabels` plus the
 /// generated `ACN n` / `Ch n` forms; unknown labels echo back.
 ///
-/// Every label the loudspeaker layouts render is pinned against the
-/// `[names]` glossary in `engine/renderer/oar_output_channels.txt` by
-/// `test/renderer/oar_output_channels_test.dart`, which also fails if a
-/// layout ever uses a label this map has no entry for — that case would
+/// Every label and long label a layout renders is pinned against the
+/// rows of `engine/renderer/channel_layouts.txt` by
+/// `test/renderer/channel_layouts_test.dart`, which also fails if a
+/// layout ever uses a label the table has no entry for — that case would
 /// silently echo the short label back as its own tooltip (ES-592). The
-/// entries beyond those layouts (7.1.5.4's `Tc`/`Lbf`/`Rbf`/`Lbr`/`Rbr`,
-/// and `M`) live only here.
-///
-/// Note `Ls`/`Rs` deliberately reads as the generic "surround": in the
-/// 5.1 family it denotes the L110/R110 rear pair, in the 7.1 family
-/// the L90/R90 side pair (standard DAW convention; the OBR positions
-/// differ, the short label does not).
+/// timeline's mono `M` lives only here.
 String channelFullName(String label) {
-  const names = {
-    'M': 'Mono',
-    'L': 'Left',
-    'R': 'Right',
-    'C': 'Center',
-    'LFE': 'Low-frequency effects',
-    'Ls': 'Left surround',
-    'Rs': 'Right surround',
-    'Lrs': 'Left rear surround',
-    'Rrs': 'Right rear surround',
-    'Lss': 'Left side surround',
-    'Rss': 'Right side surround',
-    'Lc': 'Left front center',
-    'Rc': 'Right front center',
-    'Ltf': 'Left top front',
-    'Rtf': 'Right top front',
-    'Ltr': 'Left top rear',
-    'Rtr': 'Right top rear',
-    'Ltss': 'Left top side',
-    'Rtss': 'Right top side',
-    'Tc': 'Top center',
-    'Lbf': 'Left bottom front',
-    'Rbf': 'Right bottom front',
-    'Lbr': 'Left bottom rear',
-    'Rbr': 'Right bottom rear',
-  };
-  final direct = names[label];
+  final direct = _channelFullNames[label];
   if (direct != null) return direct;
   final acn = RegExp(r'^ACN (\d+)$').firstMatch(label);
   if (acn != null) return 'Ambisonics channel ${acn[1]} (ACN order)';
   final ch = RegExp(r'^Ch (\d+)$').firstMatch(label);
   if (ch != null) return 'Channel ${ch[1]}';
   return label;
+}
+
+/// The tooltips of an element's channel lanes, one per [labels] entry.
+/// A 9.1.6 element ([layoutHint] "9.1.6") takes its per-channel tooltips
+/// by lane index from models/layout_916.dart ("L (IAMF bitstream FLc)"),
+/// since L, R, Lss and the other familiar names are also other
+/// layouts' labels; every other lane, LFE and lanes past the layout
+/// included, shows [channelFullName] of its label, so a 7.1.4 lane
+/// labelled L shows "Left".
+List<String> channelLaneTooltips(String layoutHint, List<String> labels) {
+  final byIndex = layout916Tooltips(layoutHint);
+  return [
+    for (var i = 0; i < labels.length; i++)
+      (byIndex != null && i < byIndex.length ? byIndex[i] : null) ??
+          channelFullName(labels[i]),
+  ];
 }

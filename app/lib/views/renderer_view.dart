@@ -23,13 +23,15 @@ import '../loudness/loudness_report_dialog.dart';
 import '../meters/db_utils.dart';
 import '../meters/meter_provider.dart';
 import '../meters/mini_multichannel_meter.dart';
-import '../meters/multichannel_meter_painter.dart';
 import '../models/audio_element_enums.dart' show BinauralProfile;
 import '../playback/iamf_probe.dart' show IamfAe;
 import '../playback/playback_session.dart';
 import '../renderer/element_stats.dart';
 import '../renderer/mollweide_painter.dart';
 import '../renderer/scene_bridge.dart';
+import '../renderer/scene_label_overlay.dart';
+import '../renderer/scene_target.dart';
+import '../renderer/speaker_layout.dart';
 import '../renderer/sh_utils.dart' show ShDirectivity;
 import '../renderer/three_js_renderer.dart';
 import '../renderer/viz_module.dart';
@@ -41,10 +43,13 @@ import '../widgets/ae_type_badge.dart';
 import '../widgets/app_button.dart';
 import '../widgets/console_widgets.dart' show ConsoleToggle;
 import '../widgets/mix_status_badge.dart';
+import '../widgets/option_grid.dart';
 import '../widgets/solo_mute_button.dart';
+import '../widgets/status_tag.dart';
 import '../widgets/viz_hud.dart';
 import '../widgets/viz_panel.dart';
 import '../workspace/workspace_mode.dart';
+import 'output_meter.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Channel count helpers
@@ -55,8 +60,9 @@ int channelCountForLayout(String layout) {
   final l = layout.toLowerCase();
   if (l.contains('mono') || l.contains('object')) return 1;
   if (l.contains('stereo') || l.contains('binaural')) return 2;
+  if (l.contains('10.2.9.3')) return 24;
   if (l.contains('9.1.6')) return 16;
-  if (l.contains('7.1.5.4')) return 16;
+  if (l.contains('7.1.5.4')) return 17;
   if (l.contains('7.1.4')) return 12;
   if (l.contains('7.1.2')) return 10;
   if (l.contains('7.1')) return 8;
@@ -89,6 +95,16 @@ class _PlaybackRendererInputs {
   const _PlaybackRendererInputs(this.elements, this.engineOrder);
 }
 
+/// The scene layout id for a Playback channel element whose probe
+/// reports [layoutLabel]. The engine feeds a Playback element to OAR
+/// in the file's order, so a 9.1.6 element is drawn with
+/// [SpeakerLayout.layout916Iamf] instead of the app's alt order.
+@visibleForTesting
+String playbackChannelLayout(String layoutLabel) =>
+    layoutLabel == SpeakerLayout.layout916.id
+    ? SpeakerLayout.layout916Iamf.id
+    : layoutLabel;
+
 _PlaybackRendererInputs _playbackRendererInputs(PlaybackSession s) {
   final probeById = <int, IamfAe>{
     for (final p in s.report.audioElements) p.id: p,
@@ -105,7 +121,9 @@ _PlaybackRendererInputs _playbackRendererInputs(PlaybackSession s) {
       PlaybackAeKind.unknown => 'Channel',
     };
     final layout = switch (ae.kind) {
-      PlaybackAeKind.channelBased => probe?.layoutLabel ?? 'Stereo',
+      PlaybackAeKind.channelBased => playbackChannelLayout(
+        probe?.layoutLabel ?? 'Stereo',
+      ),
       PlaybackAeKind.sceneBased => '${probe?.ambisonicsOrder ?? 1}OA',
       PlaybackAeKind.objectBased => 'Object',
       PlaybackAeKind.unknown => 'Stereo',
@@ -187,7 +205,6 @@ class _InputPanel extends ConsumerWidget {
     final metrics = ref.watch(animatedMetricsProvider);
 
     final List<AudioElement> elements;
-    final List<int> engineOrder;
     // Per-element mix settings keyed by element id. Either the active
     // sub-mix's settings (Creator) or settings synthesized from the
     // active IAMF mix presentation (Playback).
@@ -197,28 +214,24 @@ class _InputPanel extends ConsumerWidget {
       final session = ref.watch(playbackSessionProvider);
       if (session == null) {
         elements = const [];
-        engineOrder = const [];
         settingsFor = (_) => null;
       } else {
         final inputs = _playbackRendererInputs(session);
         elements = inputs.elements;
-        engineOrder = inputs.engineOrder;
         final byId = <int, MixElementSettings>{};
-        if (session.activeMixIndex >= 0 &&
-            session.activeMixIndex < session.report.mixPresentations.length) {
-          final mix = session.report.mixPresentations[session.activeMixIndex];
-          // Display the gain the engine actually applies — the folded
-          // element + sub-mix output gain across ALL sub-mixes
-          // (computeMixApplication), not the first-sub-mix raw default.
-          final app = computeMixApplication(mix, [
-            for (final el in elements) el.id,
-          ]);
-          // Same for the headphones chip: mirror the rendering config
+        final mix = session.selectedMix;
+        if (mix != null) {
+          // The element mix gain as authored, across all sub-mixes. The
+          // sub-mix output mix gain is the footer under the list, so the
+          // card and the footer read as one chain, as in Creator (ES-1006);
+          // the engine applies the two folded (computeMixApplication).
+          final gains = elementMixGainsDb(mix);
+          // Same for the headphones line: mirror the rendering config
           // the engine pushes (ES-327). Spec ints map to the enums by
           // index; a missing entry means the engine keeps OAR's default
-          // (world-locked / ambient), so the chip shows exactly that.
+          // (world-locked / ambient), so the line shows exactly that.
           final rendering = computeRenderingConfigs(mix);
-          app.gainsByElementId.forEach((id, gain) {
+          gains.forEach((id, gain) {
             final cfg = rendering[id];
             byId[id] = MixElementSettings(
               elementId: id,
@@ -232,7 +245,6 @@ class _InputPanel extends ConsumerWidget {
       }
     } else {
       elements = ref.watch(elementsProvider);
-      engineOrder = ref.watch(engineOrderProvider);
       final activeSub = _activeSubMix(ref);
       settingsFor = (id) => activeSub?.settingsFor(id);
     }
@@ -249,15 +261,7 @@ class _InputPanel extends ConsumerWidget {
             height: 36,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             alignment: Alignment.centerLeft,
-            child: Text(
-              'AUDIO ELEMENTS',
-              style: TextStyle(
-                fontSize: T.fontBody,
-                color: T.textMuted,
-                letterSpacing: 0.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+            child: Text('AUDIO ELEMENTS', style: T.styleSectionLabel),
           ),
           Container(height: 1, color: T.border),
           // Element list
@@ -267,7 +271,10 @@ class _InputPanel extends ConsumerWidget {
               itemCount: elements.length,
               itemBuilder: (context, index) {
                 final el = elements[index];
-                final meterIdx = engineOrder.indexOf(el.id);
+                // The tick loop builds the meter rows in this list's
+                // order (elementsProvider in Creator, the session's
+                // element order in Playback), not in engine slot order.
+                final meterIdx = index;
                 final levels =
                     meterIdx >= 0 && meterIdx < metrics.sidebarMeters.length
                     ? metrics.sidebarMeters[meterIdx]
@@ -282,7 +289,7 @@ class _InputPanel extends ConsumerWidget {
                     : null;
                 final settings = settingsFor(el.id);
                 final excluded = excludedIds.contains(el.id);
-                return _InputElementCard(
+                return InputElementCard(
                   element: el,
                   levels: levels,
                   peaks: peaks,
@@ -327,11 +334,9 @@ SubMix? _activeSubMix(WidgetRef ref) {
 Set<int> _excludedFromActiveMix(WidgetRef ref, List<AudioElement> elements) {
   final mode = ref.watch(workspaceModeProvider);
   if (mode == WorkspaceMode.playback) {
-    final session = ref.watch(playbackSessionProvider);
-    final mps = session?.report.mixPresentations ?? const [];
-    final idx = session?.activeMixIndex ?? -1;
-    if (idx < 0 || idx >= mps.length) return const {};
-    return computeMixApplication(mps[idx], [
+    final mix = ref.watch(playbackSessionProvider)?.selectedMix;
+    if (mix == null) return const {};
+    return computeMixApplication(mix, [
       for (final el in elements) el.id,
     ]).excludedElementIds;
   }
@@ -343,7 +348,13 @@ Set<int> _excludedFromActiveMix(WidgetRef ref, List<AudioElement> elements) {
   };
 }
 
-class _InputElementCard extends ConsumerWidget {
+/// One element's card in the Renderer view's input panel: the name and
+/// S/M, the type, position and gain lines beside the element's meter,
+/// and the headphones line under them. Every card is one height, so the
+/// position line is empty on Channel and Scene cards and the headphones
+/// line on an element outside the mix.
+@visibleForTesting
+class InputElementCard extends ConsumerWidget {
   final AudioElement element;
   final List<double> levels;
   final List<double>? peaks;
@@ -351,7 +362,7 @@ class _InputElementCard extends ConsumerWidget {
   final bool excludedFromMix;
   final MixElementSettings? mixSettings;
 
-  const _InputElementCard({
+  const InputElementCard({
     required this.element,
     required this.levels,
     this.peaks,
@@ -362,12 +373,11 @@ class _InputElementCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final color = Color(element.color);
     final type = element.type.toLowerCase();
     final isObject = type.contains('object');
     final channelCount = channelCountForLayout(element.layout);
-    // The card's chips are read-only indicators; their tooltips say
-    // where the value is edited (Creator) or that it comes from the
+    // The card's detail lines are read-only indicators; their tooltips
+    // say where the value is edited (Creator) or that it comes from the
     // file (Playback) — see ES-328.
     final playback = ref.watch(workspaceModeProvider) == WorkspaceMode.playback;
 
@@ -379,8 +389,9 @@ class _InputElementCard extends ConsumerWidget {
         borderRadius: BorderRadius.circular(T.radiusSm),
         border: Border.all(color: T.borderLight),
       ),
-      // Excluded elements stay listed (with the NOT IN MIX badge) but
-      // read as inactive — they are audibly gated by the engine.
+      // Excluded elements stay listed (with the Not in mix presentation
+      // line) but read as inactive — they are audibly gated by the
+      // engine.
       child: Opacity(
         opacity: excludedFromMix ? 0.45 : 1.0,
         child: Column(
@@ -389,18 +400,10 @@ class _InputElementCard extends ConsumerWidget {
             // Name + S/M (full width)
             Row(
               children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: color,
-                  ),
-                ),
-                const SizedBox(width: T.gapPair),
                 Expanded(
                   child: Text(
                     element.name,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: T.fontBody,
@@ -448,53 +451,24 @@ class _InputElementCard extends ConsumerWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        AeTypeBadge(type: element.type, layout: element.layout),
-                        if (isObject) ...[
-                          const SizedBox(height: T.gapPair),
-                          Tooltip(
-                            message: playback
-                                ? 'Position of this object element, as '
-                                      'authored in the file.'
-                                : 'Position of this object element. Edit it '
-                                      'in the Elements tab.',
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                _PropRow(
-                                  'Az',
-                                  '${element.azimuth.toStringAsFixed(1)}°',
-                                ),
-                                _PropRow(
-                                  'El',
-                                  '${element.elevation.toStringAsFixed(1)}°',
-                                ),
-                                _PropRow(
-                                  'Dist',
-                                  element.distance.toStringAsFixed(2),
-                                ),
-                                if (element.isDual)
-                                  _PropRow(
-                                    'Spread',
-                                    '${element.spread.toStringAsFixed(1)}°',
-                                  ),
-                              ],
-                            ),
-                          ),
-                        ],
+                        AeTypeBadge(
+                          type: element.type,
+                          layout: SpeakerLayout.displayName(element.layout),
+                        ),
                         const SizedBox(height: 4),
-                        _MixStatus(
+                        // Every card keeps this line, so cards of every
+                        // type are one height: an object shows its
+                        // position, other types an empty line.
+                        _PositionLine(
+                          element: isObject ? element : null,
+                          playback: playback,
+                        ),
+                        const SizedBox(height: 4),
+                        _GainLine(
                           excludedFromMix: excludedFromMix,
                           mixGain: mixSettings?.mixGain ?? 0,
                           playback: playback,
                         ),
-                        if (!excludedFromMix && mixSettings != null) ...[
-                          const SizedBox(height: 4),
-                          _BinauralSettings(
-                            settings: mixSettings!,
-                            element: element,
-                            playback: playback,
-                          ),
-                        ],
                       ],
                     ),
                   ),
@@ -514,6 +488,37 @@ class _InputElementCard extends ConsumerWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 4),
+            // Full card width: "World-locked · Reverberant" takes about
+            // 177 px with its glyph at the Medium font size, and "Not in
+            // mix presentation" 172 px at the Large size, more than the
+            // column beside the meter leaves. An element outside the mix
+            // shows that line here, over the hidden headphones line that
+            // keeps the height.
+            Stack(
+              children: [
+                Visibility(
+                  visible: !excludedFromMix && mixSettings != null,
+                  maintainSize: true,
+                  maintainAnimation: true,
+                  maintainState: true,
+                  child: _BinauralSettings(
+                    settings:
+                        mixSettings ??
+                        MixElementSettings(elementId: element.id),
+                    element: element,
+                    playback: playback,
+                  ),
+                ),
+                if (excludedFromMix)
+                  MixStatusBadge(
+                    tooltip: playback
+                        ? 'The selected presentation does not include this '
+                              'element, as authored in the file.'
+                        : MixStatusBadge.creatorTooltip,
+                  ),
+              ],
+            ),
           ],
         ),
       ),
@@ -521,12 +526,12 @@ class _InputElementCard extends ConsumerWidget {
   }
 }
 
-class _MixStatus extends StatelessWidget {
+class _GainLine extends StatelessWidget {
   final bool excludedFromMix;
   final double mixGain;
   final bool playback;
 
-  const _MixStatus({
+  const _GainLine({
     required this.excludedFromMix,
     required this.mixGain,
     required this.playback,
@@ -534,40 +539,29 @@ class _MixStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (excludedFromMix) {
-      return MixStatusBadge(
-        tooltip: playback
-            ? 'The selected presentation does not include this element, '
-                  'as authored in the file.'
-            : MixStatusBadge.creatorTooltip,
-      );
-    }
-    return Tooltip(
-      message: playback
-          ? 'Mix gain of this element in the selected presentation, '
-                'as authored in the file.'
-          : 'Mix gain of this element in the active mix. Edit it on '
-                'the element\'s channel strip in the Mix tab.',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        decoration: BoxDecoration(
-          color: T.bgControls,
-          borderRadius: BorderRadius.circular(T.radiusSm),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.tune, size: 10, color: T.textGhost),
-            const SizedBox(width: 4),
-            Text(
-              '${mixGain.toStringAsFixed(1)} dB',
-              style: TextStyle(
-                fontSize: T.fontCaption,
-                fontFamily: T.monoFamily,
-                color: T.textTertiary,
-              ),
-            ),
-          ],
+    // An element outside the mix keeps the line's height with the line
+    // hidden; its Not in mix presentation line takes the headphones
+    // line's place.
+    return Visibility(
+      visible: !excludedFromMix,
+      maintainSize: true,
+      maintainAnimation: true,
+      maintainState: true,
+      child: Tooltip(
+        message: playback
+            ? 'Mix gain of this element in the selected presentation, '
+                  'as authored in the file. The output mix gain under the '
+                  'list applies to the mix after it.'
+            : 'Mix gain of this element in the active mix. Edit it on '
+                  'the element\'s channel strip in the Mix tab.',
+        child: ElementDetailRow(
+          glyph: Icon(
+            Icons.tune,
+            size: ElementDetailRow.glyphSize,
+            color: T.textTertiary,
+          ),
+          label: '${mixGain.toStringAsFixed(1)} dB',
+          numeric: true,
         ),
       ),
     );
@@ -589,6 +583,10 @@ class _BinauralSettings extends StatelessWidget {
   Widget build(BuildContext context) {
     final mode = settings.effectiveHeadphonesMode(element);
     final isStereo = mode == HeadphonesRenderingMode.stereo;
+    final label = isStereo
+        ? 'Stereo'
+        : '${mode.label.replaceFirst('Binaural ', '')} · '
+              '${settings.binauralProfile.displayName}';
 
     return Tooltip(
       message: playback
@@ -597,29 +595,14 @@ class _BinauralSettings extends StatelessWidget {
           : 'Headphones rendering mode and binaural profile of this '
                 'element in the active mix. Edit them on the element\'s '
                 'channel strip in the Mix tab.',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        decoration: BoxDecoration(
-          color: T.bgControls,
-          borderRadius: BorderRadius.circular(T.radiusSm),
+      child: ElementDetailRow(
+        glyph: Icon(
+          Icons.headphones,
+          size: ElementDetailRow.glyphSize,
+          color: T.textTertiary,
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.headphones, size: 10, color: T.textGhost),
-            const SizedBox(width: 4),
-            Flexible(
-              child: Text(
-                isStereo
-                    ? 'Stereo'
-                    : '${mode.label.replaceFirst('Binaural ', '')} · '
-                          '${settings.binauralProfile.displayName}',
-                overflow: TextOverflow.ellipsis,
-                style: T.styleHint,
-              ),
-            ),
-          ],
-        ),
+        label: label,
+        dim: true,
       ),
     );
   }
@@ -657,24 +640,101 @@ void _toggleSoloMute(
   }
 }
 
-class _PropRow extends StatelessWidget {
-  final String label;
-  final String value;
-  const _PropRow(this.label, this.value);
+/// An object element's position on one line: "Az 30.0°  El 0.0°  Dist
+/// 1.00", labels in the dim label style and values in the value style.
+///
+/// Each value sits in a slot as wide as its widest value ("-180.0°",
+/// "-90.0°", "1.00", drawn hidden under it), so the El and Dist labels
+/// hold their x position as the values change. Beside an object's meter
+/// the line has 192 px at the Medium font size and takes about 186; at a
+/// larger font size it is scaled down to fit. The tooltip repeats the
+/// values and adds Spread for a dual object.
+///
+/// Every card draws this line, Channel and Scene cards (a null
+/// [element]) with nothing in it. Its height comes from a hidden label
+/// and value in a Row, the shape of the object line, and the object line
+/// is laid over it with [Positioned.fill]. A Stack leaves positioned
+/// children out of its intrinsic height, and under the card's
+/// IntrinsicHeight a FittedBox reports its child's unscaled height while
+/// it lays the child out scaled, so the hidden line alone sets the
+/// height and cards of every type keep their lines at one height.
+class _PositionLine extends StatelessWidget {
+  final AudioElement? element;
+  final bool playback;
+
+  const _PositionLine({required this.element, required this.playback});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: Row(
+    final label = ElementDetailRow.labelStyle(dim: true);
+    final value = ElementDetailRow.valueStyle();
+    Widget hidden(Widget child) => Visibility(
+      visible: false,
+      maintainSize: true,
+      maintainAnimation: true,
+      maintainState: true,
+      child: child,
+    );
+    final sizing = hidden(
+      Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(width: 42, child: Text(label, style: T.styleHint)),
-          Text(
-            value,
-            style: TextStyle(
-              fontFamily: T.monoFamily,
-              fontSize: T.fontCaption,
-              color: T.textTertiary,
+          Text('Az', style: label),
+          Text('0', style: value),
+        ],
+      ),
+    );
+
+    final e = element;
+    if (e == null) return sizing;
+
+    final az = '${e.azimuth.toStringAsFixed(1)}°';
+    final el = '${e.elevation.toStringAsFixed(1)}°';
+    final dist = e.distance.toStringAsFixed(2);
+    final spread = e.isDual ? '  Spread ${e.spread.toStringAsFixed(1)}°' : '';
+    final source = playback
+        ? 'Position of this object element, as authored in the file.'
+        : 'Position of this object element. Edit it in the Elements tab.';
+
+    Widget pair(String name, String text, String widest) => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(name, style: label),
+        const SizedBox(width: T.gapXs),
+        Stack(
+          children: [
+            hidden(Text(widest, style: value)),
+            Text(text, maxLines: 1, softWrap: false, style: value),
+          ],
+        ),
+      ],
+    );
+
+    return SizedBox(
+      width: double.infinity,
+      child: Stack(
+        children: [
+          sizing,
+          Positioned.fill(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Tooltip(
+                message: 'Az $az  El $el  Dist $dist$spread\n\n$source',
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      pair('Az', az, '-180.0°'),
+                      const SizedBox(width: T.gapSm),
+                      pair('El', el, '-90.0°'),
+                      const SizedBox(width: T.gapSm),
+                      pair('Dist', dist, '1.00'),
+                    ],
+                  ),
+                ),
+              ),
             ),
           ),
         ],
@@ -745,6 +805,31 @@ class _SceneAreaState extends ConsumerState<_SceneArea> {
             for (final el in elements)
               if (!excludedIds.contains(el.id)) el,
           ];
+    // The scene draws the monitoring target as its loudspeakers, or as
+    // headphones on the binaural target, lit by the output meters. The
+    // elements' channels are sources where that target's render takes
+    // them from: OBR's virtual loudspeakers on the binaural target, and
+    // inside the head for the elements the headphones play as plain
+    // stereo (ES-595, ES-336).
+    final monitoring = ref.watch(monitoringConfigProvider);
+    final isBinauralTarget = monitoring.isBinaural;
+    final outputLayout = isBinauralTarget
+        ? null
+        : SpeakerLayout.byName(monitoring.layout.label);
+    final Set<int> stereoOnHeadphones;
+    if (!isBinauralTarget) {
+      stereoOnHeadphones = const {};
+    } else if (mode == WorkspaceMode.playback) {
+      stereoOnHeadphones = playbackStereoOnHeadphones(
+        ref.watch(playbackSessionProvider)?.selectedMix,
+        sceneElements,
+      );
+    } else {
+      stereoOnHeadphones = creatorStereoOnHeadphones(
+        _activeSubMix(ref),
+        sceneElements,
+      );
+    }
     final colormap = ref.watch(colormapProvider);
     // Watch so the scene rebuilds when modules are toggled or params
     // change. The actual VizState map is read via the notifier below.
@@ -760,13 +845,17 @@ class _SceneAreaState extends ConsumerState<_SceneArea> {
       1 => ShDirectivity.maxRe,
       _ => ShDirectivity.inPhase,
     };
-    // Build id→slot map once, then look up per element in O(1).
+    // Engine slots, for the stats read from the engine below; the meter
+    // rows are in `elements` order, as the tick loop builds them.
     final idToSlot = <int, int>{
       for (var i = 0; i < engineOrder.length; i++) engineOrder[i]: i,
     };
+    final idToRow = <int, int>{
+      for (var i = 0; i < elements.length; i++) elements[i].id: i,
+    };
     final elementLevels = <List<double>>[];
     for (final el in sceneElements) {
-      final idx = idToSlot[el.id];
+      final idx = idToRow[el.id];
       if (idx != null && idx < metrics.sidebarMeters.length) {
         elementLevels.add(metrics.sidebarMeters[idx]);
       } else {
@@ -775,7 +864,7 @@ class _SceneAreaState extends ConsumerState<_SceneArea> {
     }
 
     // Read per-element channel stats in engine-slot order, then
-    // reorder to match the UI element list (same mapping as levels).
+    // reorder to match the UI element list.
     // Skip the FFI read + copy entirely when no consumer needs it —
     // matches the audio-thread gate so idle visualizers cost nothing
     // on either side of the FFI boundary.
@@ -823,6 +912,16 @@ class _SceneAreaState extends ConsumerState<_SceneArea> {
     // Build renderable scene from state
     final scene = SceneBridge.build(
       elements: sceneElements,
+      outputLayout: outputLayout,
+      isBinauralTarget: isBinauralTarget,
+      outputLevels: metrics.meters,
+      stereoOnHeadphones: stereoOnHeadphones,
+      // Over every element: a soloed element the mix excludes still
+      // silences the others in the engine.
+      silenced: silencedByMuteSolo(elements),
+      silencedOutputs: ref
+          .watch(outputSoloMuteProvider)
+          .silenced(monitoring.layout.channels),
       engine: engine,
       levels: elementLevels,
       stats: elementStats,
@@ -853,6 +952,12 @@ class _SceneAreaState extends ConsumerState<_SceneArea> {
       child: Stack(
         children: [
           _sceneWidget,
+          // Speaker and earcup labels, under the other overlays.
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: SceneLabelOverlay(labels: _renderer.labelsNotifier),
+            ),
+          ),
           // Axes gizmo — bottom left
           Positioned(
             left: T.gapMd,
@@ -977,7 +1082,7 @@ class _PresetBtn extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Output Panel — layout, meters, master volume
+// Output Panel — DIM toggle, output target, output meter, limiter GR bar
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _OutputPanel extends ConsumerWidget {
@@ -987,17 +1092,6 @@ class _OutputPanel extends ConsumerWidget {
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
     final metrics = ref.watch(animatedMetricsProvider);
-    final monConfig = ref.watch(monitoringConfigProvider);
-    final outCh = monConfig.layout.channels;
-    final outLevels = metrics.meters.length >= outCh
-        ? metrics.meters.sublist(0, outCh)
-        : List.filled(outCh, 0.0);
-    final outPeaks = metrics.meterPeakHolds.length >= outCh
-        ? metrics.meterPeakHolds.sublist(0, outCh)
-        : null;
-    final outClips = metrics.outputClips.length >= outCh
-        ? metrics.outputClips.sublist(0, outCh)
-        : null;
 
     return Container(
       color: T.bgBase,
@@ -1010,15 +1104,7 @@ class _OutputPanel extends ConsumerWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Row(
               children: [
-                Text(
-                  'MONITORING',
-                  style: TextStyle(
-                    fontSize: T.fontBody,
-                    color: T.textMuted,
-                    letterSpacing: 0.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+                Text('MONITORING', style: T.styleSectionLabel),
                 const Spacer(),
                 const _DimToggle(),
               ],
@@ -1041,20 +1127,9 @@ class _OutputPanel extends ConsumerWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
                 children: [
-                  Expanded(
-                    child: MultichannelMeter(
-                      levels: outLevels,
-                      peaks: outPeaks,
-                      clipped: outClips,
-                      // Labels must come from the active layout, not the
-                      // count-based default: the bars are the engine's
-                      // output bus in OAR channel order, and 8 channels
-                      // alone can't tell 5.1.2 from 7.1 (ES-552).
-                      labels: monConfig.layout.speakerLabels,
-                      onClipClear: () =>
-                          ref.read(clipClearEpochProvider.notifier).bump(),
-                    ),
-                  ),
+                  // const, so this panel's 60 Hz rebuilds skip it; it
+                  // watches the levels itself.
+                  const Expanded(child: OutputMeter()),
                   const SizedBox(width: T.gapPair),
                   _GrBar(
                     gr: metrics.limiterGr,
@@ -1075,9 +1150,9 @@ class _OutputPanel extends ConsumerWidget {
 /// Monitor DIM toggle (ES-629): a fixed −20 dB cut on the monitoring
 /// output, after the render, the limiter and the meters, so the meters
 /// beside it keep showing the program. Lives here, beside the output
-/// meters, and not on the Mix view's master strip, which is exported
-/// mix-presentation metadata; the status bar item and the D key reach
-/// it from every view.
+/// meters, and not beside the Mix view's output mix gain, which is
+/// exported mix-presentation metadata; the status bar item and the D key
+/// reach it from every view.
 class _DimToggle extends ConsumerWidget {
   const _DimToggle();
 
@@ -1102,9 +1177,10 @@ class _DimToggle extends ConsumerWidget {
 /// (ES-293): the active sub-mix's `outputMixGain` in Creator, the
 /// selected presentation's sub-mix `outputMixGainDb` in Playback.
 /// Pinned as a footer under the audio elements list whose levels it
-/// scales; editing stays in the mix editor's master strip — this is a
-/// readout, not a control. Hidden (including its separator) when no
-/// mix/presentation is active.
+/// scales, and drawn as the cards' gain line, with the name before the
+/// value, so the output gain reads as the last gain of the chain
+/// (ES-1006). Editing is in the Mix view's LAYOUTS bar. Hidden,
+/// with its separator, when no mix presentation is active.
 class _OutputMixGainReadout extends ConsumerWidget {
   const _OutputMixGainReadout();
 
@@ -1138,30 +1214,34 @@ class _OutputMixGainReadout extends ConsumerWidget {
                     'single value applies.'
               : 'Output mix gain of the selected presentation, as authored '
                     'in the file. Applied to everything in the mix.')
-        : 'Output mix gain of the active mix, applied to everything in '
-              'the mix. Edit it in the mix editor\'s master strip.';
+        : 'Output mix gain of the active mix presentation, applied to '
+              'the mix of all its elements. Edit it in the Mix tab, beside '
+              'the layouts.';
     return Column(
       children: [
         Container(height: 1, color: T.border),
+        // 15 px in, as the cards' content is: their 6 px margin, 1 px
+        // border and 8 px padding.
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
+          padding: const EdgeInsets.fromLTRB(15, 6, 15, 8),
           child: Tooltip(
             message: message,
             child: Row(
               children: [
-                Text(
-                  'OUTPUT MIX GAIN',
-                  style: TextStyle(
-                    fontSize: T.fontBody,
-                    color: T.textMuted,
-                    letterSpacing: 0.5,
-                    fontWeight: FontWeight.w600,
+                Expanded(
+                  child: ElementDetailRow(
+                    glyph: Icon(
+                      Icons.tune,
+                      size: ElementDetailRow.glyphSize,
+                      color: T.textTertiary,
+                    ),
+                    label: 'Output mix gain',
                   ),
                 ),
-                const Spacer(),
+                const SizedBox(width: T.gapPair),
                 Text(
                   gainDb == null ? '—' : '${gainDb.toStringAsFixed(1)} dB',
-                  style: T.styleValue,
+                  style: ElementDetailRow.valueStyle(),
                 ),
               ],
             ),
@@ -1173,111 +1253,28 @@ class _OutputMixGainReadout extends ConsumerWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Output Target Switcher — wrapping label-only buttons over the exposed set
+// Output Target Switcher — the exposed targets as a grid of buttons
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The exposed monitoring targets as an [OptionGrid] across the panel,
+/// the live target selected. A target with more channels than the
+/// output device is unavailable; it stays selected if it is the live
+/// one.
 class _OutputTargetSwitcher extends ConsumerWidget {
   const _OutputTargetSwitcher();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    ref.watch(themeModeProvider);
-    ref.watch(fontSizeModeProvider);
     final config = ref.watch(monitoringConfigProvider);
     final devCh = ref.watch(outputDeviceChannelsProvider);
-    return Center(
-      child: Wrap(
-        alignment: WrapAlignment.center,
-        spacing: 4,
-        runSpacing: 4,
-        children: [
-          for (final t in config.targets)
-            _SwitcherButton(
-              label: t.layout.label,
-              active: t.layout == config.activeLayout,
-              enabled: t.layout.channels <= devCh,
-              onTap: () => ref
-                  .read(monitoringConfigProvider.notifier)
-                  .setActive(t.layout),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SwitcherButton extends StatelessWidget {
-  final String label;
-  final bool active;
-  final bool enabled;
-  final VoidCallback onTap;
-  const _SwitcherButton({
-    required this.label,
-    required this.active,
-    required this.enabled,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    // Active chip: solid accent gradient + on-accent text + soft glow so the
-    // selected monitoring system is unmistakable. Inactive chips stay subtle
-    // (bgDeep fill, hairline border) to maximize the contrast between them.
-    // Disabled targets (layout channels > device channels) dim the fill,
-    // border, glow and inactive label by `dim`; the gradient stops carry
-    // their own alpha since withValues() can't reach a gradient through a
-    // single fill color. The active chip's label is not dimmed.
-    final dim = enabled ? 1.0 : 0.35;
-    final child = Container(
-      height: 24,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      decoration: BoxDecoration(
-        color: active ? null : T.bgDeep.withValues(alpha: dim),
-        gradient: active
-            ? LinearGradient(
-                colors: [
-                  T.purple.withValues(alpha: dim),
-                  T.pink.withValues(alpha: dim),
-                ],
-              )
-            : null,
-        borderRadius: BorderRadius.circular(3),
-        border: Border.all(
-          color: active ? Colors.transparent : T.border.withValues(alpha: dim),
-          width: 1,
-        ),
-        boxShadow: active
-            ? [
-                BoxShadow(
-                  color: T.purple.withValues(alpha: 0.45 * dim),
-                  blurRadius: 6,
-                ),
-              ]
-            : null,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: T.fontBody,
-          // The active chip's label is textPrimary at full strength
-          // when disabled: dimmed, accentFg on the dimmed accent fill
-          // fell to 1.29:1 in High Contrast and 1.35:1 in Light;
-          // textPrimary is at least 6.1:1 on it in every theme.
-          // Inactive chips dim as before.
-          color: enabled
-              ? (active ? T.accentFg : T.textTertiary)
-              : (active
-                    ? T.textPrimary
-                    : T.textTertiary.withValues(alpha: dim)),
-          fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-        ),
-      ),
-    );
-    if (!enabled) return IgnorePointer(child: child);
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      child: GestureDetector(onTap: onTap, child: child),
+    return OptionGrid<OarLayout>(
+      value: config.activeLayout,
+      options: [for (final t in config.targets) (t.layout, t.layout.label)],
+      unavailable: {
+        for (final t in config.targets)
+          if (t.layout.channels > devCh) t.layout,
+      },
+      onChanged: ref.read(monitoringConfigProvider.notifier).setActive,
     );
   }
 }
@@ -1479,16 +1476,15 @@ class _LiveLoudnessGroup extends ConsumerWidget {
       children: [
         // Names the group: these are live monitoring meters, not the
         // programme's measurement, which the Loudness Report button at
-        // the bar's other end leads to. Not const: the chip reads T.*
-        // in build and a const instance would skip theme and font
-        // changes, because its parent never rebuilds it.
+        // the bar's other end leads to. Its colours are read here, in a
+        // build that watches the theme.
         Tooltip(
           message:
               'Live meters of the monitoring render: what has played since '
               'the last stop, through the monitoring limiter. Not the '
               'programme measurement and not written to the IAMF file.',
           preferBelow: false,
-          child: _LabelChip(label: 'LIVE', emphasized: true),
+          child: StatusTag('LIVE', color: T.textSecondary, fill: T.bgSelected),
         ),
         const SizedBox(width: 12),
         _LoudnessValue(
@@ -1531,8 +1527,8 @@ class _LiveLoudnessGroup extends ConsumerWidget {
 /// The Loudness Report button at the bar's right end (ES-615). The bar
 /// shows no programme figures: the report measures each tagged layout
 /// separately and the Mix view's LAYOUTS bar carries those per layout.
-/// Greyed in Playback, like the menu item: there is no offline measure
-/// path for a loaded IAMF file (ES-520).
+/// In Playback the report measures the loaded file and compares it with
+/// the loudness the file stores (ES-520).
 class _LoudnessReportButton extends ConsumerWidget {
   const _LoudnessReportButton();
 
@@ -1546,42 +1542,14 @@ class _LoudnessReportButton extends ConsumerWidget {
           ? 'Measure the programme offline, per layout. The report\'s '
                 'figures are what the export writes into the IAMF file; the '
                 'values here are live monitoring meters.'
-          : 'The Loudness Report measures a session\'s sources; it is not '
-                'available for a loaded IAMF file.',
+          : 'Measure the loaded file offline, per layout, and compare '
+                'with the loudness stored in it; the values here are live '
+                'monitoring meters.',
       preferBelow: false,
       child: AppButton(
         label: 'Loudness Report',
         size: AppButtonSize.compact,
-        onPressed: isCreator ? () => LoudnessReportDialog.show(context) : null,
-      ),
-    );
-  }
-}
-
-/// The small label chip of a [_LoudnessValue]; [emphasized] for the
-/// group's LIVE tag, which reads in the secondary text colour so it
-/// stands out from the value labels without claiming a spec colour.
-class _LabelChip extends StatelessWidget {
-  final String label;
-  final bool emphasized;
-  const _LabelChip({required this.label, this.emphasized = false});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-      decoration: BoxDecoration(
-        color: emphasized ? T.bgSelected : T.bgControls,
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: T.fontCaption,
-          fontWeight: FontWeight.w700,
-          color: emphasized ? T.textSecondary : T.textTertiary,
-          letterSpacing: 0.3,
-        ),
+        onPressed: () => LoudnessReportDialog.show(context),
       ),
     );
   }
@@ -1619,7 +1587,7 @@ class _LoudnessValue extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.baseline,
       textBaseline: TextBaseline.alphabetic,
       children: [
-        _LabelChip(label: label),
+        StatusTag(label),
         const SizedBox(width: T.gapXs),
         Text(
           _valueStr,

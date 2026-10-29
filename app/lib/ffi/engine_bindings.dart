@@ -376,6 +376,11 @@ typedef MixRendererSetObjectPositionDart =
       double,
     );
 
+typedef MixRendererSetElementChannelOrderNative =
+    Void Function(Pointer, Uint32, Uint32);
+typedef MixRendererSetElementChannelOrderDart =
+    void Function(Pointer, int, int);
+
 typedef MixRendererSetOutputGainNative = Void Function(Pointer, Float);
 typedef MixRendererSetOutputGainDart = void Function(Pointer, double);
 
@@ -408,6 +413,51 @@ typedef MixRendererElementClipStatsDart =
 
 typedef MixRendererDestroyNative = Void Function(Pointer);
 typedef MixRendererDestroyDart = void Function(Pointer);
+
+// ── Offline IAMF measurer (engine.h) ───────────────────────────────
+
+// eclipsa_studio_iamf_measurer_t* eclipsa_studio_iamf_measurer_create(
+//     const char* path, uint32_t buffer_size, uint32_t layout);
+typedef IamfMeasurerCreateNative =
+    Pointer Function(Pointer<ffi_pkg.Utf8>, Uint32, Uint32);
+typedef IamfMeasurerCreateDart =
+    Pointer Function(Pointer<ffi_pkg.Utf8>, int, int);
+
+// int32_t eclipsa_studio_iamf_measurer_include_element(
+//     eclipsa_studio_iamf_measurer_t* m, uint32_t audio_element_id,
+//     float mix_gain_db, uint32_t headphones_mode,
+//     uint32_t binaural_profile);
+typedef IamfMeasurerIncludeElementNative =
+    Int32 Function(Pointer, Uint32, Float, Uint32, Uint32);
+typedef IamfMeasurerIncludeElementDart =
+    int Function(Pointer, int, double, int, int);
+
+typedef IamfMeasurerSetOutputGainNative = Void Function(Pointer, Float);
+typedef IamfMeasurerSetOutputGainDart = void Function(Pointer, double);
+
+typedef IamfMeasurerMeasureNative =
+    Int32 Function(Pointer, Pointer<Float>, Pointer<Float>, Pointer<Float>);
+typedef IamfMeasurerMeasureDart =
+    int Function(Pointer, Pointer<Float>, Pointer<Float>, Pointer<Float>);
+
+typedef IamfMeasurerTraceLenNative = Uint32 Function(Pointer, Uint32);
+typedef IamfMeasurerTraceLenDart = int Function(Pointer, int);
+
+typedef IamfMeasurerCopyTraceNative =
+    Uint32 Function(Pointer, Uint32, Pointer<Float>, Uint32);
+typedef IamfMeasurerCopyTraceDart =
+    int Function(Pointer, int, Pointer<Float>, int);
+
+typedef IamfMeasurerLoudnessRangeNative =
+    Int32 Function(Pointer, Pointer<Float>, Pointer<Int32>);
+typedef IamfMeasurerLoudnessRangeDart =
+    int Function(Pointer, Pointer<Float>, Pointer<Int32>);
+
+typedef IamfMeasurerLastErrorNative = Pointer<ffi_pkg.Utf8> Function(Pointer);
+typedef IamfMeasurerLastErrorDart = Pointer<ffi_pkg.Utf8> Function(Pointer);
+
+typedef IamfMeasurerDestroyNative = Void Function(Pointer);
+typedef IamfMeasurerDestroyDart = void Function(Pointer);
 
 // ── Waveform peaks (waveform/peak_compute.h) ───────────────────────
 
@@ -610,6 +660,12 @@ class EngineBindings {
         MixRendererSetObjectPositionDart
       >('eclipsa_studio_mix_renderer_set_object_position');
 
+  late final mixRendererSetElementChannelOrder = lib
+      .lookupFunction<
+        MixRendererSetElementChannelOrderNative,
+        MixRendererSetElementChannelOrderDart
+      >('eclipsa_studio_mix_renderer_set_element_channel_order');
+
   late final mixRendererSetOutputGain = lib
       .lookupFunction<
         MixRendererSetOutputGainNative,
@@ -646,6 +702,56 @@ class EngineBindings {
   late final mixRendererDestroy = lib
       .lookupFunction<MixRendererDestroyNative, MixRendererDestroyDart>(
         'eclipsa_studio_mix_renderer_destroy',
+      );
+
+  // ── Offline IAMF measurer ────────────────────────────────────────
+
+  late final iamfMeasurerCreate = lib
+      .lookupFunction<IamfMeasurerCreateNative, IamfMeasurerCreateDart>(
+        'eclipsa_studio_iamf_measurer_create',
+      );
+
+  late final iamfMeasurerIncludeElement = lib
+      .lookupFunction<
+        IamfMeasurerIncludeElementNative,
+        IamfMeasurerIncludeElementDart
+      >('eclipsa_studio_iamf_measurer_include_element');
+
+  late final iamfMeasurerSetOutputGain = lib
+      .lookupFunction<
+        IamfMeasurerSetOutputGainNative,
+        IamfMeasurerSetOutputGainDart
+      >('eclipsa_studio_iamf_measurer_set_output_gain');
+
+  late final iamfMeasurerMeasure = lib
+      .lookupFunction<IamfMeasurerMeasureNative, IamfMeasurerMeasureDart>(
+        'eclipsa_studio_iamf_measurer_measure',
+      );
+
+  late final iamfMeasurerTraceLen = lib
+      .lookupFunction<IamfMeasurerTraceLenNative, IamfMeasurerTraceLenDart>(
+        'eclipsa_studio_iamf_measurer_trace_len',
+      );
+
+  late final iamfMeasurerCopyTrace = lib
+      .lookupFunction<IamfMeasurerCopyTraceNative, IamfMeasurerCopyTraceDart>(
+        'eclipsa_studio_iamf_measurer_copy_trace',
+      );
+
+  late final iamfMeasurerLoudnessRange = lib
+      .lookupFunction<
+        IamfMeasurerLoudnessRangeNative,
+        IamfMeasurerLoudnessRangeDart
+      >('eclipsa_studio_iamf_measurer_loudness_range');
+
+  late final iamfMeasurerLastError = lib
+      .lookupFunction<IamfMeasurerLastErrorNative, IamfMeasurerLastErrorDart>(
+        'eclipsa_studio_iamf_measurer_last_error',
+      );
+
+  late final iamfMeasurerDestroy = lib
+      .lookupFunction<IamfMeasurerDestroyNative, IamfMeasurerDestroyDart>(
+        'eclipsa_studio_iamf_measurer_destroy',
       );
 
   // ── Waveform peaks ───────────────────────────────────────────────

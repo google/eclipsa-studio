@@ -21,12 +21,15 @@
 //  * `OarLayout.speakerLabels` — feeds the Monitoring output meter,
 //    the routing matrix rows, and the Settings target summaries. All
 //    of these are positional against the engine's output buffer, so a
-//    wrong order mislabels real channels (the old hand-kept table had
-//    9.1.6 wides-first; OAR renders L60/R60 first, rears at 4–5).
+//    wrong order mislabels real channels (before ES-960 the hand-kept
+//    table had 9.1.6 wides-first while OAR rendered L60/R60 first with
+//    the rears at 4–5; 9.1.6 is now reordered by the engine).
 //  * `channelLabels` — the MultichannelMeter default when a call site
-//    passes no labels (the mix editor's MASTER strip). The old table
-//    was film order (`L C R Ls Rs LFE`), which mislabeled 5 of 6 bars
-//    on a 5.1 monitoring bus.
+//    shows labels and passes none. No app call site does: the output
+//    meter passes `OarLayout.meterLabels`, and the Mix view's strip
+//    meters draw no labels. The old table was film order
+//    (`L C R Ls Rs LFE`), which mislabeled 5 of 6 bars on a 5.1
+//    monitoring bus.
 
 import 'package:eclipsa_studio/meters/multichannel_meter_painter.dart';
 import 'package:eclipsa_studio/renderer/speaker_layout.dart';
@@ -68,31 +71,61 @@ void main() {
       ]);
     });
 
-    test('7.1: L30 R30 C LFE L90 R90 L135 R135', () {
+    test('7.1: L30 R30 C LFE L90 R90 L135 R135 (side pair Lss/Rss)', () {
       expect(OarLayout.layout71.speakerLabels, [
-        'L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', //
+        'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', //
       ]);
     });
 
     test('7.1.2 (count-ambiguous vs 5.1.4): one height pair', () {
       expect(OarLayout.layout712.speakerLabels, [
-        'L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', 'Ltf', 'Rtf', //
+        'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', //
       ]);
     });
 
     test('7.1.4: L30 R30 C LFE L90 R90 L135 R135 UL45 UR45 UL135 UR135', () {
       expect(OarLayout.layout714.speakerLabels, [
-        'L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', //
+        'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', //
         'Ltf', 'Rtf', 'Ltr', 'Rtr',
       ]);
     });
 
-    test('9.1.6: L60 R60 C LFE1 L135 R135 L30 R30 L90 R90 '
-        'UL45 UR45 UL135 UR135 UL90 UR90', () {
+    test('9.1.6 (alt order, ES-960): L30 R30 C LFE L60 R60 L90 R90 L135 '
+        'R135 UL45 UR45 UL90 UR90 UL135 UR135', () {
+      // The Settings summary shows the familiar name with the IAMF
+      // name; the output meter and the routing matrix cells show the
+      // familiar name alone, with the display form and the full name in
+      // the cell tooltips, by channel index.
       expect(OarLayout.layout916.speakerLabels, [
-        'L', 'R', 'C', 'LFE', 'Lrs', 'Rrs', 'Lc', 'Rc', 'Lss', 'Rss', //
-        'Ltf', 'Rtf', 'Ltr', 'Rtr', 'Ltss', 'Rtss',
+        'L (FLc)', 'R (FRc)', 'C (FC)', 'LFE', 'Lw (FL)', 'Rw (FR)', //
+        'Lss (SiL)', 'Rss (SiR)', 'Lrs (BL)', 'Rrs (BR)', 'Ltf (TpFL)',
+        'Rtf (TpFR)', 'Lts (TpSiL)', 'Rts (TpSiR)', 'Ltr (TpBL)',
+        'Rtr (TpBR)',
       ]);
+      expect(OarLayout.layout916.meterLabels, [
+        'L', 'R', 'C', 'LFE', 'Lw', 'Rw', 'Lss', 'Rss', 'Lrs', 'Rrs', //
+        'Ltf', 'Rtf', 'Lts', 'Rts', 'Ltr', 'Rtr',
+      ]);
+      final tips = OarLayout.layout916.channelTooltips!;
+      expect(tips[0], 'L (IAMF bitstream FLc)');
+      expect(tips[3], isNull);
+      expect(tips[12], 'Lts (IAMF bitstream TpSiL)');
+      expect(OarLayout.layout714.channelTooltips, isNull);
+    });
+
+    test('the 9.1.6 meter labels fit the routing matrix cell', () {
+      // The routing matrix draws each label in a 28 px cell at
+      // T.fontMeter; JetBrains Mono advances 0.6 em, 9.2 px at Large.
+      for (final label in OarLayout.layout916.meterLabels) {
+        expect(label.length * 0.6 * 9.2, lessThanOrEqualTo(28), reason: label);
+      }
+    });
+
+    test('every other layout meters with its speaker labels', () {
+      for (final layout in OarLayout.values) {
+        if (layout == OarLayout.layout916) continue;
+        expect(layout.meterLabels, same(layout.speakerLabels));
+      }
     });
   });
 
@@ -137,7 +170,9 @@ void main() {
     List<double> widths(List<String> labels, double px) => [
       for (final l in labels) l.length * 0.6 * px,
     ];
-    final labels916 = OarLayout.layout916.speakerLabels;
+    // The output meter's 9.1.6 labels are the familiar names alone
+    // (ES-960), one to four characters (Lts is 19.2 px at Medium).
+    final labels916 = OarLayout.layout916.meterLabels;
 
     test('9.1.6 at Small: one rotated row (a 9.0 px line fits)', () {
       expect(
@@ -161,14 +196,28 @@ void main() {
       );
     });
 
-    test('9.1.6 at Large: two rotated rows', () {
+    test('9.1.6 with the display form takes two rotated rows at Medium '
+        'and Large', () {
+      for (final px in const [6.8, 8.0, 9.2]) {
+        final layout = meterLabelLayout(
+          widths: widths(OarLayout.layout916.speakerLabels, px),
+          lineHeight: 1.32 * px,
+          barPitch: pitch916,
+        );
+        expect(layout.mode, MeterLabelMode.rotated, reason: '$px px');
+        if (px > 6.8) expect(layout.rows, 2, reason: '$px px');
+      }
+    });
+
+    test('9.1.6 at Large: two horizontal rows (three-letter labels, '
+        '16.6 px, share a 19.6 px double pitch)', () {
       expect(
         meterLabelLayout(
           widths: widths(labels916, 9.2),
           lineHeight: 1.32 * 9.2,
           barPitch: pitch916,
         ),
-        (mode: MeterLabelMode.rotated, rows: 2),
+        (mode: MeterLabelMode.horizontal, rows: 2),
       );
     });
 
@@ -231,13 +280,15 @@ void main() {
       // meters, routing matrix, and scene. (SpeakerLayout's mono and
       // 3.1.2 have no OarLayout counterpart and are not monitoring
       // targets; binaural maps to the stereo geometry by design.)
+      // 9.1.6's speakerLabels add the IAMF name in brackets; the scene
+      // and the meter carry the familiar name alone (meterLabels).
       for (final layout in OarLayout.values) {
         final scene = SpeakerLayout.byName(layout.label);
         expect(scene, isNotNull, reason: 'no scene layout: ${layout.label}');
         expect(
           [for (final s in scene!.speakers) s.label],
-          layout.speakerLabels,
-          reason: '${layout.label} scene labels must match speakerLabels',
+          layout.meterLabels,
+          reason: '${layout.label} scene labels must match meterLabels',
         );
       }
     });

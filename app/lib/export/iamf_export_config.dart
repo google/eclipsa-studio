@@ -121,7 +121,8 @@ class IamfExportConfig {
   /// sourceRate → [sampleRate] before taking the max). When
   /// [paddedFrames] > this value, iamf-tools `samples_to_trim_at_end`
   /// = paddedFrames - longestSourceFrames — the same value for every
-  /// substream. 0 disables the shared-trim calculation. For a
+  /// substream. When 0, the trim is 0 and iamf-tools pads the final
+  /// frame and trims the pad itself. For a
   /// video-clamped MP4 export ([isPartialRange]) this is the clamped
   /// length, not the true longest source — see [effectiveExportFrames].
   final int longestSourceFrames;
@@ -224,6 +225,10 @@ class ExportIssueCode {
   static const profileTooManySubMixes = 'PROFILE_TOO_MANY_SUBMIXES';
   static const profileTooManyElementRefs = 'PROFILE_TOO_MANY_ELEMENT_REFS';
   static const profileMixedTypesNotAllowed = 'PROFILE_MIXED_TYPES_NOT_ALLOWED';
+  static const profileObjectMixedWithOtherTypes =
+      'PROFILE_OBJECT_MIXED_WITH_OTHER_TYPES';
+  static const profileFirstMixNotObjectOnly =
+      'PROFILE_FIRST_MIX_NOT_OBJECT_ONLY';
   static const profileElementLayoutNotAllowed =
       'PROFILE_ELEMENT_LAYOUT_NOT_ALLOWED';
   static const profileMixLayoutNotAllowed = 'PROFILE_MIX_LAYOUT_NOT_ALLOWED';

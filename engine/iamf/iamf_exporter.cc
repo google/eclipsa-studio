@@ -17,7 +17,6 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
-#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,24 +40,6 @@ namespace eclipsa_studio {
 
 namespace {
 
-// Chunk-log a possibly multi-line, possibly long message line by line so
-// nothing is silently truncated at the log ring's slot size.
-void LogChunkedLines(EclipsaStudioLogLevel level, const std::string& text) {
-  size_t pos = 0;
-  while (pos < text.size()) {
-    const size_t nl = text.find('\n', pos);
-    const size_t end = (nl == std::string::npos) ? text.size() : nl;
-    const size_t len = end - pos;
-    char line_buf[320];
-    const size_t n = std::min<size_t>(len, sizeof(line_buf) - 1);
-    std::memcpy(line_buf, text.data() + pos, n);
-    line_buf[n] = '\0';
-    engine_log(level, "iamf", line_buf);
-    if (nl == std::string::npos) break;
-    pos = nl + 1;
-  }
-}
-
 // Parses a UserMetadata textproto, logging detailed per-line errors on
 // failure.
 bool ParseUserMetadataOrLog(const std::string& config_textproto,
@@ -69,15 +50,10 @@ bool ParseUserMetadataOrLog(const std::string& config_textproto,
     std::string errors;
     void RecordError(int line, google::protobuf::io::ColumnNumber col,
                      absl::string_view msg) override {
-      // %.*s uses `int` for the length; cap via size_t min to stay
-      // safely within INT_MAX before narrowing. The chunked log below
-      // re-reads `errors` so nothing is truncated silently.
-      const size_t msg_len = std::min<size_t>(msg.size(), 1024);
-      char b[1280];
-      snprintf(b, sizeof(b), "line %d col %d: %.*s\n", line + 1,
-               static_cast<int>(col) + 1, static_cast<int>(msg_len),
-               msg.data());
-      errors += b;
+      errors += "line " + std::to_string(line + 1) + " col " +
+                std::to_string(col + 1) + ": ";
+      errors.append(msg.data(), msg.size());
+      errors += '\n';
     }
     void RecordWarning(int, google::protobuf::io::ColumnNumber,
                        absl::string_view) override {}
@@ -88,8 +64,34 @@ bool ParseUserMetadataOrLog(const std::string& config_textproto,
   if (parser.ParseFromString(config_textproto, out)) return true;
   engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
              "failed to parse UserMetadata textproto");
-  LogChunkedLines(ECLIPSA_STUDIO_LOG_ERROR, collector.errors);
+  engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf", collector.errors);
   return false;
+}
+
+// Parses `config_textproto` into `*user_metadata` and derives one
+// pass-through element per audio_frame_metadata entry into `*elements`:
+// input `input_wav_dir/<wav_filename>`, no gain, routing, resample or
+// pad. Returns 0, -1 (empty config) or -10 (textproto parse failure).
+int32_t ParseWavDirRequest(const std::string& config_textproto,
+                           const std::string& input_wav_dir,
+                           iamf_tools_cli_proto::UserMetadata* user_metadata,
+                           std::vector<IamfExporter::PushElement>* elements) {
+  if (config_textproto.empty()) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf", "EncodePush: empty config");
+    return -1;
+  }
+  if (!ParseUserMetadataOrLog(config_textproto, user_metadata)) {
+    return -10;
+  }
+  elements->reserve(
+      static_cast<size_t>(user_metadata->audio_frame_metadata_size()));
+  for (const auto& afm : user_metadata->audio_frame_metadata()) {
+    IamfExporter::PushElement element;
+    element.wav_basename = afm.wav_filename();
+    element.stream.input_wav_path = input_wav_dir + "/" + afm.wav_filename();
+    elements->push_back(std::move(element));
+  }
+  return 0;
 }
 
 }  // namespace
@@ -103,27 +105,29 @@ int32_t IamfExporter::EncodePushFromWavDir(const std::string& config_textproto,
   // No begin/run split on this path — arming the request here is it.
   ResetForNewRequest();
 
-  if (config_textproto.empty()) {
-    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf", "EncodePush: empty config");
-    return -1;
-  }
   iamf_tools_cli_proto::UserMetadata user_metadata;
-  if (!ParseUserMetadataOrLog(config_textproto, &user_metadata)) {
-    return -10;
-  }
   std::vector<PushElement> elements;
-  elements.reserve(
-      static_cast<size_t>(user_metadata.audio_frame_metadata_size()));
-  for (const auto& afm : user_metadata.audio_frame_metadata()) {
-    PushElement element;
-    element.wav_basename = afm.wav_filename();
-    element.stream.input_wav_path = input_wav_dir + "/" + afm.wav_filename();
-    elements.push_back(std::move(element));
-  }
+  const int32_t rc = ParseWavDirRequest(config_textproto, input_wav_dir,
+                                        &user_metadata, &elements);
+  if (rc != 0) return rc;
   const std::string output_path =
       output_dir + "/" +
       user_metadata.test_vector_metadata().file_name_prefix() + ".iamf";
   return EncodePushParsed(user_metadata, output_path, elements);
+}
+
+int32_t IamfExporter::EncodePushFromWavDirToFile(
+    const std::string& config_textproto, const std::string& input_wav_dir,
+    const std::string& output_iamf_path) {
+  // No begin/run split on this path — arming the request here is it.
+  ResetForNewRequest();
+
+  iamf_tools_cli_proto::UserMetadata user_metadata;
+  std::vector<PushElement> elements;
+  const int32_t rc = ParseWavDirRequest(config_textproto, input_wav_dir,
+                                        &user_metadata, &elements);
+  if (rc != 0) return rc;
+  return EncodePushParsed(user_metadata, output_iamf_path, elements);
 }
 
 int32_t IamfExporter::EncodePush(const std::string& config_textproto,
@@ -363,8 +367,8 @@ int32_t IamfExporter::EncodePushParsed(
   if (!encoder_or.ok()) {
     engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
                "EncodePush: encoder create failed:");
-    LogChunkedLines(ECLIPSA_STUDIO_LOG_ERROR,
-                    std::string(encoder_or.status().message()));
+    engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
+                     encoder_or.status().message());
     return -21;
   }
   std::unique_ptr<iamf_tools::api::IamfEncoderInterface> encoder =
@@ -469,8 +473,7 @@ int32_t IamfExporter::EncodePushParsed(
       if (!status.ok()) {
         engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
                    "EncodePush: Encode failed:");
-        LogChunkedLines(ECLIPSA_STUDIO_LOG_ERROR,
-                        std::string(status.message()));
+        engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf", status.message());
         abort_encode();
         return -22;
       }
@@ -481,7 +484,7 @@ int32_t IamfExporter::EncodePushParsed(
         if (!fin.ok()) {
           engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
                      "EncodePush: FinalizeEncode failed:");
-          LogChunkedLines(ECLIPSA_STUDIO_LOG_ERROR, std::string(fin.message()));
+          engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf", fin.message());
           abort_encode();
           return -24;
         }
@@ -502,7 +505,7 @@ int32_t IamfExporter::EncodePushParsed(
     if (!out.ok()) {
       engine_log(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
                  "EncodePush: OutputTemporalUnit failed:");
-      LogChunkedLines(ECLIPSA_STUDIO_LOG_ERROR, std::string(out.message()));
+      engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf", out.message());
       abort_encode();
       return -23;
     }

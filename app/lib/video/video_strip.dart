@@ -56,9 +56,9 @@ class VideoStripAction {
 ///
 /// - `recessed` and `outlined` ([ChromeStyleGround.flatGround]): the
 ///   body sits on `videoBg` (`bgBase`) with no surface of its own. Laid
-///   over the picture the header has no fill and no hairline;
-///   collapsed it is a `bgSurface` bar with a 0.5 px `border` hairline
-///   along its bottom.
+///   over the picture the header has no fill and no border;
+///   collapsed it is a `bgSurface` bar with a 1 px `border` line along
+///   its bottom, as thick as the panel borders below it.
 /// - `beveled` (Dark): one [height] surface, a radial `videoHi` to
 ///   `videoBg` gradient with a 1 px white at 17% along its top; the
 ///   header in `textMuted`. There is no drag pill: the strip's bottom
@@ -153,7 +153,7 @@ class VideoStrip extends StatelessWidget {
   /// picture.
   ///
   /// [overlay] is the header laid over the body: it drops the fill and
-  /// the hairline so the picture reads through. Only the flat-ground
+  /// the border so the picture reads through. Only the flat-ground
   /// styles' collapsed bar keeps them; beveled and raised collapse onto
   /// their own surface, which is the ground there.
   ///
@@ -167,7 +167,7 @@ class VideoStrip extends StatelessWidget {
         ? null
         : BoxDecoration(
             color: T.bgSurface,
-            border: Border(bottom: BorderSide(color: T.border, width: 0.5)),
+            border: Border(bottom: BorderSide(color: T.border)),
           ),
     child: Row(
       children: [

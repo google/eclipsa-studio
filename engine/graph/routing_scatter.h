@@ -17,6 +17,7 @@
 #ifndef ECLIPSA_STUDIO_GRAPH_ROUTING_SCATTER_H_
 #define ECLIPSA_STUDIO_GRAPH_ROUTING_SCATTER_H_
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -50,6 +51,43 @@ inline void scatter_routed(float* out, const float* rendered,
         out[static_cast<size_t>(f) * channels + dst] += src[f];
       }
     }
+  }
+}
+
+/// scatter_routed() with a ramped gain on each channel of `rendered`, for
+/// the output-channel solo and mute of the monitoring target; AudioGraph
+/// passes the block in monitoring channel order. Bit `c` of
+/// `silenced` set = channel `c` ramps to silence; clear = to unity.
+/// `gains[c]` (length `rch`) is the channel's gain at the start of the
+/// block; it moves toward its target by at most `step` per frame, and the
+/// value reached is written back for the next block. A channel at 0 that
+/// stays silenced is skipped. `out` and `routing` as in scatter_routed();
+/// `rch` must not exceed 64.
+inline void scatter_routed_ramped(float* out, const float* rendered,
+                                  const uint64_t* routing, uint64_t silenced,
+                                  float* gains, float step, uint32_t rch,
+                                  uint32_t fr, uint32_t channels) {
+  for (uint32_t c = 0; c < rch; ++c) {
+    const float target = ((silenced >> c) & 1u) != 0 ? 0.0f : 1.0f;
+    float g = gains[c];
+    if (g == 0.0f && target == 0.0f) continue;
+    const uint64_t routed = routing[c];
+    const float* src = rendered + static_cast<size_t>(c) * fr;
+    for (uint32_t f = 0; f < fr; ++f) {
+      if (g < target) {
+        g = std::min(g + step, target);
+      } else if (g > target) {
+        g = std::max(g - step, target);
+      }
+      const float v = src[f] * g;
+      uint64_t mask = routed;
+      while (mask) {
+        const uint32_t dst = static_cast<uint32_t>(std::countr_zero(mask));
+        mask &= mask - 1;
+        if (dst < channels) out[static_cast<size_t>(f) * channels + dst] += v;
+      }
+    }
+    gains[c] = g;
   }
 }
 

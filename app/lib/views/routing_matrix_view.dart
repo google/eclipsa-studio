@@ -543,20 +543,29 @@ class _RoutingMatrixState extends ConsumerState<_RoutingMatrix> {
     final out = <Widget>[];
     for (var i = 0; i < targets.length; i++) {
       if (i > 0) out.add(const SizedBox(width: _gap));
-      for (final label in targets[i].layout.speakerLabels) {
+      // The cell holds the short label (the familiar name at 9.1.6,
+      // ES-960); a tooltip names the IAMF bitstream channel, looked up by
+      // channel index.
+      final labels = targets[i].layout.meterLabels;
+      final tooltips = targets[i].layout.channelTooltips;
+      for (var c = 0; c < labels.length; c++) {
+        final label = Text(
+          labels[c],
+          maxLines: 1,
+          softWrap: false,
+          style: TextStyle(
+            fontFamily: T.monoFamily,
+            fontSize: T.fontMeter,
+            color: T.textTertiary,
+          ),
+        );
+        final tip = tooltips?[c];
         out.add(
           SizedBox(
             width: _cellW,
             height: _chLabelH,
             child: Center(
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontFamily: T.monoFamily,
-                  fontSize: T.fontMeter,
-                  color: T.textTertiary,
-                ),
-              ),
+              child: tip == null ? label : Tooltip(message: tip, child: label),
             ),
           ),
         );
@@ -823,6 +832,14 @@ class _EditableOutputLabelState extends ConsumerState<_EditableOutputLabel> {
   late final FocusNode _focus;
   bool _focused = false;
 
+  /// The output device and the stored label when the field gained focus.
+  /// The labels are saved per device, so text typed for one device must
+  /// not be committed after a switch to another (ES-845). The label check
+  /// covers a field focused after the device index changed but before
+  /// that device's labels arrived.
+  String? _editDevice;
+  String _editBase = '';
+
   @override
   void initState() {
     super.initState();
@@ -831,10 +848,14 @@ class _EditableOutputLabelState extends ConsumerState<_EditableOutputLabel> {
     );
     _focus = FocusNode()
       ..addListener(() {
-        if (_focus.hasFocus != _focused) {
-          setState(() => _focused = _focus.hasFocus);
+        if (_focus.hasFocus == _focused) return;
+        setState(() => _focused = _focus.hasFocus);
+        if (_focused) {
+          _editDevice = _deviceName();
+          _editBase = _storedLabel();
+        } else {
+          _commit();
         }
-        if (!_focus.hasFocus) _commit();
       });
   }
 
@@ -845,7 +866,25 @@ class _EditableOutputLabelState extends ConsumerState<_EditableOutputLabel> {
     super.dispose();
   }
 
+  String? _deviceName() => selectedOutputDeviceName(ref);
+
+  String _storedLabel() => ref.read(outputLabelsProvider)[widget.channel] ?? '';
+
+  /// Writes the field's text as the channel's label. Text equal to the
+  /// stored label (setLabel trims) writes nothing. When the device or the
+  /// stored label changed since the field gained focus, the text belongs
+  /// to the previous state: the field shows the stored label again and
+  /// nothing is written.
   void _commit() {
+    final stored = _storedLabel();
+    if (_ctrl.text.trim() == stored) {
+      if (_ctrl.text != stored) _ctrl.text = stored;
+      return;
+    }
+    if (_deviceName() != _editDevice || stored != _editBase) {
+      _ctrl.text = stored;
+      return;
+    }
     ref
         .read(outputLabelsProvider.notifier)
         .setLabel(widget.channel, _ctrl.text);

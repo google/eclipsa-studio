@@ -18,16 +18,44 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <numbers>
 #include <string>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "io/wav_stream.h"
+#include "meters/bs1770_weights.h"
 #include "renderer/oar_renderer.h"
 #include "test/test_output_helper.h"
 #include "test/test_wav_helper.h"
 
+// Befriended by AudioGraph: stalls or releases an element's disk-thread
+// stream (WavStream::set_stalled_for_testing()).
+class AudioGraphTestPeer {
+ public:
+  static void StallWavStream(AudioGraph& graph, uint32_t id, bool stalled) {
+    ElementChain* chain = graph.find_element(id);
+    ASSERT_NE(chain, nullptr);
+    ASSERT_NE(chain->wav_stream, nullptr);
+    chain->wav_stream->set_stalled_for_testing(stalled);
+  }
+};
+
 namespace {
+
+// Runs `blocks` process() calls, waiting before each until the WAV
+// elements' disk-thread rings can serve it, as the time between device
+// callbacks would allow (AudioGraph::wait_for_wav_streams). A WAV
+// element holds 4096 frames when added, 8 blocks of 512, and a seek
+// holds the program until the disk thread has refilled.
+void RunBlocks(AudioGraph& graph, int blocks, float* out, uint32_t frames,
+               uint32_t channels) {
+  for (int i = 0; i < blocks; ++i) {
+    EXPECT_TRUE(graph.wait_for_wav_streams(frames));
+    graph.process(out, frames, channels);
+  }
+}
 
 class AudioGraphTest : public ::testing::Test {
  protected:
@@ -133,9 +161,7 @@ TEST_F(AudioGraphTest, ResampledElementProducesMeterEnergy) {
   float out[kFrames * kChannels] = {};
   // Drive a few callbacks so the resampler's LPF reaches steady state
   // before we sample meter values.
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 }
 
@@ -154,9 +180,7 @@ TEST_F(AudioGraphTest, ResampledSeekRestartsAtRequestedFrame) {
 
   // Seek to 1 second (48000 engine frames → 44100 WAV frames).
   graph_.seek(48000);
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 }
 
@@ -178,9 +202,7 @@ TEST_F(AudioGraphTest, SetSampleRateRetargetsResampler) {
   constexpr uint32_t kFrames = 512, kChannels = 2;
   float out[kFrames * kChannels] = {};
   graph_.seek(144000);  // 1.5 s at 96 kHz.
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 }
 
@@ -202,17 +224,13 @@ TEST_F(AudioGraphTest, SetSampleRateMatchingWavDropsResampler) {
 
   // Positive control: in-bounds seek still produces audio.
   graph_.seek(66150);  // 1.5 s at 44.1 kHz.
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 
   // Past EOF at the native rate: silence.
   graph_.seek(90000);
   graph_.reset_meters();
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_LT(graph_.meter_state()->elements[0].peak[0], 0.001f);
 }
 
@@ -233,21 +251,21 @@ TEST_F(AudioGraphTest, SetSampleRateCreatesResamplerForMatchedChain) {
   constexpr uint32_t kFrames = 512, kChannels = 2;
   float out[kFrames * kChannels] = {};
   graph_.seek(144000);  // 1.5 s at 96 kHz.
-  for (int i = 0; i < 4; ++i) {
-    graph_.process(out, kFrames, kChannels);
-  }
+  RunBlocks(graph_, 4, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 }
 
 // Regression for the 96 kHz device / 48 kHz file click train: the
-// resample path consumes rin.frames after the WAV read, and WavReader's
-// zero-request early return used to leave a stale count behind —
-// re-feeding already-consumed samples into the resampler on every
-// callback where required_input() returned 0 (libsamplerate buffers the
-// overfeed headroom internally, so that happens every few callbacks).
-// Renders the full chain (WAV → resampler → OAR → output) and asserts
-// the output is a continuous, pitch-correct sine: before the fix this
-// measured ~185 discontinuities per second.
+// resample path passes rin.frames to the resampler after the WAV read,
+// so the read must set rin.frames on every call. WavStream::read sets
+// out.frames = 0 on a zero-frame request. A read that returns without
+// setting it leaves a stale count, which re-feeds already-consumed
+// samples into the resampler on every callback where required_input()
+// returns 0 (libsamplerate buffers the overfeed headroom internally, so
+// that happens every few callbacks). The test renders the full chain
+// (WavStream → resampler → OAR → output) and asserts the output is a
+// continuous, pitch-correct sine; with a stale count the output
+// measured about 185 discontinuities per second.
 TEST_F(AudioGraphTest, SetSampleRateResampledOutputIsContinuous) {
   const std::string sine_12ch = dir_ + "/graph_sine_12ch_48k_4s.wav";
   ASSERT_TRUE(test_wav::write_sine(sine_12ch, 12, 48000, 16, 440.f, 4.f));
@@ -288,6 +306,47 @@ TEST_F(AudioGraphTest, SetSampleRateResampledOutputIsContinuous) {
 // The rendered PCM itself must be a clean 440 Hz sine — level,
 // continuity, and pitch — not just meter energy: meters tap the chain
 // pre-OAR and stayed healthy through the ES-85 output breakage.
+// A 7.1.5.4 element has 17 channels and a 10.2.9.3 element 24 (ES-864):
+// both register with OAR at their own layout (oar_layout_t 12 and 11,
+// renderer/channel_layouts.txt) and channel count, within
+// kGraphMaxChannels, render on a stereo target, and have BS.1770 weights
+// for the mix-bus meter.
+TEST_F(AudioGraphTest, ExpandedElementLayoutsRegisterAndRender) {
+  const struct {
+    const char* name;
+    int sub_type;
+    uint32_t channels;
+  } layouts[] = {{"7154", 12, 17}, {"10293", 11, 24}};
+  for (const auto& l : layouts) {
+    SCOPED_TRACE(l.name);
+    const std::string wav = dir_ + "/graph_sine_" + l.name + "_48k.wav";
+    ASSERT_TRUE(test_wav::write_sine_frames(wav, static_cast<int>(l.channels),
+                                            48000, 16, 440.f, 48000,
+                                            /*amplitude=*/0.1f));
+    // AudioGraph carries about 25 MB of pre-allocated buffers: heap-allocate
+    // it rather than put it on the stack.
+    auto graph_ptr = std::make_unique<AudioGraph>();
+    AudioGraph& graph = *graph_ptr;
+    ASSERT_TRUE(graph.init(48000, 512, 2));
+    ASSERT_TRUE(
+        test_output::add_wav_element(graph, 1, wav, l.sub_type, l.channels));
+    ASSERT_TRUE(
+        test_output::set_layout_identity(graph, test_output::kLayoutStereo, 2));
+    EXPECT_EQ(eclipsa_studio::Bs1770WeightsForLayout(
+                  static_cast<uint32_t>(l.sub_type))
+                  .size(),
+              l.channels);
+
+    constexpr uint32_t kFrames = 512, kChannels = 2;
+    test_output::run_blocks(graph, test_output::kWarmupBlocks, kFrames,
+                            kChannels);
+    const auto sig =
+        test_output::collect_channel(graph, 20, kFrames, kChannels, 0);
+    const auto stats = test_output::analyze_signal(sig, 48000, 1.0f);
+    EXPECT_GT(stats.peak, 0.01f) << "no signal reached the output";
+  }
+}
+
 TEST_F(AudioGraphTest, MatchedRateStereoOutputIsCleanSine) {
   const std::string sine_2ch = dir_ + "/graph_sine_2ch_48k_2s.wav";
   ASSERT_TRUE(test_wav::write_sine_frames(sine_2ch, 2, 48000, 16, 440.f,
@@ -500,9 +559,9 @@ TEST_F(AudioGraphTest, RemovedSlotDoesNotLeakMixExcludedToNextElement) {
   float out[kFrames * kChannels] = {};
   // Give a (wrongly) inherited exclusion time to ramp the mute gain
   // down, then measure: the new element must still meter as audible.
-  for (int i = 0; i < 30; ++i) graph_.process(out, kFrames, kChannels);
+  RunBlocks(graph_, 30, out, kFrames, kChannels);
   graph_.reset_meters();
-  graph_.process(out, kFrames, kChannels);
+  RunBlocks(graph_, 1, out, kFrames, kChannels);
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
 }
 
@@ -522,14 +581,14 @@ TEST_F(AudioGraphTest, CompactionPreservesMixExcluded) {
   float out[kFrames * kChannels] = {};
   // Let element 2's mute ramp settle, then compact: element 2 moves
   // into slot 0.
-  for (int i = 0; i < 30; ++i) graph_.process(out, kFrames, kChannels);
+  RunBlocks(graph_, 30, out, kFrames, kChannels);
   graph_.remove_element(1);
 
   // If the exclusion was dropped in the move, the mute gain ramps back
   // up over ~145 ms and the element becomes audible again.
-  for (int i = 0; i < 30; ++i) graph_.process(out, kFrames, kChannels);
+  RunBlocks(graph_, 30, out, kFrames, kChannels);
   graph_.reset_meters();
-  graph_.process(out, kFrames, kChannels);
+  RunBlocks(graph_, 1, out, kFrames, kChannels);
   EXPECT_LT(graph_.meter_state()->elements[0].peak[0], 0.001f);
 }
 
@@ -797,6 +856,264 @@ TEST_F(AudioGraphTest, WavSeekWhilePlayingFadesTheSplice) {
   EXPECT_GT(back_peak, 0.05f) << "program did not return after seeking back";
 }
 
+// ES-836: a WAV element's ring is filled by the disk thread, so right
+// after a seek it still holds frames from the old position. A resume
+// straight after a paused seek, before the disk thread has applied it,
+// must hold the element muted rather than play those frames. The file
+// is silent for its first second and a sine after it; the element plays
+// the sine, seeks while paused into the silence, and resumes at once.
+TEST_F(AudioGraphTest, ResumeRightAfterPausedWavSeekPlaysNoStaleFrames) {
+  const int sr = 48000;
+  std::vector<int16_t> pcm(static_cast<size_t>(sr) * 2, 0);
+  for (int i = sr; i < sr * 2; ++i) {
+    pcm[static_cast<size_t>(i)] = static_cast<int16_t>(std::lround(
+        std::sin(2.0 * std::numbers::pi * 440.0 * (i - sr) / sr) * 16000.0));
+  }
+  const std::string wav = dir_ + "/graph_paused_seek_stale.wav";
+  ASSERT_TRUE(test_wav::write_frames_s16(wav, 1, sr, pcm));
+
+  graph_.init(48000, 512, 2);
+  ASSERT_EQ(graph_.add_element(1, wav.c_str()), 0);
+  constexpr uint32_t kFrames = 512, kChannels = 2;
+  std::vector<float> out(static_cast<size_t>(kFrames) * kChannels);
+
+  graph_.seek(static_cast<uint64_t>(sr) + sr / 4);
+  graph_.consume_pending_seek_paused();
+  RunBlocks(graph_, 8, out.data(), kFrames, kChannels);
+  ASSERT_GT(graph_.meter_state()->elements[0].peak[0], 0.1f);
+
+  // Paused seek into the silence, then resume with no wait: every block
+  // reads silence or is held muted, never the sine left in the ring.
+  graph_.seek(0);
+  graph_.consume_pending_seek_paused();
+  for (int i = 0; i < 16; ++i) {
+    graph_.process(out.data(), kFrames, kChannels);
+    EXPECT_LT(graph_.meter_state()->elements[0].peak[0], 1e-4f)
+        << "block " << i;
+  }
+}
+
+// ── Joining the program (ES-986) ───────────────────────────────────────────
+
+// Two elements play the same mono file with OAR bypassed, so each
+// element's channels 0 and 1 reach output channels 0 and 1 unchanged.
+// Element 1 plays on channel 0; element 2's input routing sends the file
+// to channel 1. The file is noise, so neighbouring frames differ by
+// about 0.3 on average: the two channels match sample for sample only
+// when both elements read the same file frame. The match allows 1e-4,
+// because a joined element's mute gain settles at 0.99997 rather than
+// 1.0 (dsp::Gain's one-pole ramp stops when its step rounds away in
+// float32).
+class JoinTest : public AudioGraphTest {
+ protected:
+  static constexpr uint32_t kFrames = 512;
+  static constexpr uint32_t kChannels = 2;
+  // kJoinLeadSeconds (0.17 s) at 48 kHz, rounded up to 512-frame blocks.
+  static constexpr int kLeadBlocks = 16;
+
+  void SetUp() override {
+    AudioGraphTest::SetUp();
+    noise_ = dir_ + "/graph_join_noise.wav";
+    ASSERT_TRUE(WriteNoise(noise_, 48000, 300000));
+    graph_.init(48000, kFrames, kChannels);
+    graph_.set_bypass_oar(true);
+    out_.assign(static_cast<size_t>(kFrames) * kChannels, 0.0f);
+  }
+
+  // Mono float32 noise in [-0.5, 0.5), the same sequence every time.
+  static bool WriteNoise(const std::string& path, int rate, uint32_t frames) {
+    std::vector<float> samples(frames);
+    uint32_t x = 12345;
+    for (float& v : samples) {
+      x = x * 1664525u + 1013904223u;
+      v = static_cast<float>(x >> 8) / 16777216.0f - 0.5f;
+    }
+    return test_wav::write_float32_frames(path, 1, rate, samples);
+  }
+
+  // Adds element `id` from `path`; with `on_channel_1` its input routing
+  // sends the file to output channel 1 and leaves channel 0 silent.
+  void Add(uint32_t id, const std::string& path, bool on_channel_1) {
+    ASSERT_EQ(graph_.add_element(id, path.c_str()), 0);
+    if (on_channel_1) {
+      const int8_t map[2] = {-1, 0};
+      graph_.set_element_routing(id, map, 2);
+    }
+  }
+
+  // Element 1 on channel 0, playing from file frame 24000.
+  void StartFirstElement(const std::string& path) {
+    ASSERT_NO_FATAL_FAILURE(Add(1, path, /*on_channel_1=*/false));
+    graph_.seek(24000);
+    graph_.consume_pending_seek_paused();
+    Run(10);
+  }
+
+  void Run(int blocks, uint32_t frames = kFrames) {
+    RunBlocks(graph_, blocks, out_.data(), frames, kChannels);
+  }
+
+  float Out(uint32_t ch, uint32_t f) const {
+    return out_[static_cast<size_t>(f) * kChannels + ch];
+  }
+
+  // Element 1 on channel 0 from file frame 24000, element 2 on channel
+  // 1 joined and in step with it.
+  void StartBothElements() {
+    ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+    ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+    Run(kLeadBlocks + 48);
+    ASSERT_NO_FATAL_FAILURE(ExpectInStep());
+  }
+
+  // Stalls or releases element `id`'s disk-thread stream.
+  void Stall(uint32_t id, bool stalled) {
+    ASSERT_NO_FATAL_FAILURE(
+        AudioGraphTestPeer::StallWavStream(graph_, id, stalled));
+  }
+
+  // The last block's channels 0 and 1 carry the same samples within
+  // `tolerance`, and channel 0 carries the program.
+  void ExpectInStep(float tolerance = 1e-4f, uint32_t frames = kFrames) {
+    float diff = 0.0f;
+    float peak = 0.0f;
+    for (uint32_t f = 0; f < frames; ++f) {
+      diff = std::max(diff, std::fabs(Out(1, f) - Out(0, f)));
+      peak = std::max(peak, std::fabs(Out(0, f)));
+    }
+    EXPECT_GT(peak, 0.1f);
+    EXPECT_LT(diff, tolerance);
+  }
+
+  std::string noise_;
+  std::vector<float> out_;
+};
+
+// An element added while the program plays is silent for the join lead,
+// fades in from silence, and then plays in step with the element
+// already playing.
+TEST_F(JoinTest, ElementAddedDuringPlaybackPlaysInStep) {
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+  ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+  for (int b = 0; b < kLeadBlocks; ++b) {
+    Run(1);
+    for (uint32_t f = 0; f < kFrames; ++f) {
+      ASSERT_EQ(Out(1, f), 0.0f) << "block " << b << " frame " << f;
+    }
+  }
+  // Fading in: never louder than the playing element, never opposite in
+  // sign.
+  for (int b = 0; b < 8; ++b) {
+    Run(1);
+    for (uint32_t f = 0; f < kFrames; ++f) {
+      ASSERT_LE(std::fabs(Out(1, f)), std::fabs(Out(0, f)) + 1e-6f);
+      ASSERT_GE(Out(1, f) * Out(0, f), 0.0f) << "block " << b;
+    }
+  }
+  Run(40);
+  ExpectInStep();
+}
+
+// A seek while the new element is still joining moves it with the
+// others, and it plays in step from the seek target.
+TEST_F(JoinTest, SeekDuringAJoinMovesTheJoiningElement) {
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+  ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+  Run(2);
+  graph_.seek(72000);
+  Run(60);
+  ExpectInStep();
+}
+
+// An element added while paused follows the seek the app sends on play,
+// like the elements already there.
+TEST_F(JoinTest, ElementAddedWhilePausedFollowsTheSeekOnPlay) {
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+  ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+  graph_.seek(48000);
+  graph_.consume_pending_seek_paused();
+  Run(40);
+  ExpectInStep();
+}
+
+// An element added while a seek holds the program joins that hold and
+// comes in with the others when it ends, without a further lead.
+TEST_F(JoinTest, ElementAddedDuringASeekHoldJoinsTheHold) {
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+  graph_.seek(48000);
+  Run(2);  // The fade-out block, then the block that posts the seek.
+  ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+  // Element 2's mute gain was never snapped, so the two match exactly,
+  // through the seek's fade-in too.
+  Run(3);
+  ExpectInStep(1e-6f);
+}
+
+// A 44.1 kHz element joining a 48 kHz graph lands within half a file
+// frame of a 44.1 kHz element already playing: the join rounds its
+// target to a whole file frame, as a seek does, while the playing
+// element's resampler carries a fractional position. The file is a
+// 100 Hz sine at amplitude 0.5, so half a file frame differs by up to
+// 3.6e-3 and one engine frame by up to 6.5e-3.
+TEST_F(JoinTest, ResampledElementJoinsInStep) {
+  const std::string sine = dir_ + "/graph_join_sine_441.wav";
+  ASSERT_TRUE(test_wav::write_sine_frames(sine, 1, 44100, 16, 100.f, 2 * 44100,
+                                          /*amplitude=*/0.5f));
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(sine));
+  ASSERT_NO_FATAL_FAILURE(Add(2, sine, /*on_channel_1=*/true));
+  Run(1);
+  for (uint32_t f = 0; f < kFrames; ++f) ASSERT_EQ(Out(1, f), 0.0f);
+  Run(60);
+  ExpectInStep(4.5e-3f);
+}
+
+// A join whose frame the program passes, because the block size changed
+// to one that does not divide the distance, joins again and plays in
+// step.
+TEST_F(JoinTest, JoinAgainAfterTheBlockSizeChanges) {
+  ASSERT_NO_FATAL_FAILURE(StartFirstElement(noise_));
+  ASSERT_NO_FATAL_FAILURE(Add(2, noise_, /*on_channel_1=*/true));
+  Run(1);
+  constexpr uint32_t kOddFrames = 441;
+  Run(80, kOddFrames);
+  ExpectInStep(1e-4f, kOddFrames);
+}
+
+// An element whose disk-thread stream stalls for longer than its ring
+// (32768 frames) underruns and falls behind the program by the length
+// of the starvation. It joins the program again once the stream
+// recovers, and plays in step with the other element.
+TEST_F(JoinTest, ElementStarvedLongerThanTheRingJoinsAgain) {
+  ASSERT_NO_FATAL_FAILURE(StartBothElements());
+  const uint64_t underruns_before = graph_.meter_state()->ring_underrun_count;
+  ASSERT_NO_FATAL_FAILURE(Stall(2, true));
+  // 96 blocks: the ring drains after at most 64, and the element is
+  // starved for the rest.
+  Run(96);
+  EXPECT_GT(graph_.meter_state()->ring_underrun_count, underruns_before);
+  for (uint32_t f = 0; f < kFrames; ++f) ASSERT_EQ(Out(1, f), 0.0f);
+  ASSERT_NO_FATAL_FAILURE(Stall(2, false));
+  Run(120);
+  ExpectInStep();
+}
+
+// A seek while an element's stream is stalled: the hold's watchdog gives
+// up after 250 ms with the element's seek still unapplied. Once the
+// stream recovers, the element joins the program again instead of
+// playing from the seek target behind it.
+TEST_F(JoinTest, SeekUnappliedWhenTheHoldEndsJoinsAgain) {
+  ASSERT_NO_FATAL_FAILURE(StartBothElements());
+  ASSERT_NO_FATAL_FAILURE(Stall(2, true));
+  graph_.seek(96000);
+  // The fade-out block, the block that posts the seek, and the hold
+  // until its watchdog gives up (250 ms, 24 blocks).
+  Run(30);
+  for (uint32_t f = 0; f < kFrames; ++f) ASSERT_EQ(Out(1, f), 0.0f);
+  ASSERT_NO_FATAL_FAILURE(Stall(2, false));
+  Run(120);
+  ExpectInStep();
+}
+
 TEST_F(AudioGraphTest, BinauralResumeAfterPausedSeekDecaysBelowAudibility) {
   // ES-530 (review finding): binaural rendering is a convolution, so a
   // zero-fed render emits a decaying reverb tail instead of going
@@ -896,3 +1213,151 @@ TEST_F(AudioGraphTest, MonitorDimCutsOutputBy20dBAfterTheMeterTap) {
       kJump);
   EXPECT_NEAR(restored.peak, undimmed.peak, 0.01f);
 }
+
+namespace {
+
+// ES-999 output-channel solo and mute. The test element is the same sine
+// on both channels and the stereo render keeps them equal, so while one
+// channel plays at unity the ratio of the other to it is that channel's
+// solo/mute gain at each frame.
+class OutputSoloMuteTest : public AudioGraphTest {
+ protected:
+  static constexpr uint32_t kFrames = 512, kChannels = 2;
+  // 15 ms at 48 kHz.
+  static constexpr float kRampFrames = 720.0f;
+
+  void SetUp() override {
+    AudioGraphTest::SetUp();
+    const std::string sine_2ch = dir_ + "/graph_sine_2ch_48k_4s.wav";
+    ASSERT_TRUE(test_wav::write_sine_frames(sine_2ch, 2, 48000, 16, 440.f,
+                                            4 * 48000, /*amplitude=*/0.25f));
+    graph_.init(48000, kFrames, kChannels);
+    ASSERT_TRUE(test_output::add_wav_element(graph_, 1, sine_2ch,
+                                             test_output::kLayoutStereo, 2));
+    ASSERT_TRUE(test_output::set_layout_identity(
+        graph_, test_output::kLayoutStereo, 2));
+    test_output::run_blocks(graph_, test_output::kWarmupBlocks, kFrames,
+                            kChannels);
+  }
+
+  // One block of the interleaved device output.
+  std::vector<float> Block() {
+    std::vector<float> out(static_cast<size_t>(kFrames) * kChannels, 0.0f);
+    EXPECT_TRUE(graph_.wait_for_wav_streams(kFrames));
+    graph_.process(out.data(), kFrames, kChannels);
+    return out;
+  }
+
+  // Peak of device channel `ch` over `blocks` blocks.
+  float Peak(int blocks, uint32_t ch) {
+    return test_output::analyze_signal(
+               test_output::collect_channel(graph_, blocks, kFrames, kChannels,
+                                            ch),
+               48000, /*jump_threshold=*/1.0f)
+        .peak;
+  }
+
+  // Requires channel `ramped` to follow the 15 ms linear ramp relative to
+  // channel `unity` over `out`, whose first frame is `first` frames after
+  // the change: gain 1 - (f + 1) / 720 down, (f + 1) / 720 up.
+  void ExpectRamp(const std::vector<float>& out, uint32_t unity,
+                  uint32_t ramped, uint32_t first, bool down) {
+    int checked = 0;
+    for (uint32_t f = 0; f < kFrames; ++f) {
+      const float ref = out[f * kChannels + unity];
+      if (std::fabs(ref) < 0.01f) continue;
+      const float t =
+          std::min(1.0f, static_cast<float>(first + f + 1) / kRampFrames);
+      ASSERT_NEAR(out[f * kChannels + ramped] / ref, down ? 1.0f - t : t, 2e-3f)
+          << "frame " << first + f << " after the change";
+      ++checked;
+    }
+    EXPECT_GT(checked, 200);
+  }
+};
+
+// A mute ramps the channel to silence over 15 ms and holds it there, the
+// other channel keeps its level, the output meters keep reading the
+// render, and clearing it ramps the channel back up.
+TEST_F(OutputSoloMuteTest, MuteRampsAChannelOutAfterTheMeterTap) {
+  const float full0 = Peak(20, 0);
+  const float full1 = Peak(20, 1);
+  ASSERT_GT(full0, 0.05f) << "no signal reached the output";
+  ASSERT_NEAR(full1, full0, 0.01f);
+  float meter_full[2] = {};
+  ASSERT_EQ(graph_.get_output_peaks(meter_full, 2), 2u);
+
+  graph_.set_output_solo_mute(/*soloed=*/0, /*muted=*/1ull << 1);
+  EXPECT_EQ(graph_.output_silenced(), 1ull << 1);
+  ExpectRamp(Block(), /*unity=*/0, /*ramped=*/1, /*first=*/0, true);
+  ExpectRamp(Block(), 0, 1, kFrames, true);
+  EXPECT_EQ(Peak(20, 1), 0.0f);
+  EXPECT_NEAR(Peak(20, 0), full0, 0.01f);
+  float meter_muted[2] = {};
+  ASSERT_EQ(graph_.get_output_peaks(meter_muted, 2), 2u);
+  EXPECT_NEAR(meter_muted[1], meter_full[1], 0.01f)
+      << "the output meter must read the render without the cut";
+
+  graph_.set_output_solo_mute(0, 0);
+  EXPECT_EQ(graph_.output_silenced(), 0u);
+  ExpectRamp(Block(), 0, 1, 0, /*down=*/false);
+  ExpectRamp(Block(), 0, 1, kFrames, /*down=*/false);
+  EXPECT_NEAR(Peak(20, 1), full1, 0.01f);
+}
+
+// A solo silences every channel that is not soloed, and mute wins over
+// solo.
+TEST_F(OutputSoloMuteTest, SoloSilencesTheOtherChannels) {
+  const float full1 = Peak(20, 1);
+  ASSERT_GT(full1, 0.05f) << "no signal reached the output";
+
+  graph_.set_output_solo_mute(/*soloed=*/1ull << 1, /*muted=*/0);
+  EXPECT_EQ(graph_.output_silenced() & 0x3u, 1ull << 0);
+  ExpectRamp(Block(), /*unity=*/1, /*ramped=*/0, /*first=*/0, true);
+  ExpectRamp(Block(), 1, 0, kFrames, true);
+  EXPECT_EQ(Peak(20, 0), 0.0f);
+  EXPECT_NEAR(Peak(20, 1), full1, 0.01f);
+
+  graph_.set_output_solo_mute(/*soloed=*/1ull << 1, /*muted=*/1ull << 1);
+  EXPECT_EQ(graph_.output_silenced() & 0x3u, 0x3u);
+  Block();
+  Block();
+  EXPECT_EQ(Peak(20, 1), 0.0f);
+  EXPECT_EQ(Peak(20, 0), 0.0f);
+}
+
+// A change made while no program reaches the device is complete at the
+// next program block: settle_output_solo_mute(), which the paused branch
+// of the audio callback calls, and a calibration-noise block both set
+// the gain at once, so a muted channel is silent from its first frame.
+TEST_F(OutputSoloMuteTest, ChangeWithoutProgramHoldsFromTheFirstBlock) {
+  graph_.set_output_solo_mute(/*soloed=*/0, /*muted=*/1ull << 1);
+  graph_.settle_output_solo_mute();
+  auto out = Block();
+  float peak0 = 0.0f;
+  for (uint32_t f = 0; f < kFrames; ++f) {
+    peak0 = std::max(peak0, std::fabs(out[f * kChannels + 0]));
+    ASSERT_EQ(out[f * kChannels + 1], 0.0f) << "frame " << f;
+  }
+  EXPECT_GT(peak0, 0.05f);
+
+  graph_.set_output_solo_mute(0, 0);
+  graph_.settle_output_solo_mute();
+  out = Block();
+  for (uint32_t f = 0; f < kFrames; ++f) {
+    ASSERT_NEAR(out[f * kChannels + 1], out[f * kChannels + 0], 1e-6f)
+        << "frame " << f;
+  }
+
+  // Muted under calibration noise, which carries no program.
+  graph_.set_noise(/*row=*/1, /*channel=*/0, /*amp=*/0.1f);
+  graph_.set_output_solo_mute(0, 1ull << 1);
+  Block();
+  graph_.set_noise(/*off=*/0, 0, 0.0f);
+  out = Block();
+  for (uint32_t f = 0; f < kFrames; ++f) {
+    ASSERT_EQ(out[f * kChannels + 1], 0.0f) << "frame " << f;
+  }
+}
+
+}  // namespace

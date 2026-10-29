@@ -81,8 +81,10 @@ cc_library(
     srcs = ["iamf_demuxer.cc"],
     deps = [
         ":gpac_system",
+        ":read_only_file_map",
         "//:engine_log",
         "//deps/gpac:libgpac",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -98,6 +100,8 @@ cc_library(
         ":read_only_file_map",
         "//:engine_log",
         "//renderer:oar_capability",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/types:span",
         "@iamf_tools//iamf/cli:probe",
         "@iamf_tools//iamf/cli:probe_json",

@@ -1058,11 +1058,12 @@ TEST_F(AudioGraphIamfTest, MixExcludedGatesIamfElement) {
 
   auto* session = graph_.iamf_session();
   ASSERT_NE(session, nullptr);
-  ASSERT_TRUE(session->wait_for_buffered(0, kMaxFrames, 2000));
-
   // Baseline: element meters see the noise. (4 callbacks = 2048 fr.)
+  // Each block waits for its frames: process() is far faster than the
+  // decoder, and a block that finds the ring empty reads silence.
   std::vector<float> out(kMaxFrames * kOutChannels, 0.0f);
   for (int i = 0; i < 4; ++i) {
+    ASSERT_TRUE(session->wait_for_buffered(0, kMaxFrames, 2000));
     graph_.process(out.data(), kMaxFrames, kOutChannels);
   }
   EXPECT_GT(graph_.meter_state()->elements[0].peak[0], 0.01f);
@@ -1079,10 +1080,25 @@ TEST_F(AudioGraphIamfTest, MixExcludedGatesIamfElement) {
   graph_.process(out.data(), kMaxFrames, kOutChannels);
   EXPECT_LT(graph_.meter_state()->elements[0].peak[0], 0.001f);
 
-  // Re-include and rewind for fresh data; the ramp back up needs
-  // ~14 callbacks of processed frames again.
+  // Re-include and rewind for fresh data. Drive the staged seek (ES-473)
+  // through the fade-out to the post and wait for the I/O thread to
+  // apply it, then for the 2048-frame refill that ends the graph's
+  // priming hold (kSeekPrimeFrames). wait_for_buffered(0, kMaxFrames)
+  // alone can be satisfied by frames buffered before the seek, and the
+  // blocks below then all fall inside the hold and read silence (ES-913).
   graph_.set_element_mix_excluded(id, false);
+  const uint64_t applied_before = session->seeks_applied();
   graph_.seek(0);
+  const auto post_deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (session->seeks_applied() <= applied_before &&
+         std::chrono::steady_clock::now() < post_deadline) {
+    graph_.process(out.data(), kMaxFrames, kOutChannels);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  ASSERT_GT(session->seeks_applied(), applied_before);
+  ASSERT_TRUE(session->wait_for_buffered(0, 2048, 2000));
+  // The ramp back up needs ~14 callbacks of processed frames again.
   for (int i = 0; i < 15; ++i) {
     ASSERT_TRUE(session->wait_for_buffered(0, kMaxFrames, 2000));
     graph_.process(out.data(), kMaxFrames, kOutChannels);

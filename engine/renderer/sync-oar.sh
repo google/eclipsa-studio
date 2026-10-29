@@ -15,33 +15,37 @@
 
 # Regenerate engine/deps/oar/oar.patch and obr.patch from the Eclipsa
 # Studio fork of AOMediaCodec/oar, and set OAR_COMMIT in engine/MODULE.bazel
-# to the fork's merge base with upstream main.
+# to the fork's merge base with upstream main, or leave it unchanged with
+# --keep-pin.
 #
 # The engine fetches the public AOMediaCodec/oar at OAR_COMMIT and applies
 # the two patches, so the fetched tree equals the fork at <ref>. Fork work
 # happens in the fork; this script turns the fork's state into the patches
 # the public build applies.
 #
-# Usage: engine/renderer/sync-oar.sh <fork> [<ref>]
-#   <fork>  a local clone of the fork, or its git URL
-#   <ref>   the fork commit to regenerate from (default: main). In a local
-#           clone the ref is resolved as it stands there; after `git fetch`
-#           pass origin/main to use the pushed state.
+# Usage: engine/renderer/sync-oar.sh [--keep-pin] <fork> [<ref>]
+#   --keep-pin  write the patches against the current OAR_COMMIT instead
+#               of the merge base and leave MODULE.bazel unchanged; the pin
+#               must be an ancestor of the merge base
+#   <fork>      a local clone of the fork, or its git URL
+#   <ref>       the fork commit to regenerate from (default: main). In a
+#               local clone the ref is resolved as it stands there; after
+#               `git fetch` pass origin/main to use the pushed state.
 #
-# oar.patch carries every change between the merge base and <ref> except
-# the fork's top-level Markdown files (its fork notes, which name private
-# repositories and local paths; doc/ is carried) and its .bazelversion
-# files. obr.patch is the slice of that diff under
-# src/renderer/obr/obr_capi/obr with paths relative to that directory,
-# which the strip_prefix obr override in MODULE.bazel applies.
-# .bazelversion is left out because the fork's copies end without a
-# trailing newline, which Bazel's patch reader rejects, and a dependency's
-# .bazelversion has no effect on the consumer. The script lists what it
-# left out.
+# oar.patch carries every change between the base (the merge base, or
+# OAR_COMMIT with --keep-pin) and <ref> except every top-level Markdown
+# file (the fork notes, which name private repositories and local paths;
+# doc/ is carried) and every .bazelversion file. obr.patch is the slice of
+# that diff under src/renderer/obr/obr_capi/obr with paths relative to
+# that directory, which the strip_prefix obr override in MODULE.bazel
+# applies. .bazelversion is left out because upstream's and the fork's
+# copies end without a trailing newline, which Bazel's patch reader
+# rejects, and a dependency's .bazelversion has no effect on the consumer.
+# The script lists what it left out.
 #
 # Afterwards run `bazel test //...` from engine/, check the patches for
-# private repository names, and commit the patches and MODULE.bazel
-# together.
+# private repository names, and commit the patches, together with
+# MODULE.bazel when OAR_COMMIT moved.
 
 set -euo pipefail
 
@@ -70,5 +74,5 @@ report_omitted "$OUT_DIR/oar.patch"
 update_pin
 
 echo
-echo "Now run 'bazel test //...' from engine/ and commit deps/oar/*.patch"
-echo "with MODULE.bazel."
+echo "Now run 'bazel test //...' from engine/ and commit deps/oar/*.patch,"
+echo "with MODULE.bazel when OAR_COMMIT moved."

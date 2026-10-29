@@ -1,0 +1,101 @@
+test_vector_metadata {
+  human_readable_description: "Eclipsa Studio export (bed916)"
+  file_name_prefix: "bed916"
+  is_valid: true
+  partition_mix_gain_parameter_blocks: false
+}
+ia_sequence_header_metadata {
+  primary_profile: PROFILE_VERSION_BASE_ENHANCED
+  additional_profile: PROFILE_VERSION_BASE_ENHANCED
+}
+codec_config_metadata {
+  codec_config_id: 200
+  codec_config {
+    num_samples_per_frame: 1024
+    decoder_config_lpcm {
+      sample_format_flags: LPCM_LITTLE_ENDIAN
+      sample_size: 24
+      sample_rate: 48000
+    }
+  }
+}
+audio_element_metadata {
+  audio_element_id: 300
+  audio_element_type: AUDIO_ELEMENT_CHANNEL_BASED
+  reserved: 0
+  codec_config_id: 200
+  audio_substream_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+  scalable_channel_layout_config {
+    reserved: 0
+    channel_audio_layer_configs {
+      loudspeaker_layout: LOUDSPEAKER_LAYOUT_EXPANDED
+      expanded_loudspeaker_layout: EXPANDED_LOUDSPEAKER_LAYOUT_9_1_6_CH
+      output_gain_is_present_flag: 0
+      recon_gain_is_present_flag: 0
+      reserved_a: 0
+    }
+  }
+}
+mix_presentation_metadata {
+  mix_presentation_id: 400
+  annotations_language: ["en"]
+  localized_presentation_annotations: ["Main"]
+  sub_mixes {
+    audio_elements {
+      audio_element_id: 300
+      localized_element_annotations: ["Bed"]
+      rendering_config {
+        headphones_rendering_mode: HEADPHONES_RENDERING_MODE_BINAURAL_WORLD_LOCKED
+      }
+      element_mix_gain {
+        param_definition {
+          parameter_id: 100
+          parameter_rate: 48000
+          param_definition_mode: 1
+          reserved: 0
+        }
+        default_mix_gain_db {
+          q7_dot8: 0
+        }
+      }
+    }
+    output_mix_gain {
+      param_definition {
+        parameter_id: 101
+        parameter_rate: 48000
+        param_definition_mode: 1
+        reserved: 0
+      }
+      default_mix_gain_db {
+        q7_dot8: 0
+      }
+    }
+    layouts {
+      loudness_layout {
+        layout_type: LAYOUT_TYPE_LOUDSPEAKERS_SS_CONVENTION
+        ss_layout {
+          sound_system: SOUND_SYSTEM_A_0_2_0
+          reserved: 0
+        }
+      }
+      loudness {
+        info_type_bit_masks: [LOUDNESS_INFO_TYPE_TRUE_PEAK]
+        integrated_loudness: -4608
+        digital_peak: -512
+        true_peak: -256
+      }
+    }
+  }
+}
+audio_frame_metadata {
+  wav_filename: "bed916.wav"
+  samples_to_trim_at_end: 0
+  samples_to_trim_at_start: 0
+  samples_to_trim_at_start_includes_codec_delay: false
+  samples_to_trim_at_end_includes_padding: false
+  audio_element_id: 300
+  channel_metadatas: [{ channel_id: 0 channel_label: CHANNEL_LABEL_FLC }, { channel_id: 1 channel_label: CHANNEL_LABEL_FRC }, { channel_id: 2 channel_label: CHANNEL_LABEL_FC }, { channel_id: 3 channel_label: CHANNEL_LABEL_LFE }, { channel_id: 4 channel_label: CHANNEL_LABEL_FL }, { channel_id: 5 channel_label: CHANNEL_LABEL_FR }, { channel_id: 6 channel_label: CHANNEL_LABEL_SI_L }, { channel_id: 7 channel_label: CHANNEL_LABEL_SI_R }, { channel_id: 8 channel_label: CHANNEL_LABEL_BL }, { channel_id: 9 channel_label: CHANNEL_LABEL_BR }, { channel_id: 10 channel_label: CHANNEL_LABEL_TP_FL }, { channel_id: 11 channel_label: CHANNEL_LABEL_TP_FR }, { channel_id: 12 channel_label: CHANNEL_LABEL_TP_SI_L }, { channel_id: 13 channel_label: CHANNEL_LABEL_TP_SI_R }, { channel_id: 14 channel_label: CHANNEL_LABEL_TP_BL }, { channel_id: 15 channel_label: CHANNEL_LABEL_TP_BR }]
+}
+temporal_delimiter_metadata {
+  enable_temporal_delimiters: false
+}

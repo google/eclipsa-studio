@@ -33,7 +33,9 @@ namespace {
 
 constexpr uint32_t kRate = 48000;
 constexpr uint32_t kFrames = 512;
-constexpr uint32_t kStereoLayout = 2;  // oar_layout_t: stereo
+constexpr uint32_t kStereoLayout = 2;       // oar_layout_t: stereo
+constexpr uint32_t kLayout714 = 8;          // oar_layout_t: 7.1.4
+constexpr uint32_t kBinauralLayout = 0xFF;  // oar_layout_t: binaural
 
 float peak_abs(const float* data, uint32_t samples) {
   float peak = 0.0f;
@@ -54,6 +56,7 @@ std::vector<float> sine_block(float amplitude) {
 
 TEST(OarObjectPositionTest, MonoObjectSilentOnStereoWithoutPositions) {
   OarRenderer r;
+  r.set_no_audio_thread();
   ASSERT_TRUE(r.init(kRate, kFrames, kStereoLayout));
   ASSERT_TRUE(r.add_element(/*element_id=*/1, /*type=object*/ 2,
                             /*sub_type=num_objects*/ 1, /*channels=*/1));
@@ -61,18 +64,11 @@ TEST(OarObjectPositionTest, MonoObjectSilentOnStereoWithoutPositions) {
 
   const std::vector<float> sine = sine_block(0.5f);
 
-  // Without any position metadata OLR has no processing channel for
-  // the object, so the render stays exactly silent — the bug this
+  // Without any position metadata OLR has nothing to render the
+  // object with, so the render stays exactly silent — the bug this
   // test pins (Object · Mono inaudible on stereo monitoring).
-  //
-  // Note there is no recovery assertion here on purpose: OLR keeps its
-  // position timeline in lockstep with its render offset, so positions
-  // that START arriving only after position-less renders on the same
-  // instance never catch up (verified while writing this test). That
-  // is why AudioGraph::process pushes positions BEFORE render() from
-  // the very first callback of every OAR instance — the state this
-  // test renders is unreachable in the product, and the audible path
-  // is covered by the tests below.
+  // AudioGraph::process therefore pushes positions before render()
+  // from the first callback of every OAR instance.
   float pre_peak = 0.0f;
   for (int block = 0; block < 4; ++block) {
     r.update_element_data(1, sine.data(), 1, kFrames, kFrames);
@@ -83,10 +79,26 @@ TEST(OarObjectPositionTest, MonoObjectSilentOnStereoWithoutPositions) {
   EXPECT_EQ(pre_peak, 0.0f) << "object rendered audio with no position "
                                "metadata — OLR behavior changed; the "
                                "per-callback push may be removable";
+
+  // Positions that start after the position-less renders make the
+  // object audible.
+  const float az = 0.0f;
+  const float el = 0.0f;
+  const float dist = 1.0f;
+  float post_peak = 0.0f;
+  for (int block = 0; block < 4; ++block) {
+    r.set_element_object_positions(1, 1, &az, &el, &dist, kFrames);
+    r.update_element_data(1, sine.data(), 1, kFrames, kFrames);
+    const float* out = r.render(kFrames);
+    ASSERT_NE(out, nullptr);
+    post_peak = std::max(post_peak, peak_abs(out, 2 * kFrames));
+  }
+  EXPECT_GT(post_peak, 0.01f);
 }
 
 TEST(OarObjectPositionTest, MonoObjectAudibleWhenPositionedFromFirstBlock) {
   OarRenderer r;
+  r.set_no_audio_thread();
   ASSERT_TRUE(r.init(kRate, kFrames, kStereoLayout));
   ASSERT_TRUE(r.add_element(1, /*type=object*/ 2, 1, 1));
 
@@ -114,6 +126,7 @@ TEST(OarObjectPositionTest, MonoObjectAudibleWhenPositionedFromFirstBlock) {
 
 TEST(OarObjectPositionTest, HardLeftPositionFavorsLeftChannel) {
   OarRenderer r;
+  r.set_no_audio_thread();
   ASSERT_TRUE(r.init(kRate, kFrames, kStereoLayout));
   ASSERT_TRUE(r.add_element(1, /*type=object*/ 2, 1, 1));
 
@@ -143,6 +156,7 @@ TEST(OarObjectPositionTest, HardLeftPositionFavorsLeftChannel) {
 
 TEST(OarObjectPositionTest, DualObjectRendersBothPositions) {
   OarRenderer r;
+  r.set_no_audio_thread();
   ASSERT_TRUE(r.init(kRate, kFrames, kStereoLayout));
   ASSERT_TRUE(r.add_element(1, /*type=object*/ 2, /*num_objects*/ 2,
                             /*channels=*/2));
@@ -164,6 +178,79 @@ TEST(OarObjectPositionTest, DualObjectRendersBothPositions) {
     peak = std::max(peak, peak_abs(out, 2 * kFrames));
   }
   EXPECT_GT(peak, 0.01f);
+}
+
+// AudioGraph::drain_oar_tail_paused renders while paused with a zero
+// feed and no metadata pushes. Playback that resumes afterwards pushes
+// positions again, and the object must be audible again.
+TEST(OarObjectPositionTest, MonoObjectAudibleAfterPausedDrain) {
+  for (const uint32_t layout : {kStereoLayout, kLayout714}) {
+    SCOPED_TRACE(layout);
+    OarRenderer r;
+    r.set_no_audio_thread();
+    ASSERT_TRUE(r.init(kRate, kFrames, layout));
+    ASSERT_TRUE(r.add_element(1, /*type=object*/ 2, 1, 1));
+    const uint32_t samples = r.channel_count() * kFrames;
+
+    const std::vector<float> sine = sine_block(0.5f);
+    const std::vector<float> zeros(kFrames, 0.0f);
+    const float az = 30.0f;
+    const float el = 0.0f;
+    const float dist = 1.0f;
+    auto play = [&]() {
+      float peak = 0.0f;
+      for (int block = 0; block < 8; ++block) {
+        r.set_element_object_positions(1, 1, &az, &el, &dist, kFrames);
+        r.update_element_data(1, sine.data(), 1, kFrames, kFrames);
+        const float* out = r.render(kFrames);
+        if (out != nullptr) peak = std::max(peak, peak_abs(out, samples));
+      }
+      return peak;
+    };
+
+    EXPECT_GT(play(), 0.01f);
+    for (int block = 0; block < 3; ++block) {
+      r.update_element_data(1, zeros.data(), 1, kFrames, kFrames);
+      ASSERT_NE(r.render(kFrames), nullptr);
+    }
+    EXPECT_GT(play(), 0.01f) << "object silent after the paused drain";
+  }
+}
+
+// On binaural, a head-locked element must not move a world-locked one
+// rendered with it. Element 1 is a silent head-locked object at +90°
+// (left); element 2 a world-locked object at -90° (right), which must
+// stay dominant in the right ear.
+TEST(OarObjectPositionTest, BinauralWorldLockedObjectBesideHeadLockedObject) {
+  OarRenderer r;
+  r.set_no_audio_thread();
+  ASSERT_TRUE(r.init(kRate, kFrames, kBinauralLayout));
+  ASSERT_TRUE(r.add_element(1, /*type=object*/ 2, 1, 1));
+  ASSERT_TRUE(r.add_element(2, /*type=object*/ 2, 1, 1));
+  ASSERT_TRUE(r.set_element_rendering_config(1, /*head-locked*/ 2, 0));
+  ASSERT_TRUE(r.commit_rendering_config());
+
+  const std::vector<float> sine = sine_block(0.5f);
+  const std::vector<float> zeros(kFrames, 0.0f);
+  const float az1 = 90.0f;
+  const float az2 = -90.0f;
+  const float el = 0.0f;
+  const float dist = 1.0f;
+  float left_peak = 0.0f;
+  float right_peak = 0.0f;
+  for (int block = 0; block < 8; ++block) {
+    r.set_element_object_positions(1, 1, &az1, &el, &dist, kFrames);
+    r.set_element_object_positions(2, 1, &az2, &el, &dist, kFrames);
+    r.update_element_data(1, zeros.data(), 1, kFrames, kFrames);
+    r.update_element_data(2, sine.data(), 1, kFrames, kFrames);
+    const float* out = r.render(kFrames);
+    ASSERT_NE(out, nullptr);
+    left_peak = std::max(left_peak, peak_abs(out, kFrames));
+    right_peak = std::max(right_peak, peak_abs(out + kFrames, kFrames));
+  }
+  EXPECT_GT(right_peak, 0.01f);
+  EXPECT_GT(right_peak, left_peak * 2.0f)
+      << "the head-locked element moved the world-locked object";
 }
 
 }  // namespace

@@ -105,6 +105,10 @@ String _codeForConflict(ProfileConflictKind kind) => switch (kind) {
     ExportIssueCode.profileObjectsNotAllowed,
   ProfileConflictKind.mixedTypesNotAllowed =>
     ExportIssueCode.profileMixedTypesNotAllowed,
+  ProfileConflictKind.objectMixedWithOtherTypes =>
+    ExportIssueCode.profileObjectMixedWithOtherTypes,
+  ProfileConflictKind.firstMixNotObjectOnly =>
+    ExportIssueCode.profileFirstMixNotObjectOnly,
   ProfileConflictKind.elementLayoutNotAllowed =>
     ExportIssueCode.profileElementLayoutNotAllowed,
   ProfileConflictKind.tooManyElementRefs =>
@@ -227,6 +231,7 @@ int _channelCountForChannelLayout(String layout) {
   if (l == 'stereo' || l == 'binaural') return 2;
   if (l == '9.1.6') return 16;
   if (l == '7.1.5.4') return 17; // matches LoudspeakerLayout.channelCount
+  if (l == '10.2.9.3') return 24;
   if (l == '7.1.4') return 12;
   if (l == '7.1.2') return 10;
   if (l == '7.1') return 8;

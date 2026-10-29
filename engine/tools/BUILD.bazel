@@ -23,21 +23,35 @@ cc_library(
     srcs = ["cli_commands.cc"],
     hdrs = ["cli_commands.h"],
     deps = [
+        "//:engine_log",
         "//bounce:element_bouncer",
+        "//bounce:element_stream",
         "//iamf:iamf_exporter",
+        "//iamf:iamf_muxer",
         "//iamf:iamf_probe_ffi",
         "//io:wav_reader",
+        "//mix_renderer:offline_iamf_measurer",
         "//mix_renderer:offline_mix_renderer",
+        "//renderer:channel_order",
+        "//wav",
     ],
 )
 
 # Headless render/export CLI (issue ES-39 proposal 1):
 #   eclipsa_studio_cli bounce  <in.wav> <out.wav> [--gain-db G] [--routing ...]
-#   eclipsa_studio_cli measure <mix.wav> --layout stereo
+#   eclipsa_studio_cli measure <mix.wav|file.iamf|file.mp4> --layout stereo
+#   eclipsa_studio_cli encode  <config.textproto> --wav-dir D
+#                              --out <file.iamf|file.mp4> [--video V.mp4]
 #   eclipsa_studio_cli encode  <config.textproto> --wav-dir D --out-dir O
-#   eclipsa_studio_cli probe   <file.iamf> [--json]
+#   eclipsa_studio_cli probe   <file.iamf|file.mp4> [--json]
+#   eclipsa_studio_cli --help
 cc_binary(
     name = "eclipsa_studio_cli",
     srcs = ["eclipsa_studio_cli.cc"],
-    deps = [":cli_commands"],
+    deps = [
+        ":cli_commands",
+        "@abseil-cpp//absl/base:log_severity",
+        "@abseil-cpp//absl/log:globals",
+        "@abseil-cpp//absl/log:initialize",
+    ],
 )

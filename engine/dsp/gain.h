@@ -17,6 +17,7 @@
 #ifndef ECLIPSA_STUDIO_DSP_GAIN_H_
 #define ECLIPSA_STUDIO_DSP_GAIN_H_
 
+#include <atomic>
 #include <cstdint>
 
 #include "graph/audio_buffer.h"
@@ -25,11 +26,26 @@ namespace dsp {
 
 static constexpr uint32_t kGainMaxChannels = 32;
 
+// process() and the per-block mute-gain update run on the audio thread,
+// which must not take a lock.
+static_assert(std::atomic<float>::is_always_lock_free,
+              "Gain targets rely on a lock-free atomic float");
+
 /// Per-channel gain node with parameter smoothing.
 ///
 /// Gain is stored as a linear multiplier internally.  Targets are set in dB
 /// and converted immediately.  On each process() call the current gain ramps
 /// toward the target to avoid clicks on parameter changes.
+///
+/// Threading: set_gain_db() and set_channel_gain_db() may run on one
+/// thread (the control thread) while process() runs on another (the
+/// audio thread). Each channel's target is a relaxed atomic float, and
+/// process() loads it once per call. set_gain_db() stores the channels
+/// one by one, so a process() call that overlaps it can apply the new
+/// target on some channels and the old one on others; the next call
+/// sees every new target, and the smoothing (time constant about 21 ms
+/// at 48 kHz) covers the one-block difference. The smoothed current
+/// gain and reset() belong to the thread that calls process().
 class Gain {
  public:
   Gain();
@@ -49,7 +65,7 @@ class Gain {
  private:
   static constexpr float kSmoothCoeff = 0.001f;  ///< Per-sample approach
 
-  float target_linear_[kGainMaxChannels];
+  std::atomic<float> target_linear_[kGainMaxChannels];
   float current_linear_[kGainMaxChannels];
 };
 

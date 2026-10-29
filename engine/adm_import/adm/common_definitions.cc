@@ -20,6 +20,7 @@
 
 #include "absl/base/no_destructor.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/string_view.h"
 
 namespace adm2iamf {
@@ -155,17 +156,26 @@ bool IsCommonDefDirectSpeakersPack(absl::string_view pack_id) {
 std::vector<std::string> ResolveCommonDefinitions(Model& model) {
   std::vector<std::string> unresolved;
 
-  // chna lookup: audioTrackUID -> derived audioChannelFormat id ("AC_...").
-  auto channel_id_for_uid = [&](const std::string& uid) -> std::string {
-    for (const ChnaEntry& e : model.chna) {
-      if (e.uid == uid) return e.ChannelFormatId();
-    }
-    return "";
-  };
+  // UID, pack and channel lookups go through hash maps (ES-849).
+  // audioTrackUID -> derived audioChannelFormat id ("AC_..."), first chna
+  // row wins.
+  absl::flat_hash_map<std::string, std::string> channel_id_for_uid;
+  channel_id_for_uid.reserve(model.chna.size());
+  for (const ChnaEntry& e : model.chna) {
+    channel_id_for_uid.try_emplace(e.uid, e.ChannelFormatId());
+  }
+  // Ids already in the model. Each set grows with every pack and channel
+  // this function appends.
+  absl::flat_hash_set<std::string> pack_ids;
+  pack_ids.reserve(model.packs.size());
+  for (const AudioPackFormat& p : model.packs) pack_ids.insert(p.id);
+  absl::flat_hash_set<std::string> channel_ids;
+  channel_ids.reserve(model.channels.size());
+  for (const AudioChannelFormat& c : model.channels) channel_ids.insert(c.id);
 
   for (const AudioObject& obj : model.objects) {
     for (const std::string& pack_ref : obj.pack_format_id_refs) {
-      if (model.Pack(pack_ref) != nullptr) continue;  // Already inlined.
+      if (pack_ids.contains(pack_ref)) continue;  // Already inlined.
       if (!IsCommonDefDirectSpeakersPack(pack_ref)) continue;
 
       // Derive the pack's channel list, in order, from the referencing object's
@@ -174,11 +184,14 @@ std::vector<std::string> ResolveCommonDefinitions(Model& model) {
       pack.id = pack_ref;
       pack.type = TypeDefinition::kDirectSpeakers;
       for (const std::string& uid : obj.track_uid_refs) {
-        const std::string ac_id = channel_id_for_uid(uid);
-        if (ac_id.empty()) continue;
+        const auto uid_it = channel_id_for_uid.find(uid);
+        if (uid_it == channel_id_for_uid.end() || uid_it->second.empty()) {
+          continue;
+        }
+        const std::string& ac_id = uid_it->second;
         pack.channel_format_id_refs.push_back(ac_id);
 
-        if (model.Channel(ac_id) != nullptr) continue;  // Already present.
+        if (channel_ids.contains(ac_id)) continue;  // Already present.
         const auto& labels = ChannelLabels();
         const auto it = labels.find(ac_id);
         if (it == labels.end()) {
@@ -193,8 +206,10 @@ std::vector<std::string> ResolveCommonDefinitions(Model& model) {
         block.speaker_label = std::string(it->second);
         ch.blocks.push_back(std::move(block));
         model.channels.push_back(std::move(ch));
+        channel_ids.insert(ac_id);
       }
       model.packs.push_back(std::move(pack));
+      pack_ids.insert(pack_ref);
     }
   }
 

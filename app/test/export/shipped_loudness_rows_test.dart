@@ -50,7 +50,6 @@ IamfMixPresentation _mp(List<List<IamfLoudness>> subMixLayouts) =>
                 duration: 0,
                 constantSubblockDuration: 0,
               ),
-              defaultMixGainQ7_8: 0,
               defaultMixGain: 0,
             ),
             layouts: [
