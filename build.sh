@@ -679,7 +679,7 @@ build_engine() {
   ensure_gpac
   ensure_ffmpeg
   info "Building C++ audio engine (optimized)…"
-  (cd "$ENGINE_SRC" && bazel build -c opt //:eclipsa_studio_engine)
+  (cd "$ENGINE_SRC" && bazel build -c opt $BAZEL_CODEC_COPTS //:eclipsa_studio_engine)
   mkdir -p "$ENGINE_OUT"
   rm -f "$ENGINE_OUT/$DYLIB_NAME"
   cp "$ENGINE_SRC/bazel-bin/$DYLIB_NAME" "$ENGINE_OUT/$DYLIB_NAME"
@@ -764,9 +764,18 @@ embed_engine_libs() {
 
 SKIP_LINT=false
 ALLOW_DIRTY=false
+BAZEL_CODEC_COPTS=""
+NOTICES_CODEC_FLAGS=""
 for arg in "$@"; do
-  [[ "$arg" == "--no-lint"     ]] && SKIP_LINT=true
-  [[ "$arg" == "--allow-dirty" ]] && ALLOW_DIRTY=true
+  case "$arg" in
+    --no-lint)     SKIP_LINT=true ;;
+    --allow-dirty) ALLOW_DIRTY=true ;;
+    --no-aac|--no-flac|--no-opus)
+      codec=$(printf '%s' "${arg#--no-}" | tr '[:lower:]' '[:upper:]')
+      BAZEL_CODEC_COPTS+=" --copt=-DIAMF_TOOLS_DISABLE_${codec}_DECODER --copt=-DIAMF_TOOLS_DISABLE_${codec}_ENCODER"
+      NOTICES_CODEC_FLAGS+=" $arg"
+      ;;
+  esac
 done
 
 # ─── Commands ────────────────────────────────────────────────────────────
@@ -950,6 +959,7 @@ case "${1:-}" in
         release)   ;;  # alias of the default
         fresh)     FRESH=true ;;
         --no-lint) ;;  # handled globally via SKIP_LINT
+        --no-aac|--no-flac|--no-opus) ;;  # handled globally
         --open)
           [[ $# -ge 2 && -n "$2" ]] || die "--open needs a file"
           OPEN_PATH="$2"
@@ -1098,6 +1108,7 @@ case "${1:-}" in
         --no-notarize) NO_NOTARIZE=true ;;
         --no-lint)     ;;  # handled globally
         --allow-dirty) ;;  # handled globally
+        --no-aac|--no-flac|--no-opus) ;;  # handled globally
         gh-release)    DO_GH_RELEASE=true ;;
         *)             die "Unknown argument: $arg" ;;
       esac
@@ -1162,11 +1173,16 @@ case "${1:-}" in
     # ── Third-party notices (ES-57) ────────────────────────────────────────
     # Committed outputs must match the pinned engine deps. Runs after
     # build_engine so the bazel external repos are fetched.
-    info "Checking third-party notices…"
-    python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" --check \
-      || die "Third-party notices are stale — regenerate with
+    if [[ -n "$NOTICES_CODEC_FLAGS" ]]; then
+      info "Regenerating third-party notices ($NOTICES_CODEC_FLAGS)…"
+      python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" $NOTICES_CODEC_FLAGS
+    else
+      info "Checking third-party notices…"
+      python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" --check \
+        || die "Third-party notices are stale — regenerate with
   python3 scripts/collect_third_party_notices.py
 and commit the result."
+    fi
 
     # ── Build Flutter ─────────────────────────────────────────────────────
     # --build-name / --build-number override pubspec.yaml and stamp the
@@ -1373,6 +1389,9 @@ and commit the result."
     echo "Flags:"
     echo "  --no-lint                    Skip clang-format/clang-tidy/dart format (release only)"
     echo "  --allow-dirty                Allow packaging off a tag or with a dirty tree"
+    echo "  --no-aac                     Disable AAC encoder/decoder in engine and notices"
+    echo "  --no-flac                    Disable FLAC encoder/decoder in engine and notices"
+    echo "  --no-opus                    Disable Opus encoder/decoder in engine and notices"
     echo ""
     echo "Releasing:"
     echo "  Tag is source of truth. To release:"
