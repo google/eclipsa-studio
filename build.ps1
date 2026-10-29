@@ -69,6 +69,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# -- Global codec flags ---------------------------------------------------
+
+$script:BazelCodecCopts = @()
+$script:NoticesCodecFlags = @()
+$Rest = @($Rest | Where-Object {
+    if ($_ -in "--no-aac", "--no-flac", "--no-opus") {
+        $c = $_.Substring(5).ToUpper()
+        $script:BazelCodecCopts += "--copt=-DIAMF_TOOLS_DISABLE_${c}_DECODER",
+                                   "--copt=-DIAMF_TOOLS_DISABLE_${c}_ENCODER"
+        $script:NoticesCodecFlags += $_
+        $false
+    } else { $true }
+})
+
 # -- Layout ---------------------------------------------------------------
 
 $RepoRoot   = $PSScriptRoot
@@ -472,7 +486,7 @@ function Build-Engine {
     Ensure-Ffmpeg
     Push-Location $EngineSrc
     try {
-        $bazelArgs = @("build", "-c", "opt")
+        $bazelArgs = @("build", "-c", "opt") + $script:BazelCodecCopts
         # MSVC expands __FILE__ in headers to the absolute resolved
         # path, so third-party asserts (e.g. libopus celt/pitch.h)
         # embed the builder's username and Bazel output root in the
@@ -977,6 +991,16 @@ switch ($Command) {
         Generate-VersionDart
         Generate-ReleasesJson
         Build-Engine
+
+        if ($script:NoticesCodecFlags.Count -gt 0) {
+            Info "Regenerating third-party notices ($($script:NoticesCodecFlags -join ' '))..."
+            Require-Cmd python "install Python 3 from python.org"
+            $noticesScript = Join-Path $RepoRoot "scripts\collect_third_party_notices.py"
+            & python $noticesScript @script:NoticesCodecFlags
+            if ($LASTEXITCODE -ne 0) {
+                Die "collect_third_party_notices.py failed (exit=$LASTEXITCODE)"
+            }
+        }
 
         # Stamp the exe's VERSIONINFO from the git tag (ES-373). Versioning
         # flows from tags (Generate-VersionDart), never pubspec.yaml — but
