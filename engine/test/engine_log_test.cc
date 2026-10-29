@@ -228,6 +228,77 @@ TEST_F(RtLogRingTest, LongMessagesAreTruncatedNotDropped) {
   EXPECT_LT(captured()[0].category.size(), 16u);
 }
 
+// ── engine_log_lines ────────────────────────────────────────────────
+
+// The messages of all captured entries, joined without a separator.
+std::string JoinedMessages() {
+  std::string joined;
+  for (const Captured& entry : captured()) joined += entry.message;
+  return joined;
+}
+
+TEST_F(RtLogRingTest, LinesAreStagedOneEntryEachWithoutEmptyLines) {
+  engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf",
+                   "first\nsecond\r\n\r\n\nthird\n");
+  eclipsa_studio_rt_log_drain();
+  ASSERT_EQ(captured().size(), 3u);
+  EXPECT_EQ(captured()[0].message, "first");
+  EXPECT_EQ(captured()[1].message, "second");
+  EXPECT_EQ(captured()[2].message, "third");
+  for (const Captured& entry : captured()) {
+    EXPECT_EQ(entry.level, ECLIPSA_STUDIO_LOG_ERROR);
+    EXPECT_EQ(entry.category, "iamf");
+  }
+}
+
+TEST_F(RtLogRingTest, LongLineIsStagedWholeInSlotSizedChunks) {
+  std::string line;
+  for (int i = 0; i < 1200; ++i) line += static_cast<char>('a' + i % 26);
+  engine_log_lines(ECLIPSA_STUDIO_LOG_ERROR, "iamf", line);
+  eclipsa_studio_rt_log_drain();
+  ASSERT_EQ(captured().size(), 3u);
+  EXPECT_EQ(captured()[0].message.size(), 511u);
+  EXPECT_EQ(captured()[1].message.size(), 511u);
+  EXPECT_EQ(captured()[2].message.size(), 178u);
+  EXPECT_EQ(JoinedMessages(), line);
+}
+
+// A cut at 511 bytes that falls on any continuation byte of a 2-byte or
+// a 4-byte UTF-8 character moves back to the start of that character, so
+// every entry is valid UTF-8 (the Dart side decodes each one on its own).
+TEST_F(RtLogRingTest, LongLineIsCutAtUtf8CharacterBoundaries) {
+  const std::string two_byte = "\xC3\xA9";           // U+00E9
+  const std::string four_byte = "\xF0\x9F\x8E\xB5";  // U+1F3B5
+  const struct {
+    size_t prefix;
+    std::string character;
+  } cases[] = {
+      {510, two_byte}, {510, four_byte}, {509, four_byte}, {508, four_byte}};
+  for (const auto& c : cases) {
+    SCOPED_TRACE(testing::Message() << c.prefix << " + " << c.character.size());
+    captured().clear();
+    const std::string line = std::string(c.prefix, 'x') + c.character + "yz";
+    engine_log_lines(ECLIPSA_STUDIO_LOG_WARN, "iamf", line);
+    eclipsa_studio_rt_log_drain();
+    ASSERT_EQ(captured().size(), 2u);
+    EXPECT_EQ(captured()[0].message, std::string(c.prefix, 'x'));
+    EXPECT_EQ(captured()[1].message, c.character + "yz");
+  }
+}
+
+// Continuation bytes with no lead byte are not UTF-8. The cut moves back
+// at most 3 bytes, so each entry still holds at least 508 of them and no
+// byte is lost.
+TEST_F(RtLogRingTest, LineOfContinuationBytesIsStagedWhole) {
+  const std::string line(600, '\x80');
+  engine_log_lines(ECLIPSA_STUDIO_LOG_WARN, "iamf", line);
+  eclipsa_studio_rt_log_drain();
+  ASSERT_EQ(captured().size(), 2u);
+  EXPECT_EQ(captured()[0].message.size(), 508u);
+  EXPECT_EQ(captured()[1].message.size(), 92u);
+  EXPECT_EQ(JoinedMessages(), line);
+}
+
 TEST_F(RtLogRingTest, NullStringsAreSafe) {
   engine_log_rt(ECLIPSA_STUDIO_LOG_INFO, nullptr, nullptr);
   eclipsa_studio_rt_log_drain();

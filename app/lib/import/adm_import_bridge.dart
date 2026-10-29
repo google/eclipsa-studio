@@ -30,11 +30,8 @@ export '../ffi/engine_bindings.dart' show Adm2iamfRenderConfig;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Dart bridge over the ADM->bed converter's flat C ABI (adm2iamf_*), which is
-// linked into libeclipsa_studio_engine.dylib (see engine/adm_import/ffi).
-// Ported from ../adm-to-iamf-converter/app/lib/ffi_bridge.dart; the only
-// substantive change is that it opens the *engine* dylib (the one ES already
-// loads) rather than a standalone libadm2iamf.dylib. The C ABI mirror tracks
-// engine/adm_import/ffi/adm2iamf_ffi.h field-for-field.
+// linked into the engine library (see engine/adm_import/ffi). The C ABI
+// mirror tracks engine/adm_import/ffi/adm2iamf_ffi.h field-for-field.
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Job state (`adm2iamf_render_state`).
@@ -104,9 +101,11 @@ class AdmImportBridge {
     try {
       final out = _bindings.admProbeJson(pathPtr);
       if (out == nullptr) return '{"ok":false,"error":"null result"}';
-      final s = out.toDartString();
-      _bindings.admStringFree(out);
-      return s;
+      try {
+        return out.toDartString();
+      } finally {
+        _bindings.admStringFree(out);
+      }
     } finally {
       malloc.free(pathPtr);
     }
@@ -152,9 +151,11 @@ class AdmImportBridge {
   String? renderResultJson(int job) {
     final out = _bindings.admRenderResultJson(job);
     if (out == nullptr) return null;
-    final s = out.toDartString();
-    _bindings.admStringFree(out);
-    return s;
+    try {
+      return out.toDartString();
+    } finally {
+      _bindings.admStringFree(out);
+    }
   }
 
   void renderCancel(int job) => _bindings.admRenderCancel(job);

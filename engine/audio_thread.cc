@@ -219,6 +219,11 @@ void AudioThread::data_callback(void* output, uint32_t frames,
     // And for clip clears: a request posted just before a pause (or an
     // EOF auto-pause) must not stay stranded until the next play.
     self->graph_->consume_pending_clip_clear();
+    // And for output-channel solo and mute (ES-999): the gains ramp only
+    // in process(), so a change made while paused is set at once here,
+    // and the first block after play does not ramp a muted channel
+    // down from full level.
+    self->graph_->settle_output_solo_mute();
     // And for staged IAMF seeks (ES-473): a scrub while paused must
     // reach the session now — process() (which runs the seek state
     // machine) is skipped on this branch, and resume would otherwise

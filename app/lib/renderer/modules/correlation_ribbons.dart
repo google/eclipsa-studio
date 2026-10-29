@@ -13,11 +13,11 @@
 // limitations under the License.
 
 import 'dart:math' as math;
-import 'dart:ui' show Color;
 
 import 'package:vector_math/vector_math.dart';
 
 import '../../ffi_bridge.dart' show kStatsCorrMaxChannels;
+import '../../theme.dart';
 import '../coordinate_utils.dart';
 import '../viz_layer.dart';
 import '../viz_module.dart';
@@ -126,7 +126,7 @@ class CorrelationRibbonsModule extends ChannelVizModule {
       final n = math.min(stats.channelCount, kStatsCorrMaxChannels);
       if (n < 2) continue;
 
-      final color = Color(e.element.color);
+      final color = aeTypeColor(e.element.type);
 
       // Precompute speaker positions so we don't recompute per pair.
       // Clear the reused scratch for this element's channel range.

@@ -15,7 +15,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../export/iamf_profile_rules.dart' show audioElementChannelCount;
+import '../export/iamf_profile_rules.dart'
+    show ProfileConflictKind, audioElementChannelCount, profileConflicts;
 import '../state.dart';
 import '../theme.dart';
 import 'app_dialog.dart';
@@ -47,6 +48,7 @@ class SessionSettingsDialog extends ConsumerWidget {
     ref.watch(fontSizeModeProvider);
     final profile = ref.watch(iamfProfileProvider);
     final elements = ref.watch(elementsProvider);
+    final mixes = ref.watch(mixesNotifierProvider);
 
     // Model-derived (not wavInfo) so the readout matches the profile selector
     // and profileConflicts even when an element's WAV is missing/undecoded.
@@ -69,11 +71,24 @@ class SessionSettingsDialog extends ConsumerWidget {
     final chanOverflow = totalChannels - profile.maxChannels;
     final objectViolation = hasObjectElements && !profile.allowObjectBased;
     final mixedViolation = hasMixedTypes && !profile.allowMixedTypes;
+    // The object mix presentation rules depend on which elements each mix
+    // includes, so they come from profileConflicts rather than the counts.
+    final objectMixKinds = profile.requiresObjectOnlyMixes
+        ? profileConflicts(elements: elements, mixes: mixes, profile: profile)
+              .map((c) => c.kind)
+              .where(
+                (k) =>
+                    k == ProfileConflictKind.objectMixedWithOtherTypes ||
+                    k == ProfileConflictKind.firstMixNotObjectOnly,
+              )
+              .toSet()
+        : const <ProfileConflictKind>{};
     final hasViolations =
         elemOverflow > 0 ||
         chanOverflow > 0 ||
         objectViolation ||
-        mixedViolation;
+        mixedViolation ||
+        objectMixKinds.isNotEmpty;
 
     return DialogShell(
       title: 'Session Settings',
@@ -113,6 +128,7 @@ class SessionSettingsDialog extends ConsumerWidget {
             objectViolation: objectViolation,
             mixedViolation: mixedViolation,
             hasMixedTypes: hasMixedTypes,
+            objectMixKinds: objectMixKinds,
             hasViolations: hasViolations,
           ),
         ],
@@ -193,6 +209,10 @@ class _ProfileConstraintPanel extends StatelessWidget {
   final bool objectViolation;
   final bool mixedViolation;
   final bool hasMixedTypes;
+
+  /// The object mix presentation conflicts the session has under
+  /// [profile]; empty when it has none or the profile has no such rule.
+  final Set<ProfileConflictKind> objectMixKinds;
   final bool hasViolations;
 
   const _ProfileConstraintPanel({
@@ -206,6 +226,7 @@ class _ProfileConstraintPanel extends StatelessWidget {
     required this.objectViolation,
     required this.mixedViolation,
     required this.hasMixedTypes,
+    required this.objectMixKinds,
     required this.hasViolations,
   });
 
@@ -272,6 +293,27 @@ class _ProfileConstraintPanel extends StatelessWidget {
             violation: mixedViolation,
             hint: mixedViolation ? 'Use a single element type' : null,
           ),
+          if (profile.requiresObjectOnlyMixes) ...[
+            const SizedBox(height: 4),
+            _ConstraintRow(
+              label: 'Object mixes',
+              limit: 'Object-only, first',
+              current: objectMixKinds.isNotEmpty
+                  ? 'Not met'
+                  : objectCount > 0
+                  ? 'Met'
+                  : 'No objects',
+              violation: objectMixKinds.isNotEmpty,
+              hint:
+                  objectMixKinds.contains(
+                    ProfileConflictKind.objectMixedWithOtherTypes,
+                  )
+                  ? 'Give object-based elements their own mix presentation'
+                  : objectMixKinds.isNotEmpty
+                  ? 'Move an object-only mix presentation first'
+                  : null,
+            ),
+          ],
         ],
       ),
     );
@@ -296,24 +338,33 @@ class _ConstraintRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final warnColor = T.meterYellow;
+    // The value and its hint take the rest of the row and wrap: the
+    // Object mixes hints are wider than the 560 px dialog leaves them.
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(width: 110, child: Text(label, style: T.styleBodySecondary)),
         SizedBox(width: 90, child: Text(limit, style: T.styleBody)),
-        Text(
-          current,
-          style: TextStyle(
-            color: violation ? warnColor : T.textTertiary,
-            fontSize: T.fontBody,
+        Expanded(
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: current,
+                  style: TextStyle(
+                    color: violation ? warnColor : T.textTertiary,
+                  ),
+                ),
+                if (violation && hint != null)
+                  TextSpan(
+                    text: '  \u2014 $hint',
+                    style: TextStyle(color: warnColor),
+                  ),
+              ],
+            ),
+            style: TextStyle(fontSize: T.fontBody),
           ),
         ),
-        if (violation && hint != null) ...[
-          const SizedBox(width: 8),
-          Text(
-            '\u2014 $hint',
-            style: TextStyle(color: warnColor, fontSize: T.fontBody),
-          ),
-        ],
       ],
     );
   }

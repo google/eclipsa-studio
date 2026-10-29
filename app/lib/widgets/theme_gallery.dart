@@ -24,11 +24,13 @@ import '../theme.dart';
 import '../video/video_strip.dart';
 import '../video/video_track.dart';
 import '../views/gain_slider.dart';
+import 'ae_type_badge.dart';
 import 'app_button.dart';
 import 'app_dialog.dart';
 import 'chrome_surface.dart';
 import 'component_index.dart';
 import 'component_info.dart';
+import 'console_chip.dart';
 import 'console_widgets.dart';
 import 'dialog_shell.dart';
 import 'drop_zone.dart';
@@ -38,14 +40,17 @@ import 'eclipsa_studio_mark.dart';
 import 'eclipsa_studio_wordmark.dart';
 import 'eyebrow_label.dart';
 import 'gain_knob.dart';
+import 'mix_presentation_label.dart';
+import 'option_grid.dart';
 import 'solo_mute_button.dart';
+import 'status_tag.dart';
 import 'statusbar.dart';
 import 'time_ruler.dart';
-import 'topbar_selector.dart';
 import 'topbar_tab.dart';
 import 'track_lanes.dart';
 import 'transport_clock.dart';
 import 'transport_controls.dart';
+import 'youtube_support_badge.dart';
 
 /// The gallery's timeline demo: 16:44.231 long with the playhead at
 /// 3:07.153, the clock card's readout.
@@ -640,6 +645,7 @@ class _Primitives extends StatefulWidget {
 class _PrimitivesState extends State<_Primitives> {
   bool _toggle = true;
   int _seg = 0;
+  int _target = 0;
   int _sel = 0;
   double _fader = 0;
   int _tab = 0;
@@ -767,22 +773,25 @@ class _PrimitivesState extends State<_Primitives> {
               ),
             ),
           ),
-          // The mix presentation switcher with its label, as the top bar
-          // places them. Its control is SelectorChrome, shared with
-          // ConsoleSelector below, so the two cards must agree.
+          // The label beside the mix presentation switcher, a
+          // ConsoleSelector, as the top bar places them.
           _ComponentCard(
-            id: 'TopbarSelector',
+            id: 'MixPresentationLabel',
             child: _TopbarStrip(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const MixPresentationLabel(),
                   const SizedBox(width: 8),
-                  TopbarSelector(
-                    items: const ['Main Mix', 'Stereo Downmix', 'Dialogue'],
-                    activeIndex: _mix,
-                    emptyLabel: 'No mix presentations',
-                    onSelect: (v) => setState(() => _mix = v),
+                  ConsoleSelector<int>(
+                    width: 180,
+                    value: _mix,
+                    items: const [
+                      (0, 'Main Mix'),
+                      (1, 'Stereo Downmix'),
+                      (2, 'Dialogue'),
+                    ],
+                    onChanged: (v) => setState(() => _mix = v),
                   ),
                 ],
               ),
@@ -842,6 +851,89 @@ class _PrimitivesState extends State<_Primitives> {
               value: _seg,
               options: const [(0, 'Top'), (1, 'Front'), (2, '3D')],
               onChanged: (v) => setState(() => _seg = v),
+            ),
+          ),
+          // The Mix view's uses: the active mix presentation tab and
+          // another one, a tagged layout, the add button, and a disabled
+          // chip.
+          _ComponentCard(
+            id: 'ConsoleChip',
+            child: Wrap(
+              spacing: T.gapXs,
+              runSpacing: T.gapXs,
+              children: [
+                ConsoleChip(
+                  selected: true,
+                  onTap: () {},
+                  semanticLabel: 'Main',
+                  child: const Text('Main'),
+                ),
+                ConsoleChip(
+                  onTap: () {},
+                  semanticLabel: 'Commentary',
+                  child: const Text('Commentary'),
+                ),
+                const ConsoleChip(child: Text('5.1.4')),
+                ConsoleChip(
+                  onTap: () {},
+                  semanticLabel: 'Add layout',
+                  child: const Icon(Icons.add),
+                ),
+                const ConsoleChip(enabled: false, child: Text('7.1.4')),
+              ],
+            ),
+          ),
+          // Every tone in use: neutral, the loudness bar's LIVE, accent,
+          // warning, outlined in two inks, and with an icon.
+          _ComponentCard(
+            id: 'StatusTag',
+            child: Wrap(
+              spacing: T.gapXs,
+              runSpacing: T.gapXs,
+              children: [
+                const StatusTag('MOMENTARY'),
+                StatusTag('LIVE', color: T.textSecondary, fill: T.bgSelected),
+                StatusTag('Most common', color: T.purpleLight),
+                StatusTag('EXPERIMENTAL', color: T.meterYellow),
+                StatusTag('IAMF', color: T.purpleLight, outlined: true),
+                StatusTag('MON', color: T.objAmber, outlined: true),
+                const YouTubeSupportBadge(),
+              ],
+            ),
+          ),
+          // At the Renderer view's panel width, with 7.1.4 unavailable;
+          // below, the same set pinned with the unavailable option
+          // selected, as the panel shows a live target the output device
+          // cannot play.
+          _ComponentCard(
+            id: 'OptionGrid',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final (selected, pinned) in [
+                  (_target, false),
+                  (2, true),
+                ]) ...[
+                  if (pinned) const SizedBox(height: T.gapSm),
+                  SizedBox(
+                    width: 216,
+                    child: OptionGrid<int>(
+                      value: selected,
+                      options: const [
+                        (0, 'Stereo'),
+                        (1, '5.1'),
+                        (2, '7.1.4'),
+                        (3, 'Binaural'),
+                        (4, '9.1.6'),
+                      ],
+                      unavailable: const {2},
+                      onChanged: pinned
+                          ? (_) {}
+                          : (v) => setState(() => _target = v),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
           _ComponentCard(
@@ -1346,7 +1438,7 @@ class _PrimitivesState extends State<_Primitives> {
             _ComponentCard(id: id),
           const SizedBox(height: T.gapMd),
           Text(
-            'Element type badges are drawn only in this gallery.',
+            'Element type lines, as the Mix and Renderer cards draw them.',
             style: TextStyle(color: T.textGhost, fontSize: T.fontCaption),
           ),
           const SizedBox(height: T.gapSm),
@@ -1354,12 +1446,12 @@ class _PrimitivesState extends State<_Primitives> {
             spacing: T.gapMd,
             runSpacing: T.gapSm,
             children: [
-              for (final (label, c) in <(String, Color)>[
-                ('Object', T.typeObject),
-                ('Channel', T.typeChannel),
-                ('Scene', T.typeScene),
+              for (final (type, layout) in const [
+                ('Object', 'Mono'),
+                ('Channel', '7.1.4'),
+                ('Scene', '3OA'),
               ])
-                _TypeBadge(label: label, color: c),
+                AeTypeBadge(type: type, layout: layout),
             ],
           ),
         ],
@@ -1635,28 +1727,6 @@ class _UsageList extends StatelessWidget {
               ),
             ),
         ],
-      ),
-    );
-  }
-}
-
-class _TypeBadge extends StatelessWidget {
-  const _TypeBadge({required this.label, required this.color});
-
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(T.radiusSm),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(color: color, fontSize: T.fontCaption),
       ),
     );
   }

@@ -222,6 +222,69 @@ void main() {
       );
     });
 
+    test('Base-Advanced rejects object + channel in one mix', () {
+      final r = validateIamfExport(
+        _config(
+          profile: IamfProfile.baseAdvanced,
+          elements: [
+            _objectElement(id: 1),
+            _channelElement(id: 2, layout: 'Stereo'),
+          ],
+          mixes: [
+            _mix(
+              subMixes: [
+                const SubMix(
+                  layouts: [
+                    MixLayout(
+                      soundSystem: SoundSystem.stereo,
+                      loudness: LoudnessInfo(integratedLoudness: -18.0),
+                    ),
+                  ],
+                  elementSettings: [
+                    MixElementSettings(elementId: 1),
+                    MixElementSettings(elementId: 2),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+      expect(
+        r.errors.map((i) => i.code),
+        contains(ExportIssueCode.profileObjectMixedWithOtherTypes),
+      );
+    });
+
+    test('Base-Advanced rejects a channel mix before an object mix', () {
+      SubMix subMix(int elementId) => SubMix(
+        layouts: const [
+          MixLayout(
+            soundSystem: SoundSystem.stereo,
+            loudness: LoudnessInfo(integratedLoudness: -18.0),
+          ),
+        ],
+        elementSettings: [MixElementSettings(elementId: elementId)],
+      );
+      final r = validateIamfExport(
+        _config(
+          profile: IamfProfile.baseAdvanced,
+          elements: [
+            _objectElement(id: 1),
+            _channelElement(id: 2, layout: 'Stereo'),
+          ],
+          mixes: [
+            _mix(id: 1, name: 'Bed', subMixes: [subMix(2)]),
+            _mix(id: 2, name: 'Objects', subMixes: [subMix(1)]),
+          ],
+        ),
+      );
+      expect(
+        r.errors.map((i) => i.code),
+        contains(ExportIssueCode.profileFirstMixNotObjectOnly),
+      );
+    });
+
     test('Base-Enhanced allows mixed types', () {
       final r = validateIamfExport(
         _config(

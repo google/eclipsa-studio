@@ -19,6 +19,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state.dart';
 import '../theme.dart';
+import '../workspace/workspace_mode.dart';
 import 'app_dialog.dart';
 import 'dialog_shell.dart';
 import 'eyebrow_label.dart';
@@ -48,6 +49,9 @@ class ShortcutsDialog extends ConsumerWidget {
     // (its route has no rebuilding parent — the const-skip pattern).
     ref.watch(themeModeProvider);
     ref.watch(fontSizeModeProvider);
+    // The tab rows list the open workspace's tabs; the landing screen
+    // has none.
+    final tabs = WorkspaceTabs.allowedIn(ref.watch(workspaceModeProvider));
 
     return DialogShell(
       title: 'Keyboard Shortcuts',
@@ -118,6 +122,8 @@ class ShortcutsDialog extends ConsumerWidget {
           _Section(
             label: 'View',
             shortcuts: [
+              for (final (i, id) in tabs.indexed)
+                _Shortcut('${WorkspaceTabs.title(id)} tab', [_mod('${i + 1}')]),
               _Shortcut('Toggle fullscreen', [
                 _isMac ? ['⌃', '⌘', 'F'] : ['F11'],
               ]),

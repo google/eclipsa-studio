@@ -22,7 +22,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 
-import '../ffi_bridge.dart' show AudioDeviceInfo, PlaybackAe;
+import '../ffi_bridge.dart'
+    show AudioDeviceInfo, EclipsaStudioEngine, PlaybackAe;
 import '../logging/log.dart';
 import '../meters/db_utils.dart';
 import '../meters/meter_ballistics.dart';
@@ -45,6 +46,7 @@ import '../workspace/workspace_actions.dart'
     show openIamfForQc, publishPlaybackDuration;
 import '../workspace/workspace_close.dart';
 import '../workspace/workspace_mode.dart';
+import '../workspace/workspace_tab_shortcuts.dart';
 import 'import_error_dialog.dart';
 import 'ok_dialog.dart';
 import 'statusbar.dart';
@@ -62,14 +64,28 @@ bool _autoLoadConsumed = false;
 // only an open workspace. Latched for the process lifetime.
 bool _startupRestoreDone = false;
 
-// One-shot guard for the `--iamf <path>` startup auto-open. Module-level
-// so it survives StartupRestore State re-creation and fires exactly once.
+// One-shot guard for the launch-parameter Playback open. Module-level so
+// it survives StartupRestore State re-creation and fires exactly once.
 bool _autoOpenIamfConsumed = false;
 
 // Bumped on every applyMonitoringForDevice call. A call that finds the token
 // changed after its async prefs read knows a newer apply superseded it and
 // bows out, so overlapping device switches can't race the config write.
 int _applyMonitoringGeneration = 0;
+
+/// Height kept for the workspace view under the video panel (ES-1027).
+/// Measured 1400 px wide, the Mix view needs 306 px at the Large font
+/// size, the Renderer view 122 px and the Elements view 112 px.
+const double kMinWorkspaceViewHeight = 320;
+
+/// The maximum height of the video panel, including the border under
+/// the strip, when [available] px lie between the top bar and the status
+/// bar (ES-1027): the least of 600 px, half of [available], and
+/// [available] less [kMinWorkspaceViewHeight]. Below 320 px of
+/// [available] it is negative; the panel keeps its 100 px strip whatever
+/// the value.
+double videoPanelMaxHeight(double available) =>
+    math.min(600, math.min(available / 2, available - kMinWorkspaceViewHeight));
 
 /// Element-wise equality for two routing-mask lists (null-safe). Used to
 /// decide whether a same-layout config change actually edited the patch and
@@ -86,6 +102,32 @@ bool _sameMasks(List<int>? a, List<int>? b) {
 // One-shot guard for the "audio output unavailable" SnackBar — process
 // lifetime, shared by the startup restore and the AppShell tick.
 bool _audioOutputUnavailableNotified = false;
+
+/// The `--quit-after-load` verdict once the launch file has opened (a
+/// session, [what] `session`, or a Playback file, [what] `playback`):
+/// exit 0 when it [opened] and the engine is initialised, exit 1
+/// otherwise. The audio thread may legitimately be down on headless
+/// machines (no output device), so it is reported but not required.
+/// Skips Flutter and window-manager teardown deliberately via
+/// [hardExit]: on Windows a plain `exit()` still runs the orderly
+/// plugin teardown, which wedges in the ANGLE GL teardown and leaves a
+/// window-less zombie instead of exiting (ES-389).
+Never quitAfterStartupOpen(
+  EclipsaStudioEngine? engine, {
+  required bool opened,
+  required String what,
+}) {
+  final ok = opened && engine != null;
+  final audioRunning = engine?.isAudioThreadRunning ?? false;
+  // STABLE LOG CONTRACT (issue ES-39): smoke tests parse this line.
+  Log.i(
+    LogCat.app,
+    'quit-after-load: ${ok ? 'ok' : 'failed'} '
+    '($what=$opened engine=${engine != null} audio=$audioRunning) '
+    '— exit ${ok ? 0 : 1}',
+  );
+  hardExit(ok ? 0 : 1);
+}
 
 /// Sits above the workspace-mode switch so engine-global restore and
 /// listeners run whether the app opens on the landing screen or straight
@@ -469,21 +511,49 @@ class _StartupRestoreState extends ConsumerState<StartupRestore> {
       if (!mounted) return;
       _restoreStartupSettings(ref, context);
       _maybeAutoOpenIamf(ref, context);
+      _maybeQuitWithoutEngine(ref);
     });
   }
 
-  // `--iamf <path>` startup hook: open the file in Playback mode once the
-  // first frame is up. StartupRestore is mounted for every workspace mode
-  // (it wraps the mode router), so this fires whether the app booted to
-  // the landing screen or elsewhere; openIamfForQc drives the switch to
-  // Playback itself. Latched so a StartupRestore remount can't reopen it.
-  void _maybeAutoOpenIamf(WidgetRef ref, BuildContext context) {
+  // Without the engine the engine-unavailable screen replaces AppShell,
+  // so a launch session is never loaded; an unattended --quit-after-load
+  // run gives its session verdict here. A Playback file reaches its own
+  // verdict through _maybeAutoOpenIamf.
+  void _maybeQuitWithoutEngine(WidgetRef ref) {
+    if (!ref.read(quitAfterLoadProvider)) return;
+    if (ref.read(autoLoadSessionProvider) == null) return;
+    final engine = ref.read(eclipsaStudioEngineProvider);
+    if (engine != null) return;
+    quitAfterStartupOpen(null, opened: false, what: 'session');
+  }
+
+  // Launch-parameter Playback open (`--open` with a Playback file,
+  // `--playback`, or its old name `--iamf`): open the file in Playback
+  // mode once the first frame is up. StartupRestore is mounted for every
+  // workspace mode (it wraps the mode router), so this fires whether the
+  // app booted to the landing screen or elsewhere; openIamfForQc drives
+  // the switch to Playback itself. Latched so a StartupRestore remount
+  // can't reopen it. Under --quit-after-load the open shows no error
+  // dialog and the process exits with the verdict once it completes.
+  Future<void> _maybeAutoOpenIamf(WidgetRef ref, BuildContext context) async {
     if (_autoOpenIamfConsumed) return;
     _autoOpenIamfConsumed = true;
     final path = ref.read(autoLoadIamfProvider);
     if (path == null) return;
-    Log.i(LogCat.app, 'Auto-opening IAMF: $path');
-    openIamfForQc(context, ref, path: path);
+    final quit = ref.read(quitAfterLoadProvider);
+    // Read once, before the open; the verdict below reports it.
+    final engine = ref.read(eclipsaStudioEngineProvider);
+    Log.i(LogCat.app, 'Auto-opening for Playback: $path');
+    var opened = false;
+    try {
+      opened = await openIamfForQc(context, ref, path: path, showErrors: !quit);
+    } catch (e, st) {
+      // Error subclasses too: under --quit-after-load the process must
+      // reach the verdict below.
+      Log.e(LogCat.app, 'Unexpected error during the Playback open: $e', st);
+    } finally {
+      if (quit) quitAfterStartupOpen(engine, opened: opened, what: 'playback');
+    }
   }
 
   @override
@@ -602,30 +672,20 @@ Future<void> _restoreAudioSettings(WidgetRef ref, BuildContext context) async {
   if (context.mounted) _notifyIfAudioOutputUnavailable(ref, context);
 }
 
-/// Name of the currently-selected output device, or null if none is
-/// resolved yet. Device identity is the device name (matching the
-/// "persist by name" pattern used for the saved audio device) — no stable
-/// UID is exposed by the engine.
-String? _currentDeviceName(WidgetRef ref) {
-  final devices = ref.read(audioDevicesProvider);
-  final idx = ref.read(audioSettingsProvider).deviceIndex;
-  if (idx < 0 || idx >= devices.length) return null;
-  return devices[idx].name;
-}
-
 /// Load and apply the monitoring config + output labels for the current
-/// device. Used by startup restore, device-switch, and Reset to Defaults —
-/// one shared apply path, no relaunch needed. Falls back to
-/// [MonitoringConfig.initial] when the device has no saved entry. The
-/// global limiter law is always overlaid from
-/// [AppPreferences] — it is not per-device state, but it rides this
-/// path so one apply restores everything the MONITORING panel shows.
+/// device, and record that device in [monitoringDeviceNameProvider], the
+/// name later edits are saved under. Startup restore, device switch and
+/// Reset to Defaults all call it, and none of them needs a relaunch.
+/// Falls back to [MonitoringConfig.initial] when the device has no saved
+/// entry. The global limiter law is not per-device state; it is always
+/// overlaid from [AppPreferences] so that one call restores everything
+/// the MONITORING panel shows.
 Future<void> applyMonitoringForDevice(WidgetRef ref) async {
   // Bump a generation token so a newer apply (e.g. a fast second device
   // switch) that starts while this one awaits the prefs read wins instead of
   // both racing to write monitoringConfigProvider.
   final generation = ++_applyMonitoringGeneration;
-  final deviceName = _currentDeviceName(ref);
+  final deviceName = selectedOutputDeviceName(ref);
   // Let queued saves land first; loading around an in-flight save would
   // snapshot stale prefs and resurrect an outdated device entry.
   await monitoringSavesSettled();
@@ -656,6 +716,7 @@ Future<void> applyMonitoringForDevice(WidgetRef ref) async {
   // routing used to get clamped on disk and lost (ES-63).
   _applyingMonitoring = true;
   try {
+    ref.read(monitoringDeviceNameProvider.notifier).set(deviceName);
     ref.read(monitoringConfigProvider.notifier).set(cfg);
     ref.read(outputLabelsProvider.notifier).replaceAll(labels);
   } finally {
@@ -673,13 +734,13 @@ Future<void> applyMonitoringForDevice(WidgetRef ref) async {
 /// persistence path so a restore can never write back to disk.
 bool _applyingMonitoring = false;
 
-/// Persist the current monitoring config + labels under the current device
-/// name. No-op if no device is resolved yet (first launch) or while a
-/// restore is being applied (restore is read-only). Reads the device name
-/// at write time so a device switch keys the write correctly.
+/// Persist the current monitoring config + labels under the name of the
+/// device they belong to ([monitoringDeviceNameProvider]). No-op before
+/// the first apply, when no device was resolved, or while a restore is
+/// being applied (restore is read-only).
 void persistMonitoringForDevice(WidgetRef ref) {
   if (_applyingMonitoring) return;
-  final name = _currentDeviceName(ref);
+  final name = ref.read(monitoringDeviceNameProvider);
   if (name == null) return;
   final cfg = ref.read(monitoringConfigProvider);
   final labels = ref.read(outputLabelsProvider);
@@ -780,13 +841,10 @@ class _AppShellState extends ConsumerState<AppShell>
       return _playbackScales;
     }
     if (identical(session, _playbackScaleSession)) return _playbackScales;
-    final mps = session.report.mixPresentations;
-    final idx = session.activeMixIndex;
     _playbackScaleSession = session;
-    _playbackScales = computeMixMeterScales(
-      (idx >= 0 && idx < mps.length) ? mps[idx] : null,
-      [for (final ae in session.audioElements) ae.audioElementId],
-    );
+    _playbackScales = computeMixMeterScales(session.selectedMix, [
+      for (final ae in session.audioElements) ae.audioElementId,
+    ]);
     return _playbackScales;
   }
 
@@ -868,10 +926,12 @@ class _AppShellState extends ConsumerState<AppShell>
 
     // Push the active mix presentation's IAMF metadata to OAR whenever
     // the active mix or sub-mix changes, so the renderer follows the
-    // user's selection. Fader-driven updates to the currently-active
-    // mix are pushed directly from the mix view (see _ChannelStrip._update
-    // and _MasterStrip._setOutputMixGain); session-load gets a bulk push
-    // from SessionNotifier._syncActiveMixGainsToEngine.
+    // user's selection. Gain changes to the currently-active mix are
+    // pushed directly from the mix view (see _ChannelStrip._update
+    // and _OutputMixGainField._setOutputMixGain), and so is a mix deletion,
+    // which can leave both indices unchanged (_confirmDeleteMix);
+    // session-load gets a bulk push from
+    // SessionNotifier._syncActiveMixGainsToEngine.
     ref.listenManual(
       activeMixProvider,
       (prev, next) => _pushActiveMixSettings(),
@@ -914,35 +974,21 @@ class _AppShellState extends ConsumerState<AppShell>
     ref.read(importNoticeProvider.notifier).clear();
   }
 
-  /// Forward IAMF mix metadata (per-element mix gain, output mix gain,
-  /// and element_rendering_config) for the currently-active mix and
-  /// sub-mix to the C++ engine. Safe to call at any time — no-ops when
-  /// the engine isn't ready or indices are out of range. The rendering
-  /// config pushes are staged and then committed with a single OAR
-  /// rebuild so N elements cost one rebuild instead of N.
+  /// Forward IAMF mix metadata (per-element exclusion and mix gain,
+  /// output mix gain, and element_rendering_config) for the
+  /// currently-active mix and sub-mix to the C++ engine. Safe to call at
+  /// any time — no-ops when the engine isn't ready or indices are out of
+  /// range. The rendering configs are committed with a single OAR
+  /// rebuild ([pushSubMixSettings]).
   void _pushActiveMixSettings() {
     final engine = ref.read(eclipsaStudioEngineProvider);
-    if (engine == null) return;
-    final mixes = ref.read(mixesNotifierProvider);
-    final mixIdx = ref.read(activeMixProvider);
-    if (mixIdx < 0 || mixIdx >= mixes.length) return;
-    final mix = mixes[mixIdx];
-    final subIdx = ref.read(activeSubMixProvider);
-    if (subIdx < 0 || subIdx >= mix.subMixes.length) return;
-    final sub = mix.subMixes[subIdx];
-    final elements = ref.read(elementsProvider);
-    for (final el in elements) {
-      final s = sub.settingsFor(el.id);
-      engine.setElementMixExcluded(el.id, !s.included);
-      engine.setElementMixGain(el.id, s.mixGain);
-      // Coerce headphones mode via effectiveHeadphonesMode so channel-
-      // based Binaural elements are pushed as mode 0 (stereo) regardless
-      // of the stored value — must match _ChannelStrip._update.
-      final mode = s.effectiveHeadphonesMode(el).index;
-      engine.stageElementRenderingConfig(el.id, mode, s.binauralProfile.index);
-    }
-    engine.commitRenderingConfig();
-    engine.setOutputMixGain(sub.outputMixGain);
+    final sub = activeSubMixOf(
+      ref.read(mixesNotifierProvider),
+      ref.read(activeMixProvider),
+      ref.read(activeSubMixProvider),
+    );
+    if (engine == null || sub == null) return;
+    pushSubMixSettings(engine, sub, ref.read(elementsProvider));
   }
 
   /// Restore AppShell-scoped settings from preferences. Loads the
@@ -1054,31 +1100,13 @@ class _AppShellState extends ConsumerState<AppShell>
       Log.e(LogCat.session, 'Unexpected error during auto-load: $e');
     } finally {
       if (ref.read(quitAfterLoadProvider)) {
-        await _quitAfterLoad(loaded);
+        quitAfterStartupOpen(
+          ref.read(eclipsaStudioEngineProvider),
+          opened: loaded,
+          what: 'session',
+        );
       }
     }
-  }
-
-  /// `--quit-after-load` smoke-test contract: exit 0 when the
-  /// auto-loaded session is up and the engine is initialised, exit 1
-  /// otherwise. The audio thread may legitimately be down on headless
-  /// machines (no output device), so it is reported but not required.
-  /// Skips Flutter and window-manager teardown deliberately via
-  /// [hardExit] — on Windows a plain `exit()` still runs the orderly
-  /// plugin teardown, which wedges in the ANGLE GL teardown and leaves
-  /// a window-less zombie instead of exiting (ES-389).
-  Future<void> _quitAfterLoad(bool loaded) async {
-    final engine = ref.read(eclipsaStudioEngineProvider);
-    final ok = loaded && engine != null;
-    final audioRunning = engine?.isAudioThreadRunning ?? false;
-    // STABLE LOG CONTRACT (issue ES-39): smoke tests parse this line.
-    Log.i(
-      LogCat.app,
-      'quit-after-load: ${ok ? 'ok' : 'failed'} '
-      '(session=$loaded engine=${engine != null} audio=$audioRunning) '
-      '— exit ${ok ? 0 : 1}',
-    );
-    hardExit(ok ? 0 : 1);
   }
 
   void _onTick(Duration elapsed) {
@@ -1259,16 +1287,24 @@ class _AppShellState extends ConsumerState<AppShell>
       } else if (eng != null) {
         if (eng.isAudioThreadRunning) {
           final frames = eng.transportPositionFrames();
-          ref.read(transportProvider.notifier).setSamplePosition(frames);
-          // Drift-correct the video player against the audio-thread
-          // clock. The video listener in video_sync.dart handles
-          // large jumps (>100 ms) from user seeks; this path handles
-          // the gentle accumulated drift during continuous playback.
           // Source the rate from the engine, not transport.sampleRate:
           // `frames` is in engine-rate, so converting through any stale
           // transport rate scales audioSeconds by the rate ratio and
           // drift-seeks the video to the wrong time (ES-218).
           final sampleRate = eng.currentSampleRate;
+          // Playback that reached the end since the last tick reads
+          // past it by what the engine rendered since then: one tick
+          // and one audio block, plus 100 ms for devices that deliver
+          // blocks in bursts and for a late tick (ES-967).
+          final pastEndTolerance =
+              ((dt + 0.1) * sampleRate).ceil() + eng.currentBufferSize;
+          ref
+              .read(transportProvider.notifier)
+              .setSamplePosition(frames, pastEndTolerance: pastEndTolerance);
+          // Drift-correct the video player against the audio-thread
+          // clock. The video listener in video_sync.dart handles
+          // large jumps (>100 ms) from user seeks; this path handles
+          // the gentle accumulated drift during continuous playback.
           if (sampleRate > 0) {
             final audioSeconds = frames / sampleRate;
             // Fire and forget — syncToAudio has its own in-flight
@@ -1378,15 +1414,11 @@ class _AppShellState extends ConsumerState<AppShell>
         // a video-only session stops at the video's end.
         if (looping) {
           // resetPosition (not wrapPlaybackTo(0)): a whole-timeline
-          // wrap also clears the play-start mark — pre-existing
-          // semantics.
+          // wrap also sets the play-start to 0.
           ref.read(transportProvider.notifier).resetPosition();
           syncWrapToEngine();
         } else {
-          ref.read(playingProvider.notifier).set(false);
-          if (ref.read(returnOnStopProvider)) {
-            ref.read(transportProvider.notifier).returnToPlayStart();
-          }
+          ref.read(playingProvider.notifier).stopAtTimelineEnd();
         }
       }
 
@@ -2128,11 +2160,28 @@ class _AppShellState extends ConsumerState<AppShell>
       // reaching the app-level ActivateIntent shortcut that would
       // "click" the focused button instead (the intermittent
       // Space-opens-the-import-dialog bug).
+      //
+      // The tab shortcuts (Cmd+digit on macOS, Ctrl+digit elsewhere)
+      // are the exception: they type nothing, so they are matched
+      // before the text-field check. A field in the tab being left
+      // loses focus, because the IndexedStack excludes hidden tabs from
+      // focus.
       body: FocusScope(
         node: _shellScopeNode,
         autofocus: true,
-        onKeyEvent: (node, event) =>
-            textInputHasFocus() ? KeyEventResult.ignored : _handleKey(event),
+        onKeyEvent: (node, event) {
+          final tab = workspaceTabForKey(
+            event,
+            ref.read(workspaceModeProvider),
+          );
+          if (tab != null) {
+            ref.read(activeTabProvider.notifier).set(tab);
+            return KeyEventResult.handled;
+          }
+          return textInputHasFocus()
+              ? KeyEventResult.ignored
+              : _handleKey(event);
+        },
         child: _buildBody(activeTab),
       ),
     );
@@ -2148,8 +2197,18 @@ class _AppShellState extends ConsumerState<AppShell>
         Column(
           children: [
             const Topbar(),
-            const VideoPanel(),
-            Expanded(child: _buildContent(activeTab)),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) => Column(
+                  children: [
+                    VideoPanel(
+                      maxHeight: videoPanelMaxHeight(constraints.maxHeight),
+                    ),
+                    Expanded(child: _buildContent(activeTab)),
+                  ],
+                ),
+              ),
+            ),
             const Statusbar(),
           ],
         ),

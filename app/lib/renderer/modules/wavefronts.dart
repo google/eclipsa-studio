@@ -18,6 +18,7 @@ import 'dart:ui' show Color;
 
 import 'package:vector_math/vector_math.dart';
 
+import '../../theme.dart';
 import '../coordinate_utils.dart';
 import '../viz_layer.dart';
 import '../viz_module.dart';
@@ -106,7 +107,7 @@ class WavefrontsModule extends ChannelVizModule {
   // every time maxPulses is hit.
   final Queue<_Pulse> _pulses = Queue<_Pulse>();
 
-  // Rising-edge detection state: one uint8 per (elementId, channel).
+  // Rising-edge detection state: one flag per (elementId, channel).
   // The engine sets the onset flag sticky for ~80 ms — we still only
   // want one pulse per rising edge, so remember the last observed flag.
   final Map<int, List<int>> _lastOnset = {};
@@ -128,15 +129,17 @@ class WavefrontsModule extends ChannelVizModule {
       if (stats.isEmpty) continue;
 
       final n = math.min(stats.channelCount, e.layout.speakers.length);
+      // The list must be growable: a layout change on the same WAV raises
+      // the element's channel count, and the element keeps its id.
       final last = _lastOnset.putIfAbsent(
         e.element.id,
-        () => List<int>.filled(n, 0),
+        () => List<int>.filled(n, 0, growable: true),
       );
       if (last.length < n) {
         last.addAll(List<int>.filled(n - last.length, 0));
       }
 
-      final color = Color(e.element.color);
+      final color = aeTypeColor(e.element.type);
       for (var c = 0; c < n; c++) {
         final spk = e.layout.speakers[c];
         if (spk.isLFE) continue;

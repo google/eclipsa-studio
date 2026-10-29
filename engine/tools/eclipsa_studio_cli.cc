@@ -18,8 +18,19 @@
 
 #include <iostream>
 
+#include "absl/base/log_severity.h"
+#include "absl/log/globals.h"
+#include "absl/log/initialize.h"
 #include "tools/cli_commands.h"
 
 int main(int argc, char** argv) {
+  // iamf-tools logs its descriptor OBUs and audio frames at INFO: 263
+  // stderr lines for a 0.5 s encode of the multi_mix golden. Keep
+  // warnings and errors. The settings apply to every absl user in the
+  // process. Before InitializeLog(), absl writes every severity to
+  // stderr and ignores the stderr threshold.
+  absl::InitializeLog();
+  absl::SetMinLogLevel(absl::LogSeverityAtLeast::kWarning);
+  absl::SetStderrThreshold(absl::LogSeverityAtLeast::kWarning);
   return eclipsa_studio::cli::RunCli(argc, argv, std::cout, std::cerr);
 }

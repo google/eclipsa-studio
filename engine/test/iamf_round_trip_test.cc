@@ -60,8 +60,7 @@ constexpr uint32_t kSampleRate = 48000;
 constexpr uint32_t kMaxFrames = 512;
 constexpr uint32_t kOutChannels = 2;
 
-// 3.072 s per source — a multiple of the 1024-sample coded frame (the
-// golden encodes with samples_to_trim_at_end: 0), and enough data for
+// 3.072 s per source (144 coded frames of 1024), enough data for
 // warm-up + capture + the ~145 ms exclusion ramp + re-capture without
 // hitting ring EOF (where gain ramps freeze).
 constexpr int kSourceFrames = 1024 * 144;

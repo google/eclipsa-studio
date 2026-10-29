@@ -17,6 +17,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../export/iamf_profile_rules.dart';
 import '../models/audio_element_enums.dart';
+import '../models/layout_916.dart';
 import '../state.dart';
 import '../theme.dart';
 import 'ae_type_badge.dart';
@@ -260,15 +261,17 @@ class _RoutingMatrixDialogState extends ConsumerState<_RoutingMatrixDialog> {
           // picks; everything else stays selectable but de-emphasized,
           // with a tooltip spelling out what the pairing does.
           itemProminent: (label) => _exactLabels.contains(label),
-          itemTooltip: (label) =>
-              configMismatchCaveat(_byLabel(label), _inputChannels) ?? '',
+          // The 9.1.6 row's tooltip spells out the WAV's channel order.
+          itemTooltip: (label) {
+            final c = _byLabel(label);
+            return [
+              layout916OrderTooltip(c.layout ?? ''),
+              configMismatchCaveat(c, _inputChannels),
+            ].whereType<String>().join('\n\n');
+          },
           itemLeading: (label) {
             final c = _byLabel(label);
-            return Icon(
-              aeTypeIcon(c.type),
-              size: T.iconXs,
-              color: aeTypeColor(c.type),
-            );
+            return AeTypeGlyph(type: c.type, size: T.iconXs);
           },
           onChanged: (label) {
             if (label == _config.label) return;
@@ -524,6 +527,23 @@ class _RoutingMatrixDialogState extends ConsumerState<_RoutingMatrixDialog> {
   Widget _buildRow(int row, int inCh, String rowLabel) {
     final src = _routing[row];
     final silenced = src < 0;
+    // A 9.1.6 row's tooltip names the IAMF bitstream channel, by row
+    // index as the monitoring routing matrix does (ES-960): L, R and Lss
+    // are also other layouts' labels.
+    final tooltips = layout916Tooltips(_config.layout ?? '');
+    final tip = tooltips != null && row < tooltips.length
+        ? tooltips[row]
+        : null;
+    final label = Text(
+      rowLabel,
+      style: TextStyle(
+        fontSize: T.fontCaption,
+        // Dim rows without a routing connection so the user
+        // sees which output channels are silent.
+        color: silenced ? T.textGhost : T.textSecondary,
+      ),
+      textAlign: TextAlign.right,
+    );
     return SizedBox(
       height: _cellSize,
       child: Row(
@@ -532,16 +552,12 @@ class _RoutingMatrixDialogState extends ConsumerState<_RoutingMatrixDialog> {
             width: _rowHeaderW,
             child: Padding(
               padding: const EdgeInsets.only(right: 8),
-              child: Text(
-                rowLabel,
-                style: TextStyle(
-                  fontSize: T.fontCaption,
-                  // Dim rows without a routing connection so the user
-                  // sees which output channels are silent.
-                  color: silenced ? T.textGhost : T.textSecondary,
-                ),
-                textAlign: TextAlign.right,
-              ),
+              child: tip == null
+                  ? label
+                  : Align(
+                      alignment: Alignment.centerRight,
+                      child: Tooltip(message: tip, child: label),
+                    ),
             ),
           ),
           for (var c = 0; c < inCh; c++)

@@ -35,10 +35,13 @@
 #ifndef ADM2IAMF_RENDER_CHANNEL_RENDERER_H_
 #define ADM2IAMF_RENDER_CHANNEL_RENDERER_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "adm_import/render/render_progress.h"
 #include "adm_import/scene/layouts.h"
@@ -60,13 +63,41 @@ struct RenderStats {
 // importance < `importance_threshold` are skipped. Returns planar PCM in
 // `layout`'s channel order (== OAR's order), all channels of equal length.
 //
-// `progress`, when non-null, is reported once per render block and polled for
-// cancellation (returns `absl::CancelledError` if cancelled mid-render).
+// `progress`, when non-null, is reported once per chunk of 65536 frames and
+// polled for cancellation (returns `absl::CancelledError` if cancelled
+// mid-render). Runs RenderChannelBedStreamed, so it uses the same threads.
 absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBed(
     const Scene& scene, const Layout& layout,
     const std::vector<std::vector<float>>& input_tracks, uint32_t sample_rate,
     int importance_threshold = 0, RenderStats* stats = nullptr,
     const RenderProgress* progress = nullptr);
+
+// Supplies frames [begin, begin + count) of every input track, planar:
+// tracks[t] is resized to `count` floats of track t (0-based). The reader
+// pads a track that ends before begin + count with silence; the render fails
+// when any track of a chunk holds fewer than `count` frames.
+//
+// RenderChannelBedStreamed calls it on a helper thread, a different one for
+// each chunk, while the render works on the previous chunk. Calls never
+// overlap, each starts after the previous one has returned, and the render
+// returns only after the last call has finished. A reader that shares state
+// with other threads must synchronize it.
+using ReadTracksFn = std::function<absl::Status(
+    uint64_t begin, uint64_t count, std::vector<std::vector<float>>& tracks)>;
+
+// RenderChannelBed over `frames` frames of `num_tracks` tracks that
+// `read_tracks` supplies a chunk at a time, in ascending order, so the whole
+// input never has to be in memory. Progress counts frames rendered, one
+// report per chunk of 65536 frames. The OLR passes run on up to `threads`
+// threads and at most one per pass, the calling thread included, plus the
+// reader's helper thread; `threads` 0 uses min(hardware_concurrency() - 1, 8).
+// The output is the same for any thread count. `progress` is called on the
+// calling thread only.
+absl::StatusOr<std::vector<std::vector<float>>> RenderChannelBedStreamed(
+    const Scene& scene, const Layout& layout, size_t num_tracks,
+    uint64_t frames, const ReadTracksFn& read_tracks, uint32_t sample_rate,
+    int importance_threshold = 0, RenderStats* stats = nullptr,
+    const RenderProgress* progress = nullptr, unsigned threads = 0);
 
 // Owning handle for a layout's cartesian->polar anchors. oar.h documents the
 // handle as layout-only, immutable and thread-safe to share.

@@ -67,11 +67,12 @@ class TransportControls extends ConsumerWidget {
           onTap: blocked && !playing
               ? null
               : () {
-                  if (!playing) {
-                    ref.read(transportProvider.notifier).markPlayStart();
-                    ref.read(followOverrideProvider.notifier).set(false);
+                  final notifier = ref.read(playingProvider.notifier);
+                  if (playing) {
+                    notifier.pause();
+                  } else {
+                    notifier.start();
                   }
-                  ref.read(playingProvider.notifier).toggle();
                 },
         ),
         gap,
@@ -80,12 +81,7 @@ class TransportControls extends ConsumerWidget {
           tooltip: canStop ? 'Stop' : 'Analyzing file…',
           onTap: !canStop
               ? null
-              : () {
-                  ref.read(playingProvider.notifier).set(false);
-                  if (ref.read(returnOnStopProvider)) {
-                    ref.read(transportProvider.notifier).returnToPlayStart();
-                  }
-                },
+              : () => ref.read(playingProvider.notifier).stop(),
         ),
         gap,
         TransportButton(
@@ -107,22 +103,6 @@ class TransportControls extends ConsumerWidget {
             tooltip: looping ? 'Disable loop' : 'Enable loop',
             toggled: looping,
             onTap: () => ref.read(loopingProvider.notifier).toggle(),
-          ),
-        ],
-        if (analyzing) ...[
-          const SizedBox(width: T.gapMd),
-          Tooltip(
-            message:
-                'Measuring the file duration. Playback is '
-                'available when the analysis completes.',
-            child: Text(
-              'ANALYZING…',
-              style: TextStyle(
-                fontSize: T.fontCaption,
-                letterSpacing: 1.2,
-                color: T.textGhost,
-              ),
-            ),
           ),
         ],
       ],

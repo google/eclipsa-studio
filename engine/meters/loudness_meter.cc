@@ -65,11 +65,10 @@ void LoudnessMeter::rebuild_analyzer() {
       /*enable_true_peak_measurement=*/true);
 
   // Size the scratch here, on the control thread, so the wrapper does not
-  // allocate in process() on the audio thread: one flat planar buffer of
-  // kMaxBlockFrames per channel, and a pointer table that points at each
-  // channel's plane and does not change until the next rebuild. (The
-  // EbuR128Analyzer itself still appends to its per-block history vectors
-  // as blocks complete.)
+  // allocate in feed(): one flat planar buffer of kMaxBlockFrames per
+  // channel, and a pointer table that points at each channel's plane and
+  // does not change until the next rebuild. (The EbuR128Analyzer itself
+  // appends to its per-block history vectors as blocks complete.)
   planar_.assign(static_cast<size_t>(num_channels_) * kMaxBlockFrames, 0.0);
   channel_ptrs_.resize(num_channels_);
   for (uint32_t c = 0; c < num_channels_; ++c) {
@@ -77,11 +76,12 @@ void LoudnessMeter::rebuild_analyzer() {
         planar_.data() + static_cast<size_t>(c) * kMaxBlockFrames;
   }
   mismatch_logged_ = false;
+  integrated_blocks_ = 0;
+  integrated_lufs_ = -120.0f;
 }
 
-void LoudnessMeter::process(const AudioBuffer& buffer, uint32_t frames,
-                            EclipsaStudioMeterState& state) {
-  if (!analyzer_ || frames == 0 || num_channels_ == 0) return;
+bool LoudnessMeter::feed(const AudioBuffer& buffer, uint32_t frames) {
+  if (!analyzer_ || frames == 0 || num_channels_ == 0) return false;
 
   // The analyzer walks exactly num_channels_ channel pointers. A buffer
   // with a different channel count (the renderer's channel count changed
@@ -97,14 +97,13 @@ void LoudnessMeter::process(const AudioBuffer& buffer, uint32_t frames,
                "loudness meter: skipping %u-channel blocks, configured for "
                "%u channels (layout=%u)",
                buffer.channels, num_channels_, layout_);
-      engine_log_rt(ECLIPSA_STUDIO_LOG_WARN, "meters", buf);
+      engine_log(ECLIPSA_STUDIO_LOG_WARN, "meters", buf);
     }
-    return;
+    return false;
   }
 
   // Feed the analyzer in chunks of at most kMaxBlockFrames, the capacity of
-  // each plane. AudioGraph clamps its blocks to kGraphMaxFrames (4096), so
-  // the engine always takes a single chunk.
+  // each plane.
   for (uint32_t offset = 0; offset < frames; offset += kMaxBlockFrames) {
     const uint32_t n = std::min(kMaxBlockFrames, frames - offset);
     // Convert float planar to double planar for the analyzer.
@@ -122,19 +121,31 @@ void LoudnessMeter::process(const AudioBuffer& buffer, uint32_t frames,
                        loudness::EbuR128Analyzer::DOUBLE,
                        loudness::EbuR128Analyzer::PLANAR_NON_CONTIGUOUS);
   }
-
-  update_state(state);
+  return true;
 }
 
-void LoudnessMeter::update_state(EclipsaStudioMeterState& state) const {
-  auto& l = state.loudness;
+void LoudnessMeter::process(const AudioBuffer& buffer, uint32_t frames,
+                            EclipsaStudioMeterState& state) {
+  if (feed(buffer, frames)) publish(state.loudness);
+}
+
+void LoudnessMeter::publish(EclipsaStudioLoudnessData& l) {
+  if (!analyzer_) return;
 
   // ── SPEC values (go into IAMF LoudnessInfo OBU at export time) ────────────
 
-  // Integrated loudness: valid once at least one 400 ms block is accumulated.
-  const auto integrated = analyzer_->GetRelativeGatedIntegratedLoudness();
-  l.lufs_integrated =
-      integrated.has_value() ? static_cast<float>(integrated.value()) : -120.0f;
+  // Integrated loudness: valid once at least one 400 ms block is
+  // accumulated. GetRelativeGatedIntegratedLoudness() walks every block
+  // so far; recompute only when a block has been added.
+  const size_t blocks = analyzer_->ungated_momentary_powers().size();
+  if (blocks != integrated_blocks_) {
+    integrated_blocks_ = blocks;
+    const auto integrated = analyzer_->GetRelativeGatedIntegratedLoudness();
+    integrated_lufs_ = integrated.has_value()
+                           ? static_cast<float>(integrated.value())
+                           : -120.0f;
+  }
+  l.lufs_integrated = integrated_lufs_;
 
   // True peak (dBFS, intersample peak, 4x upsampled).
   l.true_peak = static_cast<float>(analyzer_->true_peak_dbfs());

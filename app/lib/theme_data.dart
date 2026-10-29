@@ -116,8 +116,9 @@ extension ChromeStyleGround on ChromeStyle {
 /// Which dropdown control the theme draws. See `SelectorChrome` in
 /// `widgets/console_widgets.dart`, the one place that reads it.
 enum ControlStyle {
-  /// A 32 px borderless `controlBg` fill at `radiusSm`, a 14 px
-  /// `controlFg` label and a 22 px caret in the same colour.
+  /// Dark and Light: a 24 px `controlBg` fill at `radiusSm` inside a
+  /// 1 px `border` rim, a `fontBody` `controlFg` label and a 12 px caret
+  /// in the same colour.
   filled,
 
   /// Classic: a 24 px well sunk into the panel: `controlBg` fill at

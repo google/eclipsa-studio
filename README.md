@@ -145,9 +145,11 @@ C++ engine build and waveform/audio features will not work.
 
 ```bash
 ./build.sh run                # build engine + run (release + lint)
-./build.sh run debug          # ... debug mode (fastbuild engine, hot reload, no lint)
+./build.sh run debug          # ... debug mode (hot reload, no lint)
 ./build.sh run fresh          # ... + reset prefs and recents first
-./build.sh test-session       # build engine + run with a session auto-loaded
+./build.sh run --open FILE    # ... + open a session, or a .iamf / MP4 with IAMF
+./build.sh test-session       # run debug with a session opened on launch
+./build.sh test-playback      # run with a .iamf or an MP4 with IAMF opened in Playback
 ./build.sh lint               # clang-format + clang-tidy + dart format
 ./build.sh lint --check       # verify formatting only (CI check, no writes)
 ./build.sh engine             # rebuild only the C++ engine dylib (optimized)
@@ -162,14 +164,16 @@ Add `--no-lint` to a release build to skip the lint/format pass
 **Windows** (`build.ps1`):
 
 ```powershell
-.\build.ps1 run               # build engine + run (release + opt engine)
-.\build.ps1 run debug         # ... debug mode (fastbuild engine, hot reload)
+.\build.ps1 run               # build engine + run (release)
+.\build.ps1 run debug         # ... debug mode (hot reload)
 .\build.ps1 run fresh         # ... + reset prefs and recents first
-.\build.ps1 test-session      # build + run with a .esp session auto-loaded
+.\build.ps1 run --open FILE   # ... + open a session, or a .iamf / MP4 with IAMF
+.\build.ps1 test-session      # run debug with a session opened on launch
+.\build.ps1 test-playback     # run with a .iamf or an MP4 with IAMF opened in Playback
 .\build.ps1 build             # build engine + flutter build (release, no run)
 .\build.ps1 clean             # flutter clean + bazel clean + pub get
 .\build.ps1 clean --deep      # ... + bazel expunge + wipe pub cache
-.\build.ps1 engine            # rebuild only the C++ engine DLL
+.\build.ps1 engine            # rebuild only the C++ engine DLL (optimized)
 .\build.ps1 reset-prefs       # delete saved preferences and recents
 .\build.ps1 lint              # dart format + clang-format/clang-tidy
 .\build.ps1 lint --check      # verify formatting only (CI check, no writes)
@@ -187,18 +191,29 @@ the comment header of `build.sh`).
 
 ### Running with a test session
 
-`./build.sh test-session` is `./build.sh run` plus a `.esp` session file
-opened automatically on launch. Use it when iterating on a feature that
-needs media loaded; it skips the manual File > Open step on every run.
-The session path comes from the first argument, falling back to the
-`ECLIPSA_STUDIO_TEST_SESSION` environment variable:
+`./build.sh run --open FILE` opens a file on launch: a `.esp` session in
+Creator, or a `.iamf` file or an MP4 with an IAMF track in Playback. The
+app reads the type from the file's content. `./build.sh test-session` is
+`./build.sh run debug --open` with a session, and `./build.sh
+test-playback` is `./build.sh run --no-lint --open` with a Playback file.
+Use them when iterating on a feature that needs media loaded; they skip
+the manual File > Open step on every run. Each takes the path as its
+first argument, falling back to the `ECLIPSA_STUDIO_SESSION` or
+`ECLIPSA_STUDIO_IAMF` environment variable, which the app itself also
+reads (`ECLIPSA_STUDIO_TEST_SESSION` still works for `test-session`):
 
 ```bash
 ./build.sh test-session /path/to/demo.esp
-# or set a default once in the shell rc:
+./build.sh test-playback /path/to/film.mp4
+# or set a default once in the shell rc; this variable is read by the
+# script only:
 export ECLIPSA_STUDIO_TEST_SESSION="$HOME/eclipsa-test-media/demo.esp"
 ./build.sh test-session
 ```
+
+An exported `ECLIPSA_STUDIO_SESSION` or `ECLIPSA_STUDIO_IAMF` also opens
+its file on every launch of the app from that shell. The app lists its
+launch parameters with `--help`.
 
 Test media (WAV/MP4 files and `.esp` sessions) lives **outside** the
 repo and is never committed.

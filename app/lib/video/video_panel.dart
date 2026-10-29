@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import 'dart:math' as math;
+
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -19,6 +21,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../playback/playback_session.dart';
+import '../session/session_provider.dart';
 import '../state.dart'
     show importNoticeProvider, lastVideoImportDirProvider, themeModeProvider;
 import '../theme.dart' show T;
@@ -46,24 +49,32 @@ class VideoPanel extends ConsumerStatefulWidget {
   /// row the header used to take (ES-683).
   final double initialHeight;
 
-  const VideoPanel({super.key, this.initialHeight = 224});
+  /// The maximum height of the panel, including the 1 px border under
+  /// the strip (ES-1027). The strip does not go below 100 px, so the panel
+  /// is taller than this value when it is under 101.
+  final double maxHeight;
+
+  const VideoPanel({
+    super.key,
+    this.initialHeight = 224,
+    this.maxHeight = double.infinity,
+  });
 
   @override
   ConsumerState<VideoPanel> createState() => _VideoPanelState();
 }
 
 class _VideoPanelState extends ConsumerState<VideoPanel> {
-  /// The user's resize, or null for the layout's default. Nullable so
-  /// a live theme switch between the flat and the beveled/raised
-  /// layouts, whose defaults differ (224 against 256), takes effect
-  /// until the user drags the handle; a value snapshotted in initState
-  /// would not.
+  /// The user's resize, or null for [VideoPanel.initialHeight].
   double? _height;
 
   bool _hovering = false;
 
   static const _minHeight = 100.0;
-  static const _maxHeight = 600.0;
+
+  /// The height of the border under the expanded strip.
+  static const _borderWidth = 1.0;
+
   static const _videoExtensions = {
     '.mp4',
     '.mov',
@@ -81,12 +92,19 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
   };
 
   /// The header lies over the picture in every layout, so this is the
-  /// whole strip's height, and [_minHeight] and [_maxHeight] clamp the
-  /// strip.
+  /// whole strip's height, and [_minHeight] and [_heightLimit] clamp the
+  /// strip. [_height] keeps a dragged height the window is too short
+  /// for, so the strip grows back to it when the window does.
   ///
   /// One height in every theme, so switching theme does not resize the
   /// picture; a component's size is the app's, not the theme's.
-  double get _effectiveHeight => _height ?? widget.initialHeight;
+  double get _effectiveHeight =>
+      (_height ?? widget.initialHeight).clamp(_minHeight, _heightLimit);
+
+  /// [VideoPanel.maxHeight] less the border, and never below
+  /// [_minHeight].
+  double get _heightLimit =>
+      math.max(_minHeight, widget.maxHeight - _borderWidth);
 
   bool _isMediaFile(String path) {
     final ext = p.extension(path).toLowerCase();
@@ -208,6 +226,11 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
         ? p.basename(videoState.filePath!)
         : null;
     final visible = videoState.visible;
+    // The session's media that failed to load, offered for removal so a
+    // save stops writing the dead path.
+    final missingMedia = isQc
+        ? null
+        : ref.watch(sessionProvider.select((s) => s.missingMediaPath));
 
     final actions = <VideoStripAction>[
       if (videoState.hasVideo && visible) ...[
@@ -232,12 +255,22 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
             tooltip: videoState.isStillImage ? 'Remove image' : 'Remove video',
             gapBefore: 2,
           ),
-      ] else if (!videoState.hasVideo && !isQc)
+      ] else if (!videoState.hasVideo && !isQc) ...[
         VideoStripAction(
           icon: Icons.folder_open,
           onTap: _pickFile,
           tooltip: 'Open video or image file',
         ),
+        if (missingMedia != null)
+          VideoStripAction(
+            icon: Icons.close,
+            onTap: () => ref.read(sessionProvider.notifier).clearMissingMedia(),
+            tooltip:
+                'Remove the missing file ${p.basename(missingMedia)} '
+                'from the session',
+            gapBefore: 2,
+          ),
+      ],
       VideoStripAction(
         icon: visible ? Icons.expand_less : Icons.expand_more,
         onTap: () => notifier.toggleVisible(),
@@ -300,8 +333,9 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
     );
     // Collapsed, the header is the strip and there is nothing to drag.
     if (!visible) return strip;
-    // Expanded, the strip ends in a hairline, the border the handle
-    // moves. The handle lies over the bottom of the picture with its
+    // Expanded, the strip ends in the border the handle moves: 1 px in
+    // every theme, as the panel borders of the views below it are
+    // (ES-1009). The handle lies over the bottom of the picture with its
     // lower edge on that line, so the view below keeps all of its
     // pointer input (ES-748).
     return Stack(
@@ -310,7 +344,7 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             strip,
-            Container(height: 0.5, color: T.border),
+            Container(height: _borderWidth, color: T.border),
           ],
         ),
         Positioned(
@@ -321,7 +355,10 @@ class _VideoPanelState extends ConsumerState<VideoPanel> {
             axis: Axis.vertical,
             onDragUpdate: (dy) {
               setState(() {
-                _height = (_effectiveHeight + dy).clamp(_minHeight, _maxHeight);
+                _height = (_effectiveHeight + dy).clamp(
+                  _minHeight,
+                  _heightLimit,
+                );
               });
             },
           ),

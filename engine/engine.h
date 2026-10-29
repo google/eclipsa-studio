@@ -62,7 +62,7 @@
 // eclipsa_studio_api_version() returns the value the loaded library was
 // compiled with, so a client can compare it against the header its
 // bindings were generated from before calling anything else.
-#define ECLIPSA_STUDIO_ENGINE_API_VERSION 20260903
+#define ECLIPSA_STUDIO_ENGINE_API_VERSION 20261019
 
 #ifdef __cplusplus
 extern "C" {
@@ -184,16 +184,40 @@ void eclipsa_studio_element_set_object_position(
 /// Passing `routing == nullptr` or `len == 0` clears to identity (no
 /// remap — fast path on the audio thread).
 ///
-/// Safe to call during playback; publish is lock-free via double-
-/// buffered storage. The engine copies the map synchronously into its
-/// own storage, so the caller's buffer does not need to outlive the
+/// Safe to call during playback: the engine publishes the map to the
+/// audio thread through a lock-free triple buffer, and the next block
+/// applies the latest map. The engine copies the map synchronously into
+/// its own storage, so the caller's buffer does not need to outlive the
 /// call.
 void eclipsa_studio_element_set_input_routing(uint32_t element_id,
                                               const int8_t* routing,
                                               uint32_t len);
 
-/// Set output mix gain (master fader for the active mix presentation,
-/// passed to OAR as group metadata via oar_update_metadata() on gid=0).
+/// The order of an element's channels after routing, for
+/// eclipsa_studio_element_set_channel_order() and
+/// eclipsa_studio_mix_renderer_set_element_channel_order().
+/// ECLIPSA_STUDIO_CHANNEL_ORDER_OAR (the default) feeds the element to
+/// OAR as it is. ECLIPSA_STUDIO_CHANNEL_ORDER_916_ALT declares a 9.1.6
+/// channel element in OBR's "IAMF 9.1.6 Alt" order (FLc FRc FC LFE FL
+/// FR SiL SiR BL BR TpFL TpFR TpSiL TpSiR TpBL TpBR); the engine permutes
+/// it into OAR's 9.1.6 order (FL FR FC LFE BL BR FLc FRc SiL SiR TpFL
+/// TpFR TpBL TpBR TpSiL TpSiR) as it feeds OAR, after the element's
+/// routing, gains and meters. It applies only while the element has 16
+/// channels; any other count is fed as it is. An unknown value is
+/// treated as ECLIPSA_STUDIO_CHANNEL_ORDER_OAR.
+enum {
+  ECLIPSA_STUDIO_CHANNEL_ORDER_OAR = 0,
+  ECLIPSA_STUDIO_CHANNEL_ORDER_916_ALT = 1,
+};
+
+/// Declare the order of an element's channels after routing (see the
+/// ECLIPSA_STUDIO_CHANNEL_ORDER_* values). Safe to call during playback:
+/// one atomic store, read by the audio thread from the next callback.
+void eclipsa_studio_element_set_channel_order(uint32_t element_id,
+                                              uint32_t order);
+
+/// Set the output mix gain of the active mix presentation, passed to OAR
+/// as group metadata via oar_update_metadata() on gid=0.
 /// Same slew-and-ramp semantics as eclipsa_studio_element_set_mix_gain.
 void eclipsa_studio_set_output_mix_gain(float gain_db);
 
@@ -214,6 +238,18 @@ void eclipsa_studio_seed_output_mix_gain(float gain_db);
 /// render. Ramped over 15 ms each way on the audio thread. Not
 /// persisted anywhere; the engine starts undimmed.
 void eclipsa_studio_set_monitor_dim(int32_t engaged);
+
+/// Output-channel solo and mute of the monitoring target (ES-999). Bit c
+/// of `soloed` and `muted` is the target's output channel c in the order
+/// of eclipsa_studio_get_output_peaks(). A muted channel and, while any
+/// channel is soloed, every channel that is not are silenced. Applied
+/// with the device routing, after the render and the limiter; the output
+/// and loudness meters keep reading the full render, and it never
+/// reaches the mix, an export or a measurement. Calibration noise is not
+/// cut. Ramped over 15 ms each way on the audio thread while program
+/// plays, and set at once while it does not. Not persisted; the engine
+/// starts with nothing soloed or muted.
+void eclipsa_studio_set_output_solo_mute(uint64_t soloed, uint64_t muted);
 
 /// Register an element's IAMF type with the OAR renderer.
 /// Must be called after eclipsa_studio_element_add().
@@ -400,7 +436,9 @@ void eclipsa_studio_set_channel_stats_enabled(uint8_t enabled);
 // ── Monitoring / OAR ─────────────────────────────────────────────────────────
 
 /// Set the OAR target layout. Values from oar_layout_t enum.
-/// Switching layout destroys and recreates the OAR renderer.
+/// Switching layout destroys and recreates the OAR renderer; setting the
+/// layout it already renders keeps it. The mix-bus loudness meter is
+/// reconfigured, and its readings cleared, in both cases.
 /// Use ck_oar_layout_binaural for binaural rendering.
 /// @returns 0 on success, negative on error.
 int32_t eclipsa_studio_monitoring_set_layout(uint32_t layout);
@@ -432,7 +470,8 @@ int32_t eclipsa_studio_monitoring_set_layout_and_routing(uint32_t layout,
 /// @param channel  OAR channel (row) or device channel (col).
 /// @param dbfs     calibration reference level in dBFS; while a cell is lit
 ///                 the program is muted and noise plays at this fixed level,
-///                 bypassing the master fader. Must be finite when mode != 0.
+///                 bypassing the output mix gain. Must be finite when
+///                 mode != 0.
 /// @returns 0 on success, -1 if mode > 2, channel exceeds 24 bits, or dbfs is
 ///          non-finite (rejected so a bad value can't silently mute output).
 int32_t eclipsa_studio_monitoring_set_noise(uint32_t mode, uint32_t channel,
@@ -752,7 +791,13 @@ void eclipsa_studio_mix_renderer_set_object_position(
     float azimuth_deg, float elevation_deg, float distance, float azimuth2_deg,
     float elevation2_deg, float distance2);
 
-// Set master output gain.
+// Declare the order of an element's channels after routing for the
+// offline render, after eclipsa_studio_mix_renderer_add_element. Same
+// values and semantics as eclipsa_studio_element_set_channel_order.
+void eclipsa_studio_mix_renderer_set_element_channel_order(
+    eclipsa_studio_mix_renderer_t* r, uint32_t element_id, uint32_t order);
+
+// Set the output mix gain in dB.
 void eclipsa_studio_mix_renderer_set_output_gain(
     eclipsa_studio_mix_renderer_t* r, float gain_db);
 
@@ -818,6 +863,74 @@ int32_t eclipsa_studio_mix_renderer_element_clip_stats(
 
 // Destroy a renderer.
 void eclipsa_studio_mix_renderer_destroy(eclipsa_studio_mix_renderer_t* r);
+
+// ── Offline IAMF measurer (QC loudness measurement) ──────────────────────────
+// Decodes an IAMF file (.iamf or IAMF-in-MP4) offline, renders a
+// selection of its audio elements at one layout and measures the render
+// with the same analyzer, weights, limiter and traces as the offline mix
+// renderer above. One instance measures one row of the QC Loudness
+// Report (one mix presentation sub-mix at one layout), with one
+// _measure call; a second _measure on the same handle fails. Control
+// thread or worker isolate only; the caller holds the graph's offline-exclusive
+// access (eclipsa_studio_engine_set_export_paused) for the whole pass.
+
+// Opaque handle for an offline IAMF measurer instance.
+typedef struct eclipsa_studio_iamf_measurer eclipsa_studio_iamf_measurer_t;
+
+// Open `path` and initialise the renderer for `layout` (oar_layout_t
+// values as for eclipsa_studio_mix_renderer_create) at the file's sample
+// rate, with `buffer_size` frames per render block. Scans the whole
+// file. Returns NULL on failure (details in the engine log).
+eclipsa_studio_iamf_measurer_t* eclipsa_studio_iamf_measurer_create(
+    const char* path, uint32_t buffer_size, uint32_t layout);
+
+// Include the audio element `audio_element_id` in the render with a
+// static mix gain (the mix presentation's default element gain plus the
+// sub-mix output gain folded in by the caller, or the element gain alone
+// with the output gain passed to _set_output_gain) and its IAMF
+// rendering config (headphones_mode 0=stereo, 1=binaural world-locked,
+// 2=binaural head-locked; binaural_profile 0=ambient, 1=direct,
+// 2=reverberant). Elements not included render nothing. Returns 0 on
+// success, -1 on a null handle, -2 for an unknown id or an element OAR
+// cannot render (details in the engine log).
+int32_t eclipsa_studio_iamf_measurer_include_element(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t audio_element_id,
+    float mix_gain_db, uint32_t headphones_mode, uint32_t binaural_profile);
+
+// Set the sub-mix output gain in dB.
+void eclipsa_studio_iamf_measurer_set_output_gain(
+    eclipsa_studio_iamf_measurer_t* m, float gain_db);
+
+// Decode, render and measure the whole program. Same return codes and
+// out-pointer contract as eclipsa_studio_mix_renderer_measure: 0 on
+// success, -1 on a null handle, -2 when the pass failed (nothing
+// included, decode error, renderer error — details in the engine log
+// and eclipsa_studio_iamf_measurer_last_error; the out values are not
+// written), -5 for a C++ exception at the FFI boundary.
+int32_t eclipsa_studio_iamf_measurer_measure(eclipsa_studio_iamf_measurer_t* m,
+                                             float* out_integrated_lufs,
+                                             float* out_true_peak_dbtp,
+                                             float* out_digital_peak_dbfs);
+
+// Post-measurement time series and loudness range, with the same series
+// ids, step and contract as the eclipsa_studio_mix_renderer_* queries.
+uint32_t eclipsa_studio_iamf_measurer_trace_len(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t series);
+uint32_t eclipsa_studio_iamf_measurer_copy_trace(
+    eclipsa_studio_iamf_measurer_t* m, uint32_t series, float* out,
+    uint32_t cap);
+int32_t eclipsa_studio_iamf_measurer_loudness_range(
+    eclipsa_studio_iamf_measurer_t* m, float* out_lra_lu,
+    int32_t* out_is_stable);
+
+// The last failure message of this instance (prefixed `invalid_argument:`,
+// `io:`, `malformed:`, `unsupported:` or `internal:`), or "" after a
+// success. Owned by the measurer; valid until the next call on it.
+const char* eclipsa_studio_iamf_measurer_last_error(
+    eclipsa_studio_iamf_measurer_t* m);
+
+// Destroy a measurer.
+void eclipsa_studio_iamf_measurer_destroy(eclipsa_studio_iamf_measurer_t* m);
 
 // ── Info
 // ────────────────────────────────────────────────────────────────────── Note:

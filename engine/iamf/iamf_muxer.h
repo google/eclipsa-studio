@@ -23,7 +23,8 @@
 namespace eclipsa_studio {
 
 // Muxes an IAMF bitstream together with a video file into a single MP4
-// (IAMF-in-ISOBMFF), in-process via libgpac.
+// (IAMF-in-ISOBMFF), in-process via libgpac. MuxAudioOnly() writes an MP4
+// with the IAMF track and no video.
 //
 // The IAMF bytes are the exact ones the engine's IamfExporter produced, so
 // the profile, substream layout, and measured loudness are carried through
@@ -60,6 +61,16 @@ class IamfMuxer {
   //   -12  video mux (ISO-media copy) failed
   int32_t Mux(const std::string& input_iamf, const std::string& input_video,
               const std::string& output_mp4);
+
+  // Mux `input_iamf` into `output_mp4` (overwritten if it exists) with no
+  // video track: step 1 of Mux() alone.
+  //
+  // Returns 0 on success, or the Mux() codes -1 (empty argument), -2
+  // (input .iamf missing / unreadable), -10 (GPAC system init failed) and
+  // -11 (audio mux failed). A failed mux (-11) removes `output_mp4`; the
+  // other codes return before `output_mp4` is touched.
+  int32_t MuxAudioOnly(const std::string& input_iamf,
+                       const std::string& output_mp4);
 
   // Check that `input_video` opens with the GPAC ISO-media reader Mux()
   // uses and has a visual track. Reads only the file's metadata, so it is

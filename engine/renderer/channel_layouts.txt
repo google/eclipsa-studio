@@ -1,0 +1,428 @@
+# The key to every channel name and channel order Eclipsa Studio puts
+# over the IAMF and OAR layer: one section per layout, transcribed from
+# the OAR fork's own table, src/renderer/olr/object_audio_renderer/
+# layout.c (g_speaker_layouts), with each channel's IAMF name and its
+# short and long Eclipsa Studio labels.
+#
+# A layout has one or two roles, named on its header line. As a
+# `monitoring` target, the rows are the order OAR renders the layout's
+# output channels in. As an `element` layout, they are the order OAR
+# takes a channel-based element's channels in. Both are the order an
+# IAMF file stores the layout's channels in (the OAR/IAMF order).
+#
+# Columns: the OAR code is the fork's own name for the speaker. The IAMF
+# name is iamf-tools' ChannelLabel string for the channel; the export
+# writes the matching CHANNEL_LABEL_* enumerator, upper case with
+# underscores and, for the 2-, 3-, 5- and 7-channel beds, a layout suffix
+# (CENTRE for C, MONO for M, FLC for FLc, SI_L for SiL, TP_SI_L for TpSiL,
+# LSS_7 for 7.1's Lss). The short label is what the UI shows for that
+# channel: the meters, the routing matrices, the timeline lanes and the
+# 3D scene. The long label is the name a tooltip shows for it. A short
+# label has the same long label in every layout it appears in.
+#
+# The short labels differ from the IAMF names in these places:
+#   mono: the 1-channel timeline lane reads M; the scene says C.
+#   5.1.4 and 7.1.4: the top back pair Ltb/Rtb reads Ltr/Rtr.
+#   7.1.5.4: TpC reads Tc, Ltb/Rtb read Ltr/Rtr, and the bottom layer
+#     BtFL BtFR BtBL BtBR reads Lbf Rbf Lbr Rbr.
+#   9.1.6: the familiar names of the other layouts (L R C LFE Lw Rw Lss
+#     Rss Lrs Rrs Ltf Rtf Lts Rts Ltr Rtr) stand for the IAMF names
+#     (FLc FRc FC LFE FL FR SiL SiR BL BR TpFL TpFR TpSiL TpSiR TpBL TpBR).
+#     The UI adds the IAMF name in brackets where there is room.
+#   10.2.9.3: the same familiar names as 9.1.6 for the channels it shares
+#     with it, plus LFE for LFE1, Cs for BC, Ctf for TpFC, Tc for TpC,
+#     Ctr for TpBC, Cbf for BtFC and Lbf/Rbf for BtFL/BtFR.
+# The 7.1 family's side pair at +-90 degrees is Lss/Rss, as in IAMF; the
+# 5.1 family's surround pair at +-110 degrees is Ls/Rs.
+#
+# The only reorder is 9.1.6. OAR renders it, and takes a 9.1.6 element,
+# in Sound System H order (the [9.1.6] section). Eclipsa Studio's 9.1.6
+# order is OBR's "IAMF 9.1.6 Alt" order (kLayout9_1_6_ch_alt in the oar
+# module's obr/docs/loudspeaker_layouts.md), the [9.1.6-alt] section: the
+# 9.1.6 monitoring target's output channels and a 9.1.6 element's
+# channels. engine/renderer/channel_order.h holds the permutation and its
+# inverse and the engine applies them at the OAR boundaries: the live
+# monitoring output (AudioGraph::process), the element feed on the audio
+# thread and in the offline render (OarRenderer::update_element_data).
+# app/lib/models/layout_916.dart describes the same order for the app.
+# IAMF export does not pass through OAR: it lists the channel labels per
+# WAV channel. Every other layout, 10.2.9.3 included, is rendered, taken
+# and shown in the OAR/IAMF order.
+#
+# Both sides pin against this file instead of against each other (ES-592):
+#
+#   engine/test/channel_layouts_test.cc drives OAR's public render API
+#     and asserts a source at each row's angles lands on that row's output
+#     channel, so an OAR_COMMIT bump that reorders a layout or moves a
+#     speaker fails at the layer that defines the order. It also pins the
+#     channel_order.h tables against the [9.1.6-alt] section, and checks
+#     that every row has a long label and that a short label has one
+#     long label. It reads OBR's virtual loudspeaker positions through
+#     obr::ObrImpl and pins the binaural sections against them.
+#   app/test/renderer/channel_layouts_test.dart asserts SpeakerLayout,
+#     OarLayout, the element registration (elementToOarType),
+#     standardChannelLabel, iamfChannelLabels, channelFullName and the
+#     9.1.6 table in layout_916.dart carry the same order, names, geometry
+#     and oar_layout_t values, and that SpeakerLayout's binaural geometry
+#     is the binaural sections.
+#
+# Section header: [<layout id>] <oar_layout_t value> <role> [<role>]
+#                 roles: monitoring, element
+# Channel row:    <OAR code> <IAMF name> <short label>
+#                 <azimuth> <elevation> <lfe|-> <long label...>
+# Alt header:     [<layout id>-alt] <oar_layout_t value>
+# Alt row:        <OAR code> <IAMF name> <short label> <long label...>
+# Binaural header: [<layout id>-binaural] <oar_layout_t value>
+# Binaural row:    <OAR code> <azimuth> <elevation>
+#
+# The long label runs to the end of the line because it has spaces. An
+# alt section lists the layout's channels in Eclipsa Studio's order; each
+# row names a row of the layout section by its OAR code and repeats that
+# row's names. Only 9.1.6 has one.
+#
+# On the binaural monitoring target, OAR passes a channel-based element
+# to OBR, which renders each channel from a virtual loudspeaker in its
+# own table (obr/renderer/loudspeaker_layouts.h in the obr module)
+# instead of at the angles of the layout section. OBR's upper layer is at
+# elevation 45 where OLR's is at 30, 5.1.4's top pairs are at azimuth 45
+# and 135 where OLR's are at 30 and 110, and the LFE is at azimuth 0 in
+# every layout with an LFE but 9.1.6 and 10.2.9.3. A binaural section
+# lists, in the layout section's order, the position OBR gives each
+# channel of an element layout; the 3D scene draws a channel-based
+# element there while the binaural target is monitored.
+#
+# An element whose headphones rendering mode is Stereo does not reach
+# OBR: OAR renders it to stereo and outputs that unchanged on the
+# binaural target, and the scene draws its sources inside the listener's
+# head. A Binaural element registers as a stereo element. Creator pushes
+# Stereo for every Binaural element in a sub-mix. A Binaural element
+# therefore reaches OBR and takes the [stereo-binaural] rows only in
+# Creator when no sub-mix pushes a mode, and in Playback when the file
+# gives it a mode other than Stereo, or none.
+#
+# Azimuth is positive to the left, elevation positive up, both in degrees.
+# Layout ids match SpeakerLayout.id in app/lib/renderer/speaker_layout.dart
+# and, case aside, LoudspeakerLayout.displayName and OarLayout.label.
+# Binaural renders through HRTFs, so the render test skips it. Its two
+# rows are the stereo geometry, which the 3D scene gives a Binaural
+# element's sources; on the binaural target the scene draws headphones.
+#
+# The OAR code is transcribed from the fork's table with the geometry,
+# and the C++ test checks the row against OAR by rendering, not by name.
+# OAR does not define the IAMF name or the labels, so the C++ test only
+# checks that they are present and distinct within a layout; the Dart
+# test pins the app's tables to them. One exception is not pinned here:
+# a 1-channel file reads "M" on the timeline, where the scene's mono
+# layout says "C".
+
+[mono] 1 element
+M+000   M      C         0    0  -    Center
+
+[stereo] 2 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+
+[binaural] 255 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+
+[3.1.2] 9 element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+U+045   Ltf    Ltf      45   30  -    Left top front
+U-045   Rtf    Rtf     -45   30  -    Right top front
+
+[5.1] 3 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+110   Ls     Ls      110    0  -    Left surround
+M-110   Rs     Rs     -110    0  -    Right surround
+
+[5.1.2] 4 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+110   Ls     Ls      110    0  -    Left surround
+M-110   Rs     Rs     -110    0  -    Right surround
+U+030   Ltf    Ltf      30   30  -    Left top front
+U-030   Rtf    Rtf     -30   30  -    Right top front
+
+[5.1.4] 5 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+110   Ls     Ls      110    0  -    Left surround
+M-110   Rs     Rs     -110    0  -    Right surround
+U+030   Ltf    Ltf      30   30  -    Left top front
+U-030   Rtf    Rtf     -30   30  -    Right top front
+U+110   Ltb    Ltr     110   30  -    Left top rear
+U-110   Rtb    Rtr    -110   30  -    Right top rear
+
+[7.1] 6 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+090   Lss    Lss      90    0  -    Left side surround
+M-090   Rss    Rss     -90    0  -    Right side surround
+M+135   Lrs    Lrs     135    0  -    Left rear surround
+M-135   Rrs    Rrs    -135    0  -    Right rear surround
+
+[7.1.2] 7 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+090   Lss    Lss      90    0  -    Left side surround
+M-090   Rss    Rss     -90    0  -    Right side surround
+M+135   Lrs    Lrs     135    0  -    Left rear surround
+M-135   Rrs    Rrs    -135    0  -    Right rear surround
+U+045   Ltf    Ltf      45   30  -    Left top front
+U-045   Rtf    Rtf     -45   30  -    Right top front
+
+[7.1.4] 8 monitoring element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+090   Lss    Lss      90    0  -    Left side surround
+M-090   Rss    Rss     -90    0  -    Right side surround
+M+135   Lrs    Lrs     135    0  -    Left rear surround
+M-135   Rrs    Rrs    -135    0  -    Right rear surround
+U+045   Ltf    Ltf      45   30  -    Left top front
+U-045   Rtf    Rtf     -45   30  -    Right top front
+U+135   Ltb    Ltr     135   30  -    Left top rear
+U-135   Rtb    Rtr    -135   30  -    Right top rear
+
+[7.1.5.4] 12 element
+M+030   L      L        30    0  -    Left
+M-030   R      R       -30    0  -    Right
+M+000   C      C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+090   Lss    Lss      90    0  -    Left side surround
+M-090   Rss    Rss     -90    0  -    Right side surround
+M+135   Lrs    Lrs     135    0  -    Left rear surround
+M-135   Rrs    Rrs    -135    0  -    Right rear surround
+U+045   Ltf    Ltf      45   30  -    Left top front
+U-045   Rtf    Rtf     -45   30  -    Right top front
+T+000   TpC    Tc        0   90  -    Top center
+U+135   Ltb    Ltr     135   30  -    Left top rear
+U-135   Rtb    Rtr    -135   30  -    Right top rear
+B+045   BtFL   Lbf      45  -30  -    Left bottom front
+B-045   BtFR   Rbf     -45  -30  -    Right bottom front
+B+135   BtBL   Lbr     135  -30  -    Left bottom rear
+B-135   BtBR   Rbr    -135  -30  -    Right bottom rear
+
+[9.1.6] 10 monitoring element
+M+060   FL     Lw       60    0  -    Left wide
+M-060   FR     Rw      -60    0  -    Right wide
+M+000   FC     C         0    0  -    Center
+LFE1    LFE    LFE      45  -30  lfe  Low-frequency effects
+M+135   BL     Lrs     135    0  -    Left rear surround
+M-135   BR     Rrs    -135    0  -    Right rear surround
+M+030   FLc    L        30    0  -    Left
+M-030   FRc    R       -30    0  -    Right
+M+090   SiL    Lss      90    0  -    Left side surround
+M-090   SiR    Rss     -90    0  -    Right side surround
+U+045   TpFL   Ltf      45   30  -    Left top front
+U-045   TpFR   Rtf     -45   30  -    Right top front
+U+135   TpBL   Ltr     135   30  -    Left top rear
+U-135   TpBR   Rtr    -135   30  -    Right top rear
+U+090   TpSiL  Lts      90   30  -    Left top side
+U-090   TpSiR  Rts     -90   30  -    Right top side
+
+[9.1.6-alt] 10
+M+030   FLc    L      Left
+M-030   FRc    R      Right
+M+000   FC     C      Center
+LFE1    LFE    LFE    Low-frequency effects
+M+060   FL     Lw     Left wide
+M-060   FR     Rw     Right wide
+M+090   SiL    Lss    Left side surround
+M-090   SiR    Rss    Right side surround
+M+135   BL     Lrs    Left rear surround
+M-135   BR     Rrs    Right rear surround
+U+045   TpFL   Ltf    Left top front
+U-045   TpFR   Rtf    Right top front
+U+090   TpSiL  Lts    Left top side
+U-090   TpSiR  Rts    Right top side
+U+135   TpBL   Ltr    Left top rear
+U-135   TpBR   Rtr    Right top rear
+
+[10.2.9.3] 11 element
+M+060   FL     Lw       60    0  -    Left wide
+M-060   FR     Rw      -60    0  -    Right wide
+M+000   FC     C         0    0  -    Center
+LFE1    LFE1   LFE      45  -30  lfe  Low-frequency effects
+M+135   BL     Lrs     135    0  -    Left rear surround
+M-135   BR     Rrs    -135    0  -    Right rear surround
+M+030   FLc    L        30    0  -    Left
+M-030   FRc    R       -30    0  -    Right
+M+180   BC     Cs      180    0  -    Center surround
+LFE2    LFE2   LFE2    -45  -30  lfe  Low-frequency effects 2
+M+090   SiL    Lss      90    0  -    Left side surround
+M-090   SiR    Rss     -90    0  -    Right side surround
+U+045   TpFL   Ltf      45   30  -    Left top front
+U-045   TpFR   Rtf     -45   30  -    Right top front
+U+000   TpFC   Ctf       0   30  -    Center top front
+T+000   TpC    Tc        0   90  -    Top center
+U+135   TpBL   Ltr     135   30  -    Left top rear
+U-135   TpBR   Rtr    -135   30  -    Right top rear
+U+090   TpSiL  Lts      90   30  -    Left top side
+U-090   TpSiR  Rts     -90   30  -    Right top side
+U+180   TpBC   Ctr     180   30  -    Center top rear
+B+000   BtFC   Cbf       0  -30  -    Center bottom front
+B+045   BtFL   Lbf      45  -30  -    Left bottom front
+B-045   BtFR   Rbf     -45  -30  -    Right bottom front
+
+# OBR's virtual loudspeakers on the binaural monitoring target.
+
+[mono-binaural] 1
+M+000       0    0
+
+[stereo-binaural] 2
+M+030      30    0
+M-030     -30    0
+
+[3.1.2-binaural] 9
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+U+045      45   45
+U-045     -45   45
+
+[5.1-binaural] 3
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+110     110    0
+M-110    -110    0
+
+[5.1.2-binaural] 4
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+110     110    0
+M-110    -110    0
+U+030      30   45
+U-030     -30   45
+
+[5.1.4-binaural] 5
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+110     110    0
+M-110    -110    0
+U+030      45   45
+U-030     -45   45
+U+110     135   45
+U-110    -135   45
+
+[7.1-binaural] 6
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+090      90    0
+M-090     -90    0
+M+135     135    0
+M-135    -135    0
+
+[7.1.2-binaural] 7
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+090      90    0
+M-090     -90    0
+M+135     135    0
+M-135    -135    0
+U+045      45   45
+U-045     -45   45
+
+[7.1.4-binaural] 8
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+090      90    0
+M-090     -90    0
+M+135     135    0
+M-135    -135    0
+U+045      45   45
+U-045     -45   45
+U+135     135   45
+U-135    -135   45
+
+[7.1.5.4-binaural] 12
+M+030      30    0
+M-030     -30    0
+M+000       0    0
+LFE1        0  -30
+M+090      90    0
+M-090     -90    0
+M+135     135    0
+M-135    -135    0
+U+045      45   45
+U-045     -45   45
+T+000       0   90
+U+135     135   45
+U-135    -135   45
+B+045      45  -30
+B-045     -45  -30
+B+135     135  -30
+B-135    -135  -30
+
+[9.1.6-binaural] 10
+M+060      60    0
+M-060     -60    0
+M+000       0    0
+LFE1       45  -30
+M+135     135    0
+M-135    -135    0
+M+030      30    0
+M-030     -30    0
+M+090      90    0
+M-090     -90    0
+U+045      45   45
+U-045     -45   45
+U+135     135   45
+U-135    -135   45
+U+090      90   45
+U-090     -90   45
+
+[10.2.9.3-binaural] 11
+M+060      60    0
+M-060     -60    0
+M+000       0    0
+LFE1       45  -30
+M+135     135    0
+M-135    -135    0
+M+030      30    0
+M-030     -30    0
+M+180     180    0
+LFE2      -45  -30
+M+090      90    0
+M-090     -90    0
+U+045      45   45
+U-045     -45   45
+U+000       0   45
+T+000       0   90
+U+135     135   45
+U-135    -135   45
+U+090      90   45
+U-090     -90   45
+U+180     180   45
+B+000       0  -30
+B+045      45  -30
+B-045     -45  -30

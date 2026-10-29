@@ -139,8 +139,12 @@ class WavDecoder {
   static Future<WavInfo> readInfo(String path) async {
     final json = await probeRaw(path);
     final channels = json['channels'] as int;
-    // The engine's playback path (io/WavReader) caps at 32 channels;
-    // fail here with a clear error instead of downstream at open.
+    // Playback reads the file through WavStream (engine/io/wav_stream.h),
+    // whose WavReader refuses to open a file with more than 32 channels
+    // (WavReader::kMaxScratchChannels); fail here with a clear error
+    // instead of downstream at open. The audio graph opens WavStream
+    // with kGraphMaxChannels (28), so playback streams a file's first
+    // 28 channels and drops the rest.
     if (channels < 1 || channels > 32) {
       throw FormatException(
         'Unsupported channel count: $channels (1–32 supported)',

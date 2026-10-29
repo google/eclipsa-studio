@@ -20,8 +20,9 @@ import '../playback/playback_session.dart';
 import '../util/time_format.dart';
 import '../workspace/workspace_mode.dart';
 import 'chrome_surface.dart';
+import 'console_widgets.dart';
 import 'eclipsa_studio_lockup.dart';
-import 'topbar_selector.dart';
+import 'mix_presentation_label.dart';
 import 'topbar_tab.dart';
 import 'transport_clock.dart';
 import 'transport_controls.dart';
@@ -52,18 +53,16 @@ class Topbar extends ConsumerWidget {
           // Tabs, filtered per workspace mode.
           for (final id in WorkspaceTabs.allowedIn(mode))
             TopbarTab(
-              label: _tabLabel(id),
+              label: WorkspaceTabs.title(id).toUpperCase(),
               active: activeTab == id,
               onTap: () => ref.read(activeTabProvider.notifier).set(id),
             ),
-          // Two Spacers flanking the mix cluster centre it in the
-          // space between the tab row and the transport controls. Both
-          // modes carry a mix-presentation switcher here: Creator binds
-          // the session's authored mixes, Playback the open IAMF file's
-          // presentations. The scrubber below deliberately
-          // lives outside the centre slot.
-          const Spacer(),
+          // The mix cluster follows the tabs at the lockup-to-tabs gap.
+          // Both modes carry a mix-presentation switcher here: Creator
+          // binds the session's authored mixes, Playback the open IAMF
+          // file's presentations.
           if (mode != WorkspaceMode.none) ...[
+            const SizedBox(width: 32),
             const MixPresentationLabel(),
             const SizedBox(width: 8),
           ],
@@ -72,23 +71,31 @@ class Topbar extends ConsumerWidget {
           ] else if (mode == WorkspaceMode.playback) ...[
             const _PlaybackMixSelector(),
           ],
-          const Spacer(),
-          // A timeline scrubber beside the transport controls wherever
-          // the active tab has none of its own: every Playback (QC) tab
-          // (ES-35), and the Creator tabs other than Elements, whose track
-          // timeline already seeks (ES-783). Flexible (with twice the
-          // spacers' share) so it stays wide for scrub precision yet
-          // shrinks on narrow windows.
-          if (showsScrubBar(mode, activeTab)) ...[
-            Flexible(
-              flex: 2,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 400),
-                child: const TransportScrubBar(),
-              ),
-            ),
-            const SizedBox(width: 16),
-          ],
+          // This Expanded takes the width between the left group,
+          // anchored to the left edge, and the transport group, anchored
+          // to the right edge. Neither group moves with the window
+          // width, the active tab or the clock's text.
+          Expanded(
+            // A timeline scrubber beside the transport controls on every
+            // tab of both modes (ES-35, ES-988), so the transport area is the
+            // same on every tab. The Elements tab's track timeline seeks
+            // through the same transportProvider, so the bar and the
+            // timeline show and set one playhead position. The bar sits
+            // against the transport controls, up to 400 px wide for scrub
+            // precision, and narrows with the window.
+            child: mode != WorkspaceMode.none
+                ? Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 400),
+                        child: const TransportScrubBar(),
+                      ),
+                    ),
+                  )
+                : const SizedBox.shrink(),
+          ),
           // Transport
           const TransportControls(),
           const SizedBox(width: 16),
@@ -101,21 +108,17 @@ class Topbar extends ConsumerWidget {
   }
 }
 
-/// Whether the topbar carries the [TransportScrubBar] for [mode] and
-/// the active [tab]: every Playback tab, and every Creator tab except
-/// Elements, which has the track timeline.
-bool showsScrubBar(WorkspaceMode mode, String tab) => switch (mode) {
-  WorkspaceMode.playback => true,
-  WorkspaceMode.creator => tab != WorkspaceTabs.elements,
-  WorkspaceMode.none => false,
-};
+/// Digits the samples readout pads each value to: 10 digits hold
+/// 9,999,999,999 samples, 57.9 hours at 48 kHz.
+const int _kSampleDigits = 10;
 
-String _tabLabel(String id) => switch (id) {
-  WorkspaceTabs.elements => 'ELEMENTS',
-  WorkspaceTabs.mix => 'MIX',
-  WorkspaceTabs.renderer => 'RENDERER',
-  WorkspaceTabs.inspector => 'INSPECTOR',
-  _ => id.toUpperCase(),
+/// The longest value the clock shows in each [TimeDisplayMode], which
+/// the readout reserves room for: a single-digit hour in time mode, and
+/// the padded sample count. A position or duration of ten hours or more
+/// widens the clock by one digit per value.
+String _clockWidestValue(TimeDisplayMode mode) => switch (mode) {
+  TimeDisplayMode.mmss => formatDuration(9 * 3600 + 59 * 60 + 59.999),
+  TimeDisplayMode.samples => '9' * _kSampleDigits,
 };
 
 /// [TransportClock] bound to the transport and the time-or-samples
@@ -136,14 +139,15 @@ class _ClockDisplay extends ConsumerWidget {
 
     final posText = mode == TimeDisplayMode.mmss
         ? formatDuration(transport.seconds)
-        : '${transport.samplePosition}'.padLeft(10);
+        : '${transport.samplePosition}'.padLeft(_kSampleDigits);
     final durText = mode == TimeDisplayMode.mmss
         ? formatDuration(transport.durationSeconds)
-        : '${transport.durationSamples}'.padLeft(10);
+        : '${transport.durationSamples}'.padLeft(_kSampleDigits);
 
     return TransportClock(
       position: posText,
       duration: durText,
+      widest: _clockWidestValue(mode),
       tooltip: mode == TimeDisplayMode.mmss
           ? 'Click: show samples'
           : 'Click: show time',
@@ -152,6 +156,60 @@ class _ClockDisplay extends ConsumerWidget {
   }
 }
 
+/// The mix presentation switcher, shared by Creator and Playback: a
+/// [ConsoleSelector] over the presentation [names] by index. It only
+/// switches: presentations are created in the Mix view, and Playback's
+/// Inspector tab keeps the full read-only mix detail. With no
+/// presentations it shows "No mix presentations", disabled.
+class _MixSwitcher extends ConsumerWidget {
+  final List<String> names;
+
+  /// Index of the active presentation in [names].
+  final int active;
+
+  final ValueChanged<int> onChanged;
+
+  const _MixSwitcher({
+    required this.names,
+    required this.active,
+    required this.onChanged,
+  });
+
+  /// The same in every theme: a component's size does not vary by
+  /// theme, only how it is drawn and coloured.
+  static const double _width = 180;
+
+  static const String _semanticLabel = 'Mix presentation';
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ConsoleSelector reads T.* without watching the theme, and the
+    // hosts that build this widget are const in the top bar, so no
+    // parent rebuild reaches it on a theme or font switch (const-skip
+    // pattern).
+    ref.watch(themeModeProvider);
+    ref.watch(fontSizeModeProvider);
+    if (names.isEmpty) {
+      return ConsoleSelector<int>(
+        width: _width,
+        enabled: false,
+        value: -1,
+        items: const [(-1, 'No mix presentations')],
+        onChanged: (_) {},
+        semanticLabel: _semanticLabel,
+      );
+    }
+    return ConsoleSelector<int>(
+      width: _width,
+      value: active.clamp(0, names.length - 1),
+      items: names.indexed.toList(),
+      onChanged: onChanged,
+      semanticLabel: _semanticLabel,
+    );
+  }
+}
+
+/// [_MixSwitcher] bound to the session's authored mixes.
 class _MixSelector extends ConsumerWidget {
   const _MixSelector();
 
@@ -159,12 +217,14 @@ class _MixSelector extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final mixes = ref.watch(mixesNotifierProvider);
     final activeMixIdx = ref.watch(activeMixProvider);
-    return TopbarSelector(
-      items: [for (final m in mixes) m.name],
-      activeIndex: mixes.isEmpty ? -1 : activeMixIdx,
-      // Creation lives in the Mix view, hence the inert ghost here.
-      emptyLabel: 'No mix presentations',
-      onSelect: (v) {
+    return _MixSwitcher(
+      names: [for (final m in mixes) m.name],
+      active: activeMixIdx,
+      onChanged: (v) {
+        // Picking the active mix again changes nothing: resetting its
+        // sub-mix would push the first sub-mix's settings and rebuild
+        // the renderer mid-playback.
+        if (v == ref.read(activeMixProvider)) return;
         ref.read(activeMixProvider.notifier).set(v);
         ref.read(activeSubMixProvider.notifier).set(0);
       },
@@ -188,16 +248,15 @@ class _PlaybackMixSelector extends ConsumerWidget {
     final session = ref.watch(playbackSessionProvider);
     final mps =
         session?.report.mixPresentations ?? const <IamfMixPresentation>[];
-    return TopbarSelector(
-      items: [
+    return _MixSwitcher(
+      names: [
         for (var i = 0; i < mps.length; i++)
           (mps[i].name?.isNotEmpty ?? false)
               ? mps[i].name!
               : 'Mix Presentation ${i + 1}',
       ],
-      activeIndex: session?.activeMixIndex ?? -1,
-      emptyLabel: 'No mix presentations',
-      onSelect: (v) =>
+      active: session?.activeMixIndex ?? 0,
+      onChanged: (v) =>
           ref.read(playbackSessionProvider.notifier).setActiveMix(v),
     );
   }

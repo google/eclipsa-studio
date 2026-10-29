@@ -27,10 +27,12 @@
 /// WAV reader with random-access seeking, backed by the in-house wav
 /// library (engine/wav — RIFF/RF64/BW64, PCM 8/16/24/32 + float32/64).
 ///
-/// Thread-safety: one WavReader per element chain; accessed only from the
-/// audio thread after open(). Reads are allocation-free: the library's
-/// decode scratch is preallocated in open() and samples decode directly
-/// into the destination AudioBuffer.
+/// Thread-safety: not thread-safe; after open(), one thread at a time
+/// uses each reader. In playback that is the WavStreamer's disk thread,
+/// through a WavStream (io/wav_stream.h), never the audio thread: a read
+/// does file I/O. Reads are allocation-free: the library's decode
+/// scratch is preallocated in open() and samples decode directly into
+/// the destination AudioBuffer.
 class WavReader {
  public:
   WavReader() = default;

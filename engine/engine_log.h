@@ -20,6 +20,8 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
+#include <string_view>
+
 extern "C" {
 #endif
 
@@ -60,7 +62,8 @@ void eclipsa_studio_rt_log_drain(void);
 /// Stage a log message in the lock-free log ring; delivered to the
 /// registered callback by the next eclipsa_studio_rt_log_drain(). Safe from
 /// any thread (no heap, no locks, no Dart callback on this thread).
-/// Messages are truncated to the ring slot size (512 bytes). The ring
+/// Messages are truncated to 511 bytes, the 512-byte ring slot less its
+/// terminating NUL. The ring
 /// holds 512 entries; when it is full the message is dropped and the
 /// drain reports the count, and a dropped WARN or ERROR is written to
 /// stderr so the diagnostics of an error storm are not lost.
@@ -77,6 +80,17 @@ void engine_log(EclipsaStudioLogLevel level, const char* category,
 /// dropped.
 void engine_log_rt(EclipsaStudioLogLevel level, const char* category,
                    const char* message);
+
+/// engine_log() for text that can hold several lines or be longer than a
+/// ring slot, such as an iamf-tools status: stages each line of `text` as
+/// its own entry, and a line longer than the 511 bytes a slot holds as
+/// entries of at most 511 bytes in order, each cut at a UTF-8 character
+/// boundary. Lines end at "\n" or "\r\n", and empty lines are skipped.
+/// A NUL byte ends the entry it falls in. Entries from other threads can
+/// land between the entries of one call. Safe from any thread (no heap,
+/// no locks).
+void engine_log_lines(EclipsaStudioLogLevel level, const char* category,
+                      std::string_view text) noexcept;
 #endif
 
 #endif  // ECLIPSA_STUDIO_ENGINE_ENGINE_LOG_H_

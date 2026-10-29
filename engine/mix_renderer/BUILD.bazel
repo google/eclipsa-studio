@@ -17,15 +17,45 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "loudness_analysis_sink",
+    hdrs = ["loudness_analysis_sink.h"],
+    srcs = ["loudness_analysis_sink.cc"],
+    deps = [
+        "//:engine_log",
+        "//meters:bs1770_weights",
+        "//renderer:oar_renderer",
+        "@loudness_ebur128//:ebur128_analyzer",
+    ],
+)
+
+cc_library(
+    name = "offline_iamf_measurer",
+    hdrs = ["offline_iamf_measurer.h"],
+    srcs = ["offline_iamf_measurer.cc"],
+    deps = [
+        ":loudness_analysis_sink",
+        "//:engine_log",
+        "//iamf:iamf_demuxer",
+        "//iamf:read_only_file_map",
+        "//renderer:oar_capability",
+        "//renderer:oar_renderer",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_factory",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_interface",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_stream_settings",
+        "@iamf_tools//iamf/include/iamf_tools:iamf_tools_api_types",
+    ],
+)
+
+cc_library(
     name = "offline_mix_renderer",
     hdrs = ["offline_mix_renderer.h"],
     srcs = ["offline_mix_renderer.cc"],
     deps = [
+        ":loudness_analysis_sink",
         "//:engine_log",
         "//bounce:element_stream",
         "//graph:audio_buffer",
-        "//meters:bs1770_weights",
+        "//renderer:channel_order",
         "//renderer:oar_renderer",
-        "@loudness_ebur128//:ebur128_analyzer",
     ],
 )

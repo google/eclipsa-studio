@@ -130,10 +130,14 @@ TEST(OarLimiterDelayTest, DefaultInstanceCarriesTheIamfDelay) {
 }
 
 TEST(OarLimiterDelayTest, DelaySurvivesLayoutRebuild) {
-  // create_renderer() is the only place the delay cache is written.
-  // Assert on it BETWEEN the rebuild and the next render, then confirm
-  // on the rebuilt instance. The delay is 240 for every instance at
-  // 48 kHz, so this catches a zeroed cache, not an unrefreshed one.
+  // create_renderer() writes the delay cache for every new instance.
+  // The other writers are set_limiter_enabled() and shutdown_locked(),
+  // which zeroes it. This test does not call set_limiter_enabled(), and
+  // reaches shutdown_locked() only through init(), before init() builds
+  // the first instance. Assert on it BETWEEN the rebuild and the next
+  // render, then confirm on the rebuilt instance. The delay is 240 for
+  // every instance at 48 kHz, so this catches a zeroed cache, not an
+  // unrefreshed one.
   OarRenderer r;
   r.set_no_audio_thread();
   ASSERT_TRUE(r.init(48000, kFrames, kStereoLayout));
@@ -180,6 +184,51 @@ TEST(OarLimiterDelayTest, HotInputStaysUnderTheCeiling) {
   EXPECT_GT(peak, kCeiling * 0.9f) << "limiter output collapsed";
   EXPECT_LE(peak, kCeiling + 1e-3f)
       << "limiter let a 6 dB over through — is it engaged at all?";
+}
+
+// set_limiter_enabled() on a built offline instance: off removes the
+// delay from the cache and from the rendered path, on restores both.
+TEST(OarLimiterDelayTest, DisabledLimiterAddsNoDelay) {
+  OarRenderer r;
+  r.set_no_audio_thread();
+  ASSERT_TRUE(r.init(48000, kFrames, kStereoLayout));
+  ASSERT_TRUE(r.add_element(1, /*type=channel*/ 0, kStereoLayout, 2));
+  ASSERT_EQ(r.limiter_delay(), 240u);
+
+  ASSERT_TRUE(r.set_limiter_enabled(false));
+  EXPECT_EQ(r.limiter_delay(), 0u);
+  EXPECT_EQ(measured_impulse_pos(r), static_cast<int>(kImpulseFrame));
+
+  ASSERT_TRUE(r.set_limiter_enabled(true));
+  EXPECT_EQ(r.limiter_delay(), 240u);
+  EXPECT_EQ(measured_impulse_pos(r), static_cast<int>(kImpulseFrame) + 240);
+}
+
+// Set before init(), the setting holds for the instance init() builds
+// and for a rebuilt one.
+TEST(OarLimiterDelayTest, SettingBeforeInitHoldsAcrossRebuild) {
+  OarRenderer r;
+  r.set_no_audio_thread();
+  ASSERT_TRUE(r.set_limiter_enabled(false));
+  ASSERT_TRUE(r.init(48000, kFrames, kStereoLayout));
+  ASSERT_TRUE(r.add_element(1, /*type=channel*/ 0, kStereoLayout, 2));
+  EXPECT_EQ(r.limiter_delay(), 0u);
+  ASSERT_TRUE(r.set_layout(k51Layout));
+  ASSERT_TRUE(r.set_layout(kStereoLayout));
+  EXPECT_EQ(r.limiter_delay(), 0u);
+  EXPECT_EQ(measured_impulse_pos(r), static_cast<int>(kImpulseFrame));
+}
+
+// An instance an audio thread may render keeps its limiter: the switch
+// is refused before init(), so the instance init() builds is limited,
+// and after it.
+TEST(OarLimiterDelayTest, LiveInstanceRefusesTheSwitch) {
+  OarRenderer r;
+  EXPECT_FALSE(r.set_limiter_enabled(false));
+  ASSERT_TRUE(r.init(48000, kFrames, kStereoLayout));
+  EXPECT_EQ(r.limiter_delay(), 240u);
+  EXPECT_FALSE(r.set_limiter_enabled(false));
+  EXPECT_EQ(r.limiter_delay(), 240u);
 }
 
 }  // namespace

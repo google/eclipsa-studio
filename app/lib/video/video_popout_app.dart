@@ -98,7 +98,13 @@ class VideoPopoutApp extends StatelessWidget {
       theme: ThemeData.dark().copyWith(
         // Match the main window's tooltip timing so hovering the
         // pop-out's controls feels the same as the docked panel.
-        tooltipTheme: const TooltipThemeData(waitDuration: T.tooltipWait),
+        tooltipTheme: const TooltipThemeData(
+          waitDuration: T.tooltipWait,
+          constraints: BoxConstraints(
+            minHeight: 24,
+            maxWidth: T.tooltipMaxWidth,
+          ),
+        ),
       ),
       home: _VideoPopoutWindow(args: args),
     );

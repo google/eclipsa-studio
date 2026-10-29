@@ -22,7 +22,23 @@
 #include <string>
 #include <vector>
 
+#include "absl/types/span.h"
+#include "iamf/read_only_file_map.h"
+
 namespace eclipsa_studio {
+
+// Where the IAMF bitstream of an MP4 `iamf` track sits: the descriptor OBUs
+// serialised from the track's sample entry, then the byte ranges in the MP4
+// file that hold the sample payloads, in sample order. Adjacent samples are
+// merged into one range.
+struct IamfTrackIndex {
+  struct Range {
+    uint64_t offset = 0;
+    uint64_t size = 0;
+  };
+  std::vector<uint8_t> descriptor_obus;
+  std::vector<Range> samples;
+};
 
 // Extracts the standalone IAMF bitstream from the `iamf` track of an
 // IAMF-in-ISOBMFF MP4 (the inverse of IamfMuxer), in-process via libgpac.
@@ -57,36 +73,71 @@ class IamfDemuxer {
 
   // Demux the `iamf` track of `input_mp4` into a standalone IAMF bitstream
   // appended to `*out_bytes`. Returns true on success; on failure returns
-  // false and sets last_error() (with the usual upstream-style prefix:
-  // "io:" / "unsupported:" / "malformed:" / "invalid_argument:").
+  // false, leaves `*out_bytes` as it was, and sets last_error() (with the
+  // usual upstream-style prefix: "io:" / "unsupported:" / "malformed:" /
+  // "invalid_argument:").
   bool DemuxToBytes(const std::string& input_mp4,
                     std::vector<uint8_t>* out_bytes);
 
+  // Read the descriptor OBUs of the `iamf` track of `input_mp4` and the file
+  // offset and size of every sample, without reading sample data. Returns
+  // false and sets last_error() on failure. When the failure is that sample
+  // data is stored in another file (an external data reference), also sets
+  // sample_data_external(); DemuxToBytes can still read such a track.
+  bool IndexTrack(const std::string& input_mp4, IamfTrackIndex* out_index);
+
   const std::string& last_error() const { return last_error_; }
+  // True when the last IndexTrack failed because sample data is stored in
+  // another file.
+  bool sample_data_external() const { return sample_data_external_; }
 
  private:
   std::string last_error_;
+  bool sample_data_external_ = false;
 };
 
-// Process-wide single-slot handoff for the QC-open flow, which demuxes the same
-// IAMF-in-MP4 twice in quick succession — once on the probe isolate
-// (`eclipsa_studio_iamf_probe`) and once on the engine session
-// (`eclipsa_studio_playback_open`) — re-parsing the whole container both
-// times.
-// The probe stashes its freshly-demuxed bitstream here and the session takes it
-// instead of demuxing again (ES-215). The probe runs on a Dart `compute` isolate,
-// which dlopens this same dylib image, so the slot (a C++ static) is shared
-// across the isolate boundary and outlives the probe isolate. Thread-safe;
-// holds at most one file's bytes.
+// An IAMF-in-MP4 file prepared for reading in place: the MP4 mapped
+// read-only and its IAMF bitstream described as byte ranges, the descriptor
+// OBUs first and then the sample payloads in the mapping, in sample order.
+// Reading the ranges in order yields the bytes DemuxToBytes produces, but
+// no sample is copied, so opening costs the sample table, not the track.
 //
-// [StashIamfDemux] always overwrites: the producer (probe) re-parses on every
-// call, so the slot reflects the file exactly as just seen — no stale-content
-// risk even if the same path was re-exported between opens. [TakeIamfDemux]
-// moves the bytes out and clears the slot on a path match (single use), so a
-// consumer not preceded by a matching stash simply falls through to a fresh
-// demux.
-void StashIamfDemux(const std::string& path, const std::vector<uint8_t>& bytes);
-bool TakeIamfDemux(const std::string& path, std::vector<uint8_t>* out);
+// The ranges stay valid until close() or destruction. Truncating the file
+// while the ranges are read can fault (SIGBUS on POSIX), as with any
+// mapping. Not copyable or movable: the ranges point into members.
+class IamfMp4Source {
+ public:
+  IamfMp4Source() = default;
+  ~IamfMp4Source() = default;
+
+  IamfMp4Source(const IamfMp4Source&) = delete;
+  IamfMp4Source& operator=(const IamfMp4Source&) = delete;
+
+  // Index and map `path`. Returns false and, if `err` is non-null, fills it
+  // (prefixed as for IamfDemuxer) when the track cannot be indexed, the file
+  // cannot be mapped, or a sample lies outside the file. If
+  // `sample_data_external` is non-null it is set to whether the failure is
+  // sample data stored in another file, the one case where
+  // IamfDemuxer::DemuxToBytes can still read the track.
+  bool open(const std::string& path, std::string* err,
+            bool* sample_data_external = nullptr);
+
+  // Release the ranges and the mapping. Idempotent.
+  void close();
+
+  const std::vector<absl::Span<const uint8_t>>& segments() const {
+    return segments_;
+  }
+  // Size of the IAMF bitstream the ranges describe.
+  uint64_t size_bytes() const { return total_bytes_; }
+
+ private:
+  // Declared before `segments_`, which points into both.
+  IamfTrackIndex index_;
+  ReadOnlyFileMap map_;
+  std::vector<absl::Span<const uint8_t>> segments_;
+  uint64_t total_bytes_ = 0;
+};
 
 }  // namespace eclipsa_studio
 

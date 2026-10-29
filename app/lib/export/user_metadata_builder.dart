@@ -57,18 +57,12 @@ class UserMetadataBuilder {
   int _nextSubstreamId = 0;
   int _nextParameterId = 100;
 
-  /// All allocated parameter IDs — used to emit parameter_block_metadata
-  /// for each one.
-
   /// (codec, sampleRate, bitDepth) → codecConfigId, to dedup configs.
   final Map<String, int> _codecConfigIds = {};
 
   /// Element.id → audioElementId (allocated during _writeAudioElements,
   /// consumed by mix presentations and audio frames).
   final Map<int, int> _audioElementIdByElement = {};
-
-  /// Element.id → list of substream IDs assigned for that element.
-  final Map<int, List<int>> _substreamIdsByElement = {};
 
   // ── Public entry point ────────────────────────────────────────────────
 
@@ -80,7 +74,7 @@ class UserMetadataBuilder {
     _writeMixPresentations();
     _writeAudioFrames();
     // No parameter_block_metadata: all our parameter definitions use
-    // param_definition_mode=1 with a constant `default_mix_gain`, so
+    // param_definition_mode=1 with a constant `default_mix_gain_db`, so
     // iamf-tools uses that default for every frame. Emitting a single
     // full-duration block trips its per-frame timestamp check; emitting
     // one block per 1024-sample frame would bloat the textproto by
@@ -130,17 +124,13 @@ class UserMetadataBuilder {
     _openMessage('codec_config_metadata');
     _field('codec_config_id', '$id');
     _openMessage('codec_config');
+    // iamf-tools takes the codec ID from the decoder config that is set,
+    // and the encoder determines audio_roll_distance and the Opus
+    // pre_skip, so none of the three is written.
+    _field('num_samples_per_frame', '${config.framesPerCodedBlock}');
     if (config.codec == IamfCodec.opus) {
-      _field('codec_id', iamfCodecIdName('OPUS'));
-      _field('num_samples_per_frame', '${config.framesPerCodedBlock}');
-      // IAMF spec value for Opus: -3840 / num_samples_per_frame.
-      _field('audio_roll_distance', '-4');
       _openMessage('decoder_config_opus');
       _field('version', '1');
-      // Canonical reference value; iamf-tools overrides it with the
-      // encoder's real lookahead (automatically_override_codec_delay
-      // defaults to true).
-      _field('pre_skip', '312');
       _field('input_sample_rate', '${config.sampleRate}');
       _openMessage('opus_encoder_metadata');
       _field('target_bitrate_per_channel', '${config.opusBitratePerChannel}');
@@ -148,9 +138,6 @@ class UserMetadataBuilder {
       _closeMessage(); // opus_encoder_metadata
       _closeMessage(); // decoder_config_opus
     } else {
-      _field('codec_id', iamfCodecIdName(sample.codec));
-      _field('num_samples_per_frame', '${config.framesPerCodedBlock}');
-      _field('audio_roll_distance', '0');
       _openMessage('decoder_config_lpcm');
       _field('sample_format_flags', 'LPCM_LITTLE_ENDIAN');
       _field('sample_size', '${_bitDepth(sample)}');
@@ -171,12 +158,10 @@ class UserMetadataBuilder {
     final audioElementId = _nextAudioElementId++;
     _audioElementIdByElement[element.id] = audioElementId;
 
-    final channelCount = channelCountForLayout(element);
     final substreamIds = List<int>.generate(
       _substreamCountFor(element),
       (_) => _nextSubstreamId++,
     );
-    _substreamIdsByElement[element.id] = substreamIds;
 
     _openMessage('audio_element_metadata');
     _field('audio_element_id', '$audioElementId');
@@ -187,7 +172,7 @@ class UserMetadataBuilder {
 
     switch (element.type) {
       case 'Channel':
-        _writeScalableChannelLayoutConfig(element, substreamIds, channelCount);
+        _writeScalableChannelLayoutConfig(element);
         break;
       case 'Scene':
         _writeAmbisonicsConfig(element, substreamIds);
@@ -200,11 +185,7 @@ class UserMetadataBuilder {
     _closeMessage();
   }
 
-  void _writeScalableChannelLayoutConfig(
-    AudioElement element,
-    List<int> substreamIds,
-    int channelCount,
-  ) {
+  void _writeScalableChannelLayoutConfig(AudioElement element) {
     _openMessage('scalable_channel_layout_config');
     _field('reserved', '0');
     _openMessage('channel_audio_layer_configs');
@@ -229,15 +210,15 @@ class UserMetadataBuilder {
     _field('output_gain_is_present_flag', '0');
     _field('recon_gain_is_present_flag', '0');
     _field('reserved_a', '0');
-    _field('substream_count', '${substreamIds.length}');
-    _field('coupled_substream_count', '${_coupledSubstreamCount(element)}');
+    // iamf-tools derives substream_count and coupled_substream_count
+    // from the loudspeaker layout, so they are not written.
     _closeMessage(); // channel_audio_layer_configs
     _closeMessage(); // scalable_channel_layout_config
   }
 
   void _writeAmbisonicsConfig(AudioElement element, List<int> substreamIds) {
+    // iamf-tools takes the ambisonics mode from which config is set.
     _openMessage('ambisonics_config');
-    _field('ambisonics_mode', 'AMBISONICS_MODE_MONO');
     _openMessage('ambisonics_mono_config');
     final channels = substreamIds.length;
     _field('output_channel_count', '$channels');
@@ -387,7 +368,9 @@ class UserMetadataBuilder {
     _field('param_definition_mode', '1');
     _field('reserved', '0');
     _closeMessage(); // param_definition
-    _field('default_mix_gain', '${dbToQ7_8(gainDb)}');
+    _openMessage('default_mix_gain_db');
+    _field('q7_dot8', '${dbToQ7_8(gainDb)}');
+    _closeMessage(); // default_mix_gain_db
     _closeMessage();
   }
 
@@ -430,50 +413,39 @@ class UserMetadataBuilder {
   }
 
   void _writeAudioFrames() {
+    // iamf-tools requires every substream to share the same
+    // samples_to_trim_at_end. The dialog pads every bounced WAV to
+    // paddedFrames and sets trim = paddedFrames - longestSource (the
+    // frame-alignment pad only). Shorter elements end in silence before
+    // the longest; that silence is part of the audio, not trim. Without
+    // the dialog's values the trim is 0, and iamf-tools pads a partial
+    // final frame and trims the pad itself (auto mode in _writeAudioFrame).
+    final trimEnd = config.paddedFrames > 0 && config.longestSourceFrames > 0
+        ? config.paddedFrames - config.longestSourceFrames
+        : 0;
     for (final element in config.elements) {
-      _writeAudioFrame(element);
+      _writeAudioFrame(element, trimEnd);
     }
   }
 
-  void _writeAudioFrame(AudioElement element) {
+  void _writeAudioFrame(AudioElement element, int trimEnd) {
     final wavPath = element.wavPath;
     if (wavPath == null) return;
     final basename = config.basenameFor(element.id, wavPath);
     final audioElementId = _audioElementIdByElement[element.id];
     if (audioElementId == null) return;
 
-    // iamf-tools requires every substream to share the same
-    // samples_to_trim_at_end. The dialog pads every bounced WAV to
-    // paddedFrames and computes trim = paddedFrames - longestSource
-    // (the frame-alignment pad only). Shorter elements naturally end
-    // in silence before the longest; that silence is considered real
-    // audio, not trim. Fall back to per-element rounding when the
-    // dialog hasn't pre-computed values (e.g. unit tests).
-    final frame = config.framesPerCodedBlock;
-    final total = element.wavInfo?.totalSamples ?? 0;
-    int trimEnd;
-    if (config.paddedFrames > 0 && config.longestSourceFrames > 0) {
-      trimEnd = config.paddedFrames - config.longestSourceFrames;
-    } else if (total > 0 && frame > 0) {
-      final target = ((total + frame - 1) ~/ frame) * frame;
-      trimEnd = target - total;
-    } else {
-      trimEnd = 0;
-    }
-
     _openMessage('audio_frame_metadata');
     _field('wav_filename', _quote(basename));
     _field('samples_to_trim_at_end', '$trimEnd');
     _field('samples_to_trim_at_start', '0');
-    if (config.codec == IamfCodec.opus) {
-      // Auto mode (the proto's recommended settings): iamf-tools adds
-      // the codec delay to the start trim and the final-frame padding
-      // to the end trim itself. Without these the encode is rejected —
-      // the defaults (true) expect the user values to already include
-      // the libopus lookahead (312) and the 960-alignment pad.
-      _field('samples_to_trim_at_start_includes_codec_delay', 'false');
-      _field('samples_to_trim_at_end_includes_padding', 'false');
-    }
+    // Auto mode, the settings the iamf-tools proto recommends, for both
+    // codecs: iamf-tools adds the codec delay to the start trim and the
+    // final-frame padding to the end trim. With the defaults (true) the
+    // values above must already include both, so an LPCM input that
+    // ends partway through a frame, or any Opus input, fails to encode.
+    _field('samples_to_trim_at_start_includes_codec_delay', 'false');
+    _field('samples_to_trim_at_end_includes_padding', 'false');
     _field('audio_element_id', '$audioElementId');
     final labels = _channelLabelsFor(element);
     if (labels.isNotEmpty) {
@@ -493,24 +465,24 @@ class UserMetadataBuilder {
   /// formula used to assume *all* channels pair up, which is wrong for
   /// every layout with a C/LFE (5.x, 7.x, 3.1.2).
   ///
-  /// Values mirror `kInputLayoutToNumSubstreams` and
-  /// `kInputLayoutToCoupledSubstreamCount` in iamf-tools
+  /// iamf-tools derives the substream count from the loudspeaker layout,
+  /// and `audio_substream_ids` must list that many IDs. Values mirror
+  /// `kInputLayoutToNumSubstreams` in iamf-tools
   /// (`audio_element_metadata_builder.cc`).
-  static const _kChannelSubstreamCounts = <String, (int, int)>{
-    // layout: (total_substreams, coupled_substreams)
-    'mono': (1, 0),
-    'stereo': (1, 1),
-    'binaural': (1, 1),
-    '3.1.2': (4, 2),
-    '5.1': (4, 2),
-    '5.1.2': (5, 3),
-    '5.1.4': (6, 4),
-    '7.1': (5, 3),
-    '7.1.2': (6, 4),
-    '7.1.4': (7, 5),
+  static const _kChannelSubstreamCounts = <String, int>{
+    'mono': 1,
+    'stereo': 1,
+    'binaural': 1,
+    '3.1.2': 4,
+    '5.1': 4,
+    '5.1.2': 5,
+    '5.1.4': 6,
+    '7.1': 5,
+    '7.1.2': 6,
+    '7.1.4': 7,
     // 9.1.6 is an expanded layout: 16 channels grouped as 7 coupled stereo
     // substreams + C and LFE as uncoupled mono substreams = 9 total.
-    '9.1.6': (9, 7),
+    '9.1.6': 9,
   };
 
   /// Substream count for an element. Channel layouts use the IAMF
@@ -521,18 +493,11 @@ class UserMetadataBuilder {
   int _substreamCountFor(AudioElement element) {
     if (element.type == 'Object') return 1;
     if (element.type == 'Scene') return channelCountForLayout(element);
-    final entry = _kChannelSubstreamCounts[element.layout.toLowerCase()];
-    if (entry != null) return entry.$1;
+    final count = _kChannelSubstreamCounts[element.layout.toLowerCase()];
+    if (count != null) return count;
     // Fallback for unknown/custom layouts: pair everything as stereo.
     final ch = channelCountForLayout(element);
     return (ch + 1) ~/ 2;
-  }
-
-  int _coupledSubstreamCount(AudioElement element) {
-    if (element.type != 'Channel') return 0;
-    final entry = _kChannelSubstreamCounts[element.layout.toLowerCase()];
-    if (entry != null) return entry.$2;
-    return channelCountForLayout(element) ~/ 2;
   }
 
   // ── Temporal delimiter ────────────────────────────────────────────
@@ -649,31 +614,29 @@ class UserMetadataBuilder {
           'CHANNEL_LABEL_RTB_4',
         ];
       case '9.1.6':
-        // Expanded layout: channel_id follows the OAR render order
-        // (engine/adm_import/scene/layouts.cc — M+060, M-060, M+000, LFE,
-        // M+135, M-135, M+030, M-030, M+090, M-090, then 6 tops). That order
-        // matches iamf-tools' canonical 9.1.6 ChannelLabel order
-        // position-for-position (channel_label.cc k9_1_6ChannelOrder:
-        // FL FR FC LFE BL BR FLc FRc SiL SiR + 6 tops), and the BS.2051
-        // positions line up (FL=±60, FLc=±30, SiL=±90, BL=±135), so
-        // channel_id == WAV index with no remap.
+        // Expanded layout, a WAV in the app's 9.1.6 order (OBR's alt
+        // order, models/layout_916.dart): channel_id is the WAV index and
+        // the label names the channel at that index. iamf-tools keys each
+        // WAV channel by its label (wav_sample_provider.cc), so the order
+        // of this list does not have to be its canonical 9.1.6 order (FL
+        // FR FC LFE BL BR FLc FRc SiL SiR, then the tops).
         return [
-          'CHANNEL_LABEL_FL',
-          'CHANNEL_LABEL_FR',
-          'CHANNEL_LABEL_FC',
-          'CHANNEL_LABEL_LFE',
-          'CHANNEL_LABEL_BL',
-          'CHANNEL_LABEL_BR',
           'CHANNEL_LABEL_FLC',
           'CHANNEL_LABEL_FRC',
+          'CHANNEL_LABEL_FC',
+          'CHANNEL_LABEL_LFE',
+          'CHANNEL_LABEL_FL',
+          'CHANNEL_LABEL_FR',
           'CHANNEL_LABEL_SI_L',
           'CHANNEL_LABEL_SI_R',
+          'CHANNEL_LABEL_BL',
+          'CHANNEL_LABEL_BR',
           'CHANNEL_LABEL_TP_FL',
           'CHANNEL_LABEL_TP_FR',
-          'CHANNEL_LABEL_TP_BL',
-          'CHANNEL_LABEL_TP_BR',
           'CHANNEL_LABEL_TP_SI_L',
           'CHANNEL_LABEL_TP_SI_R',
+          'CHANNEL_LABEL_TP_BL',
+          'CHANNEL_LABEL_TP_BR',
         ];
       default:
         return [];

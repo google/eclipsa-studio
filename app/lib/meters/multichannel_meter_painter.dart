@@ -45,7 +45,7 @@ List<String> channelLabels(int n) => _channelLabelsCache.putIfAbsent(
 /// Whether the meter's channel labels must rotate 90° to stay legible:
 /// true when the widest label would overflow the per-bar pitch (bar
 /// width + gap) and start colliding with its neighbors — e.g. 9.1.6's
-/// four-character `Ltss` over 16 narrow bars. The `- 1` demands a
+/// four-character `Lts` over 16 narrow bars. The `- 1` demands a
 /// little slack before calling a horizontal fit good: a label within
 /// 1 px of the pitch would touch its neighbors, so it rotates too.
 bool meterLabelsRotate({
@@ -72,15 +72,16 @@ typedef MeterLabelLayout = ({MeterLabelMode mode, int rows});
 ///     below that, rotated columns overprint;
 ///  3. two staggered horizontal rows, when every two labels that share a
 ///     row fit side by side in two pitches with 1 px to spare. Only
-///     same-row neighbours are checked: 9.1.6's `Ltss` and `Rtss` are
-///     the widest labels but sit in different rows;
+///     same-row neighbours are checked: 9.1.6's `Lss`, `Rss`, `Lrs`,
+///     `Rrs`, `Lts` and `Rts` are the widest labels, and each pair
+///     sits in different rows;
 ///  4. two staggered rotated rows, when two pitches are at least one
 ///     line of text;
 ///  5. no labels.
 ///
 /// At 9.1.6 in the Renderer view (16 bars on a 9.8 px pitch) this gives
-/// one rotated row at the Small font size (a 9.0 px line), two
-/// horizontal rows at Medium and two rotated rows at Large (ES-795).
+/// one rotated row at the Small font size (a 9.0 px line) and two
+/// horizontal rows at Medium and Large (ES-795, ES-960).
 MeterLabelLayout meterLabelLayout({
   required List<double> widths,
   required double lineHeight,
@@ -106,6 +107,11 @@ MeterLabelLayout meterLabelLayout({
   return (mode: MeterLabelMode.none, rows: 1);
 }
 
+/// A channel label under the pointer ([MultichannelMeterPainter.labelAt]):
+/// the channel, the rect its label is drawn in, and the top of the label
+/// strip, the bottom edge of the bars.
+typedef MeterLabelHit = ({int channel, Rect rect, double stripTop});
+
 /// Vertical multichannel level meter widget.
 ///
 /// Displays per-channel bars with hard green/yellow/amber zones, peak hold
@@ -115,7 +121,9 @@ MeterLabelLayout meterLabelLayout({
 /// [peaks]  — peak-hold values (0..1+), one per channel. Optional.
 /// [clipped] — whether each channel has clipped. Optional.
 /// [labels]  — custom channel labels. Defaults to standard names.
+/// [labelColors] — per-channel label colours. Optional.
 /// [onClipClear] — tap handler (typically clears latched clips). Optional.
+/// [onLabelHover] — pointer-over-label handler. Optional.
 class MultichannelMeter extends StatelessWidget {
   final List<double> levels;
   final List<double>? peaks;
@@ -123,6 +131,15 @@ class MultichannelMeter extends StatelessWidget {
   final List<String>? labels;
   final bool showLabels;
   final VoidCallback? onClipClear;
+
+  /// The colour of each channel's label, by channel; a null entry, or a
+  /// null list, draws that label in the default colour.
+  final List<Color?>? labelColors;
+
+  /// Called as the pointer moves over the meter with the label under it,
+  /// in the meter's own coordinates, and with null when it is over no
+  /// label or leaves the meter.
+  final ValueChanged<MeterLabelHit?>? onLabelHover;
 
   const MultichannelMeter({
     super.key,
@@ -132,25 +149,57 @@ class MultichannelMeter extends StatelessWidget {
     this.labels,
     this.showLabels = true,
     this.onClipClear,
+    this.labelColors,
+    this.onLabelHover,
   });
 
   @override
   Widget build(BuildContext context) {
+    final painter = MultichannelMeterPainter(
+      levels: levels,
+      peaks: peaks,
+      clipped: clipped,
+      // The painter reads no labels when [showLabels] is false.
+      labels: labels ?? (showLabels ? channelLabels(levels.length) : const []),
+      labelColors: labelColors,
+      showLabels: showLabels,
+      fontMode: T.fontMode,
+      themeMode: T.mode,
+    );
+    final paintedBars = CustomPaint(painter: painter, size: Size.infinite);
+    final onLabelHover = this.onLabelHover;
+    Widget bars = paintedBars;
+    if (onLabelHover != null) {
+      final meterContext = context;
+      bars = Builder(
+        builder: (context) => MouseRegion(
+          onHover: (event) {
+            final box = context.findRenderObject() as RenderBox?;
+            final meter = meterContext.findRenderObject() as RenderBox?;
+            final hit = box == null || meter == null || !box.hasSize
+                ? null
+                : painter.labelAt(event.localPosition, box.size);
+            if (hit == null) {
+              onLabelHover(null);
+              return;
+            }
+            // From the bars' coordinates to the meter's, inside its frame.
+            final shift = box!.localToGlobal(Offset.zero, ancestor: meter);
+            onLabelHover((
+              channel: hit.channel,
+              rect: hit.rect.shift(shift),
+              stripTop: hit.stripTop + shift.dy,
+            ));
+          },
+          onExit: (_) => onLabelHover(null),
+          child: paintedBars,
+        ),
+      );
+    }
     final meter = RepaintBoundary(
       child: Container(
         decoration: T.decoControl(borderColor: T.border, borderWidth: 0.5),
-        child: CustomPaint(
-          painter: MultichannelMeterPainter(
-            levels: levels,
-            peaks: peaks,
-            clipped: clipped,
-            labels: labels ?? channelLabels(levels.length),
-            showLabels: showLabels,
-            fontMode: T.fontMode,
-            themeMode: T.mode,
-          ),
-          size: Size.infinite,
-        ),
+        child: bars,
       ),
     );
     if (onClipClear == null) return meter;
@@ -161,12 +210,20 @@ class MultichannelMeter extends StatelessWidget {
 /// CustomPainter for the multichannel level meter.
 ///
 /// Suitable for 1–28 channels. Bar widths auto-shrink as channel count rises.
+///
+/// Paints no background. The `decoControl` frame around it in
+/// [MultichannelMeter] paints `bgControls` inside its rounded border; a
+/// square fill here paints over the border's rounded corners.
 class MultichannelMeterPainter extends CustomPainter {
   final List<double> levels;
   final List<double>? peaks;
   final List<bool>? clipped;
   final List<String> labels;
   final bool showLabels;
+
+  /// The colour of each channel's label, by channel; a null entry, or a
+  /// null list, draws that label in [T.textTertiary].
+  final List<Color?>? labelColors;
 
   static const _kPadH = 6.0; // horizontal padding
   static const _kPadV = 6.0; // vertical padding (top)
@@ -199,6 +256,11 @@ class MultichannelMeterPainter extends CustomPainter {
       fontFamily: T.monoFamily,
     ),
   );
+  // One cache per colour passed in [labelColors]: the solo and mute
+  // colours of the themes in use, so a handful of entries; emptied if a
+  // caller passes more colours than that.
+  static final _tintedLabelPainters = <Color, LabelPainterCache>{};
+  static const _kMaxTintedCaches = 8;
   static final _dbPainters = LabelPainterCache(
     () => TextStyle(
       fontSize: T.fontMeter,
@@ -232,23 +294,19 @@ class MultichannelMeterPainter extends CustomPainter {
     this.peaks,
     this.clipped,
     required this.labels,
+    this.labelColors,
     this.showLabels = true,
     required this.fontMode,
     required this.themeMode,
   });
 
-  @override
-  void paint(Canvas canvas, Size size) {
+  /// The layout [paint] draws in a meter of [size]; null when the bars
+  /// do not fit.
+  _MeterLayout? _layout(Size size) {
     final n = levels.length;
-    if (n == 0) return;
-
-    final paint = _paint
-      ..style = PaintingStyle.fill
-      ..strokeWidth = 1.0;
-
-    // ── Layout ──────────────────────────────────────────────────────────────
+    if (n == 0) return null;
     final barAreaW = size.width - _kPadH * 2 - _kDbScaleW;
-    if (barAreaW <= 0) return;
+    if (barAreaW <= 0) return null;
 
     final rawBarW = (barAreaW - (n - 1) * _kBarGap) / n;
     final barW = rawBarW.clamp(_kMinBarW, _kMaxBarW);
@@ -261,8 +319,11 @@ class MultichannelMeterPainter extends CustomPainter {
     final labelPainters = <TextPainter>[];
     if (showLabels) {
       for (var i = 0; i < n; i++) {
-        final label = i < labels.length ? labels[i] : '${i + 1}';
-        final tp = _labelPainters.painterFor(label, fontMode, themeMode);
+        final tp = _labelPainters.painterFor(
+          _labelText(i),
+          fontMode,
+          themeMode,
+        );
         labelPainters.add(tp);
         labelLineH = math.max(labelLineH, tp.height);
       }
@@ -309,15 +370,132 @@ class MultichannelMeterPainter extends CustomPainter {
       labelH = 0.0;
       barAreaH = size.height - _kPadV * 2;
     }
-    if (barAreaH <= 0) return;
+    if (barAreaH <= 0) return null;
     final totalBarsW = n * barW + (n - 1) * _kBarGap;
     final startX = _kPadH + _kDbScaleW + (barAreaW - totalBarsW) / 2;
     final startY = _kPadV;
     final endY = startY + barAreaH;
+    return _MeterLayout(
+      barW: barW,
+      startX: startX,
+      totalBarsW: totalBarsW,
+      startY: startY,
+      endY: endY,
+      barAreaH: barAreaH,
+      labelPainters: labelPainters,
+      labelLineH: labelLineH,
+      drawLabels: drawLabels,
+      rotateLabels: rotateLabels,
+      staggered: staggered,
+      rotatedRow1Y: rotatedRow1Y,
+    );
+  }
 
-    // ── Background ───────────────────────────────────────────────────────────
-    paint.color = T.bgControls;
-    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), paint);
+  String _labelText(int i) => i < labels.length ? labels[i] : '${i + 1}';
+
+  /// The painter for channel [i]'s label: the shared one, or one in its
+  /// [labelColors] entry. Both have the same metrics.
+  TextPainter _labelPainter(int i) {
+    final color = labelColors != null && i < labelColors!.length
+        ? labelColors![i]
+        : null;
+    if (color != null &&
+        _tintedLabelPainters.length >= _kMaxTintedCaches &&
+        !_tintedLabelPainters.containsKey(color)) {
+      for (final cache in _tintedLabelPainters.values) {
+        cache.dispose();
+      }
+      _tintedLabelPainters.clear();
+    }
+    final cache = color == null
+        ? _labelPainters
+        : _tintedLabelPainters.putIfAbsent(
+            color,
+            () => LabelPainterCache(
+              () => TextStyle(
+                fontSize: T.fontMeter,
+                color: color,
+                fontFamily: T.monoFamily,
+              ),
+            ),
+          );
+    return cache.painterFor(_labelText(i), fontMode, themeMode);
+  }
+
+  /// The label under [position] in a meter of [size], in the painter's
+  /// coordinates; null when no label is there. A label's hit area spans
+  /// its drawn text and its bar's column, grown by 2 px above and below,
+  /// except where two staggered rows meet, so the rows never overlap.
+  MeterLabelHit? labelAt(Offset position, Size size) {
+    final l = _layout(size);
+    if (l == null || !l.drawLabels) return null;
+    for (var i = 0; i < l.labelPainters.length; i++) {
+      final rect = _labelRect(l, i, size);
+      final x = l.startX + i * (l.barW + _kBarGap);
+      final secondRow = l.staggered && i.isOdd;
+      final hit = Rect.fromLTRB(
+        math.min(rect.left, x - _kBarGap / 2),
+        rect.top - (secondRow ? 0 : 2),
+        math.max(rect.right, x + l.barW + _kBarGap / 2),
+        rect.bottom + (l.staggered && !secondRow ? 0 : 2),
+      );
+      if (hit.contains(position)) {
+        return (channel: i, rect: rect, stripTop: l.endY);
+      }
+    }
+    return null;
+  }
+
+  /// Where channel [i]'s label is drawn: under its bar, horizontal or
+  /// rotated 90° to read top-down, in the second row for odd bars when
+  /// the labels are staggered.
+  Rect _labelRect(_MeterLayout l, int i, Size size) {
+    final tp = l.labelPainters[i];
+    final x = l.startX + i * (l.barW + _kBarGap);
+    final secondRow = l.staggered && i.isOdd;
+    if (l.rotateLabels) {
+      // After the +90° rotation the text's advance runs down the screen
+      // and its height extends left of the rotation point, so the glyph
+      // column is tp.height wide and centred on the bar.
+      return Rect.fromLTWH(
+        x + (l.barW - tp.height) / 2,
+        l.endY + 3 + (secondRow ? l.rotatedRow1Y : 0),
+        tp.height,
+        tp.width,
+      );
+    }
+    // Centered on the bar, but kept inside the meter: a staggered label
+    // can be twice the pitch wide, so the last bar's label can run past
+    // the right edge. A shift eats into the 1 px that meterLabelLayout
+    // left beside the same-row neighbour; at 9.1.6 in the Renderer view
+    // no label is shifted.
+    final maxX = math.max(0.0, size.width - tp.width);
+    final lx = (x + (l.barW - tp.width) / 2).clamp(0.0, maxX);
+    return Rect.fromLTWH(
+      lx,
+      l.endY + 3 + (secondRow ? l.labelLineH : 0),
+      tp.width,
+      tp.height,
+    );
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final l = _layout(size);
+    if (l == null) return;
+    final n = levels.length;
+    final barW = l.barW;
+    final startX = l.startX;
+    final totalBarsW = l.totalBarsW;
+    final startY = l.startY;
+    final endY = l.endY;
+    final barAreaH = l.barAreaH;
+
+    final paint = _paint
+      ..style = PaintingStyle.fill
+      ..strokeWidth = 1.0;
+
+    // No background: see the class doc.
 
     // ── dB scale + grid lines ────────────────────────────────────────────────
     paint
@@ -396,39 +574,26 @@ class MultichannelMeterPainter extends CustomPainter {
         }
       }
 
-      // Clip indicator — red rectangle at top, the only red on the meter
+      // Clip indicator: a red rectangle at the top of the bar
       if (isClipped) {
         paint.color = T.meterRed;
         canvas.drawRect(Rect.fromLTWH(x, startY - 1, barW, 3), paint);
       }
 
-      // Channel label — horizontal under the bar or rotated 90°, in
-      // the second row for odd bars when the labels are staggered.
-      if (drawLabels) {
-        final tp = labelPainters[i];
-        final secondRow = staggered && i.isOdd;
-        if (rotateLabels) {
-          // Read top-down: after the +90° rotation the text's advance
-          // runs down the screen from the translate point and its
-          // height extends left, so offsetting by +height/2 centers
-          // the glyph column on the bar.
+      // Channel label ([_labelRect]).
+      if (l.drawLabels) {
+        final tp = _labelPainter(i);
+        final rect = _labelRect(l, i, size);
+        if (l.rotateLabels) {
+          // Read top-down: rotated +90° about the rect's top-right, the
+          // text runs down the screen with its height to the left.
           canvas.save();
-          canvas.translate(
-            x + (barW + tp.height) / 2,
-            endY + 3 + (secondRow ? rotatedRow1Y : 0),
-          );
+          canvas.translate(rect.right, rect.top);
           canvas.rotate(math.pi / 2);
           tp.paint(canvas, Offset.zero);
           canvas.restore();
         } else {
-          // Centered on the bar, but kept inside the meter: a staggered
-          // label can be twice the pitch wide, so the last bar's label
-          // can run past the right edge. A shift eats into the 1 px that
-          // meterLabelLayout left beside the same-row neighbour; at 9.1.6
-          // in the Renderer view no label is shifted.
-          final maxX = math.max(0.0, size.width - tp.width);
-          final lx = (x + (barW - tp.width) / 2).clamp(0.0, maxX);
-          tp.paint(canvas, Offset(lx, endY + 3 + (secondRow ? labelLineH : 0)));
+          tp.paint(canvas, rect.topLeft);
         }
       }
     }
@@ -440,7 +605,40 @@ class MultichannelMeterPainter extends CustomPainter {
       old.peaks != peaks ||
       old.clipped != clipped ||
       !listEquals(old.labels, labels) ||
+      !listEquals(old.labelColors, labelColors) ||
       old.showLabels != showLabels ||
       old.fontMode != fontMode ||
       old.themeMode != themeMode;
+}
+
+/// What [MultichannelMeterPainter.paint] lays out for one size: the bars,
+/// and the labels' painters and placement ([meterLabelLayout]).
+final class _MeterLayout {
+  const _MeterLayout({
+    required this.barW,
+    required this.startX,
+    required this.totalBarsW,
+    required this.startY,
+    required this.endY,
+    required this.barAreaH,
+    required this.labelPainters,
+    required this.labelLineH,
+    required this.drawLabels,
+    required this.rotateLabels,
+    required this.staggered,
+    required this.rotatedRow1Y,
+  });
+
+  final double barW;
+  final double startX;
+  final double totalBarsW;
+  final double startY;
+  final double endY;
+  final double barAreaH;
+  final List<TextPainter> labelPainters;
+  final double labelLineH;
+  final bool drawLabels;
+  final bool rotateLabels;
+  final bool staggered;
+  final double rotatedRow1Y;
 }

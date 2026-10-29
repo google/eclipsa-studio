@@ -23,25 +23,27 @@
     from the repo root; never bare ``flutter run``.
 
     Commands:
-      .\build.ps1 run                     # build engine + run (release + opt engine)
-      .\build.ps1 run debug               # ... debug mode (fastbuild engine, hot reload)
+      .\build.ps1 run                     # build engine + run (release)
+      .\build.ps1 run debug               # ... debug mode (hot reload)
       .\build.ps1 run fresh               # ... + reset prefs and recents first
       .\build.ps1 run debug fresh         # ... debug + reset prefs and recents
-      .\build.ps1 test-session [path]     # build + run with a .esp session auto-loaded
+      .\build.ps1 run [debug] --open FILE # ... + open a session, a .iamf or an MP4 with IAMF
+      .\build.ps1 test-session [path]     # run debug --open a session
+      .\build.ps1 test-playback [path]    # run --open a .iamf or an MP4 with IAMF
       .\build.ps1 build                   # build engine + flutter build (release, no run)
       .\build.ps1 build debug             # ... debug mode
       .\build.ps1 package                 # release build + portable zip in dist\
       .\build.ps1 clean                   # flutter clean + bazel clean + pub get
       .\build.ps1 clean --deep            # ... + bazel expunge + wipe pub cache
       .\build.ps1 reset-prefs             # delete saved preferences and recents
-      .\build.ps1 engine                  # just rebuild the C++ engine DLL
+      .\build.ps1 engine                  # rebuild only the C++ engine DLL (optimized)
       .\build.ps1 lint                    # dart format + clang-format/clang-tidy (in place)
       .\build.ps1 lint --check            # verify formatting only (CI gate; no writes)
 
-    Release is the default for run/build (mirrors build.sh): the
-    fastbuild engine decodes IAMF slower than real-time (constant ring
-    underruns -- ES-87/ES-90), so plain runs get an optimized (-c opt)
-    engine. Use ``run debug`` for hot reload / engine debugging.
+    Release is the default for run/build (mirrors build.sh). Every
+    command builds the optimized (-c opt) engine, debug runs included:
+    the fastbuild engine decodes IAMF slower than real-time (constant
+    ring underruns -- ES-87/ES-90). Use ``run debug`` for hot reload.
     Release runs build the bundle and launch runner.exe directly
     (no ``flutter run``), so the terminal returns when the app exits.
 
@@ -459,38 +461,34 @@ function Find-Bash {
 # does NOT search engine/build/ for the engine's own imports — can resolve
 # it; ffi_bridge preloads it from there by full path.
 #
-# -Opt builds optimized (-c opt: release runs — DSP code is ~5x faster
-# than fastbuild, see issue ES-87). Default is Bazel's fastbuild (-O0) to
-# keep debug iteration quick. Mirrors build.sh's build_engine.
+# Builds optimized (-c opt) for every command, debug runs included: DSP
+# code is ~5x faster than fastbuild (ES-87), and the fastbuild engine
+# decodes IAMF slower than real-time (ES-90). Mirrors build.sh's
+# build_engine.
 function Build-Engine {
-    param([switch] $Opt)
-    if ($Opt) { Info "Building C++ audio engine (optimized)..." }
-    else      { Info "Building C++ audio engine..." }
+    Info "Building C++ audio engine (optimized)..."
     Require-Cmd bazel "install via Bazelisk (choco install bazelisk) or download from bazel.build"
     Ensure-Gpac
     Ensure-Ffmpeg
     Push-Location $EngineSrc
     try {
-        $bazelArgs = @("build")
-        if ($Opt) {
-            $bazelArgs += @("-c", "opt")
-            # MSVC expands __FILE__ in headers to the absolute resolved
-            # path, so third-party asserts (e.g. libopus celt/pitch.h)
-            # embed the builder's username and Bazel output root in the
-            # shipped DLL (ES-374). /d1trimfile strips the execroot prefix,
-            # leaving the relative external\... path — matching what
-            # clang already emits on macOS. The execroot is
-            # machine-specific, so this can't live in .bazelrc.
-            # The prefix must stay in Bazel's forward-slash form: Bazel
-            # doubles backslashes when writing cl's .params file, so a
-            # backslash prefix never matches anything. /d1trimfile
-            # compares case- and separator-insensitively, so the
-            # forward-slash prefix still trims MSVC's backslash
-            # __FILE__ paths.
-            $execRoot = & bazel info execution_root
-            if ($LASTEXITCODE -eq 0 -and $execRoot) {
-                $bazelArgs += "--copt=/d1trimfile:$execRoot/"
-            }
+        $bazelArgs = @("build", "-c", "opt")
+        # MSVC expands __FILE__ in headers to the absolute resolved
+        # path, so third-party asserts (e.g. libopus celt/pitch.h)
+        # embed the builder's username and Bazel output root in the
+        # shipped DLL (ES-374). /d1trimfile strips the execroot prefix,
+        # leaving the relative external\... path — matching what
+        # clang already emits on macOS. The execroot is
+        # machine-specific, so this can't live in .bazelrc.
+        # The prefix must stay in Bazel's forward-slash form: Bazel
+        # doubles backslashes when writing cl's .params file, so a
+        # backslash prefix never matches anything. /d1trimfile
+        # compares case- and separator-insensitively, so the
+        # forward-slash prefix still trims MSVC's backslash
+        # __FILE__ paths.
+        $execRoot = & bazel info execution_root
+        if ($LASTEXITCODE -eq 0 -and $execRoot) {
+            $bazelArgs += "--copt=/d1trimfile:$execRoot/"
         }
         # --shell_executable rather than $env:BAZEL_SH: the env var is
         # read when the Bazel server starts, so a server already running
@@ -784,17 +782,19 @@ function Show-Help {
     Write-Host "Usage: .\build.ps1 <command> [flags]"
     Write-Host ""
     Write-Host "Commands:"
-    Write-Host "  engine                       Just rebuild the C++ engine DLL"
+    Write-Host "  engine                       Rebuild only the C++ engine DLL (optimized)"
     Write-Host "  clean                        Clean build and re-fetch dependencies"
     Write-Host "  clean --deep                 ... + bazel expunge + wipe pub cache"
     Write-Host "  build                        Build engine + flutter build (release, no run)"
     Write-Host "  build debug                  ... debug mode"
     Write-Host "  package                      Release build + portable zip in dist\"
-    Write-Host "  run                          Build engine + run (release + opt engine)"
-    Write-Host "  run debug                    ... debug mode (fastbuild engine, hot reload)"
+    Write-Host "  run                          Build engine + run (release)"
+    Write-Host "  run debug                    ... debug mode (hot reload)"
     Write-Host "  run fresh                    ... + reset prefs and recents first"
     Write-Host "  run debug fresh              ... debug + reset prefs and recents"
-    Write-Host "  test-session [path]          Build + run with test session"
+    Write-Host "  run [debug] --open FILE      ... + open a session, a .iamf or an MP4 with IAMF"
+    Write-Host "  test-session [path]          run debug --open a session"
+    Write-Host "  test-playback [path]         run --open a .iamf or an MP4 with IAMF"
     Write-Host "  reset-prefs                  Delete saved preferences and recent files"
     Write-Host "  lint                         dart format + clang-format/clang-tidy (in place)"
     Write-Host "  lint --check                 Verify formatting only (CI gate; no writes)"
@@ -916,8 +916,8 @@ switch ($Command) {
     }
 
     "build" {
-        # Same mode vocabulary as `run`: release (+ optimized engine)
-        # by default, `build debug` for a debug build.
+        # Same mode vocabulary as `run`: release by default, `build
+        # debug` for a debug build; both with the optimized engine.
         $debug = $false
         foreach ($arg in $Rest) {
             switch ($arg) {
@@ -929,7 +929,7 @@ switch ($Command) {
         Require-FlutterVersion
         Generate-VersionDart
         Generate-ReleasesJson
-        Build-Engine -Opt:(-not $debug)
+        Build-Engine
         Push-Location $FlutterDir
         try {
             & flutter pub get
@@ -976,7 +976,7 @@ switch ($Command) {
 
         Generate-VersionDart
         Generate-ReleasesJson
-        Build-Engine -Opt
+        Build-Engine
 
         # Stamp the exe's VERSIONINFO from the git tag (ES-373). Versioning
         # flows from tags (Generate-VersionDart), never pubspec.yaml — but
@@ -1131,15 +1131,27 @@ switch ($Command) {
     }
 
     "run" {
-        # Default is release (mirrors build.sh): the fastbuild engine
-        # decodes IAMF slower than real-time (constant ring underruns —
-        # ES-87/ES-90), so plain `run` builds the engine optimized.
-        # `run debug` opts into debug mode (Flutter debug + fastbuild
-        # engine) for hot reload and engine debugging. `release` is
-        # accepted as a no-op alias of the default.
+        # Default is release (mirrors build.sh). `run debug` opts into
+        # Flutter debug mode for hot reload. Both use the optimized
+        # engine (see Build-Engine). `release` is accepted as a no-op
+        # alias of the default. `--open FILE` (or `--open=FILE`) passes
+        # the app's --open launch parameter: a session opens in Creator,
+        # a .iamf file or an MP4 with an IAMF track in Playback.
         $debug = $false
         $fresh = $false
-        foreach ($arg in $Rest) {
+        $openPath = $null
+        for ($i = 0; $i -lt $Rest.Count; $i++) {
+            $arg = $Rest[$i]
+            if ($arg -eq "--open") {
+                if ($i + 1 -ge $Rest.Count) { Die "--open needs a file" }
+                $i++
+                $openPath = $Rest[$i]
+                continue
+            }
+            if ($arg -like "--open=*") {
+                $openPath = $arg.Substring(7)
+                continue
+            }
             switch ($arg) {
                 "debug"   { $debug = $true }
                 "release" { }  # alias of the default
@@ -1147,12 +1159,23 @@ switch ($Command) {
                 default   { Die "Unknown argument to 'run': $arg" }
             }
         }
+        if ($openPath) {
+            if (-not (Test-Path -LiteralPath $openPath -PathType Leaf)) {
+                Die "File not found: $openPath"
+            }
+            # Absolute, because the runs below start in the app directory.
+            $openPath = (Resolve-Path -LiteralPath $openPath).ProviderPath
+            if ($debug -and $openPath.Contains(",")) {
+                Die ("A path with a comma cannot reach a debug run (flutter " +
+                     "run splits --dart-entrypoint-args on commas): $openPath")
+            }
+        }
         Require-FlutterVersion
         if ($fresh) { Reset-Prefs }
 
         Generate-VersionDart
         Generate-ReleasesJson
-        Build-Engine -Opt:(-not $debug)
+        Build-Engine
 
         Push-Location $FlutterDir
         try {
@@ -1177,46 +1200,68 @@ switch ($Command) {
                 if ($LASTEXITCODE -ne 0) { Die "flutter build windows failed" }
                 $exe = Join-Path $FlutterDir "build\windows\x64\runner\Release\eclipsa_studio.exe"
                 if (-not (Test-Path $exe)) { Die "Build output not found: $exe" }
-                Info "Launching Eclipsa Studio (release)..."
                 # Start-Process -Wait: the runner is a GUI-subsystem
                 # exe, so a bare invocation would return immediately
                 # instead of blocking until the app exits.
-                $proc = Start-Process -FilePath $exe -Wait -NoNewWindow -PassThru
+                if ($openPath) {
+                    Info "Launching Eclipsa Studio (release) -- opening $openPath"
+                    # Quoted, because Start-Process joins its arguments
+                    # with spaces.
+                    $openArgs = @("--open", ('"{0}"' -f $openPath))
+                    $proc = Start-Process -FilePath $exe -ArgumentList $openArgs -Wait -NoNewWindow -PassThru
+                } else {
+                    Info "Launching Eclipsa Studio (release)..."
+                    $proc = Start-Process -FilePath $exe -Wait -NoNewWindow -PassThru
+                }
                 exit $proc.ExitCode
             }
 
-            # Debug: `flutter run` for hot reload.
-            & flutter run -d windows
+            # Debug: `flutter run` for hot reload. One flag per argument,
+            # so a path with a space in it arrives as one argument.
+            if ($openPath) {
+                Info "Opening $openPath"
+                & flutter run -d windows --dart-entrypoint-args=--open "--dart-entrypoint-args=$openPath"
+            } else {
+                & flutter run -d windows
+            }
         } finally { Pop-Location }
     }
 
     "test-session" {
-        # Build + run with a test session auto-loaded. Session path
-        # comes from (in priority order):
+        # Shorthand for `.\build.ps1 run debug --open <session>`. The
+        # session path comes from (in priority order):
         #   1. .\build.ps1 test-session C:\path\to\session.esp
-        #   2. $env:ECLIPSA_STUDIO_TEST_SESSION (set in the PowerShell profile)
-        # Test media lives outside the repo — see .gitignore and README.
-        # Mirrors build.sh: debug run + fastbuild engine.
+        #   2. $env:ECLIPSA_STUDIO_SESSION, the variable the app itself reads
+        #   3. $env:ECLIPSA_STUDIO_TEST_SESSION, its old name
+        # Test media lives outside the repo -- see .gitignore and README.
         $sessionPath = if ($Rest.Count -gt 0) { $Rest[0] }
+                       elseif ($env:ECLIPSA_STUDIO_SESSION) { $env:ECLIPSA_STUDIO_SESSION }
                        else { $env:ECLIPSA_STUDIO_TEST_SESSION }
         if (-not $sessionPath) {
-            Die "No session path given -- pass one as an argument or set ECLIPSA_STUDIO_TEST_SESSION"
+            Die "No session path given -- pass one as an argument or set ECLIPSA_STUDIO_SESSION"
         }
-        if (-not (Test-Path $sessionPath)) {
+        if (-not (Test-Path -LiteralPath $sessionPath -PathType Leaf)) {
             Die "Session file not found: $sessionPath"
         }
-        Require-FlutterVersion
+        & $PSCommandPath run debug --open $sessionPath
+        exit $LASTEXITCODE
+    }
 
-        Generate-VersionDart
-        Generate-ReleasesJson
-        Build-Engine
-
-        Push-Location $FlutterDir
-        try {
-            & flutter pub get
-            if ($LASTEXITCODE -ne 0) { Die "flutter pub get failed" }
-            & flutter run -d windows --dart-entrypoint-args "--session $sessionPath"
-        } finally { Pop-Location }
+    "test-playback" {
+        # Shorthand for `.\build.ps1 run --open <file>`: a release run with
+        # a .iamf file or an MP4 with an IAMF track open in Playback. The
+        # path comes from the argument or $env:ECLIPSA_STUDIO_IAMF, the
+        # variable the app itself reads.
+        $playbackPath = if ($Rest.Count -gt 0) { $Rest[0] }
+                        else { $env:ECLIPSA_STUDIO_IAMF }
+        if (-not $playbackPath) {
+            Die "No file given -- pass one as an argument or set ECLIPSA_STUDIO_IAMF"
+        }
+        if (-not (Test-Path -LiteralPath $playbackPath -PathType Leaf)) {
+            Die "File not found: $playbackPath"
+        }
+        & $PSCommandPath run --open $playbackPath
+        exit $LASTEXITCODE
     }
 
     "lint" {

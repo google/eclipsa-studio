@@ -124,21 +124,16 @@ TEST_F(IamfPushExportTest, EncodesGoldenSession) {
 
 TEST_F(IamfPushExportTest, HandlesProgramNotMultipleOfFrameSize) {
   // 1000 trailing frames short of a frame boundary: the encoder must
-  // auto-pad the final frame (samples_to_trim_at_end_includes_padding:
-  // false, the proto's recommended mode) instead of failing.
-  std::string config = GoldenTextproto();
+  // auto-pad the final frame instead of failing. The golden sets
+  // samples_to_trim_at_end_includes_padding: false, the proto's
+  // recommended mode, in both audio_frame_metadata entries (ES-935).
+  const std::string config = GoldenTextproto();
   ASSERT_FALSE(config.empty());
-  size_t pos = 0;
-  int patched = 0;
-  const std::string needle = "samples_to_trim_at_end: 0";
-  while ((pos = config.find(needle, pos)) != std::string::npos) {
-    config.replace(pos, needle.size(),
-                   "samples_to_trim_at_end: 0\n"
-                   "  samples_to_trim_at_end_includes_padding: false");
-    pos += needle.size();
-    ++patched;
-  }
-  ASSERT_EQ(patched, 2) << "golden layout changed";
+  const std::string field = "samples_to_trim_at_end_includes_padding: false";
+  const size_t first = config.find(field);
+  ASSERT_NE(first, std::string::npos) << "golden layout changed";
+  ASSERT_NE(config.find(field, first + 1), std::string::npos)
+      << "golden layout changed";
 
   const uint64_t odd_frames = 1024 * 4 + 24;
   const std::string push_path = dir_ + "/multi_mix_odd.iamf";
@@ -191,10 +186,10 @@ TEST_F(IamfPushExportTest, OpusEncoderDelayMatchesAppPadConstant) {
   // app/lib/export/iamf_export_config.dart) bakes in
   // kOpusEncoderDelay = 312 — the lookahead the iamf-tools Opus
   // encoder reports at 48 kHz and start-trims from the first frames.
-  // The stamped pre_skip is replaced by the encoder's real value
-  // (automatically_override_codec_delay defaults true), so nothing
-  // else would fail if a libopus or iamf-tools bump changed it: the
-  // pad math silently drifts and the end trim comes out mis-sized.
+  // The builder writes no pre_skip and the encoder determines the
+  // codec delay itself, so nothing else would fail if a libopus or
+  // iamf-tools bump changed it: the pad math silently drifts and the
+  // end trim comes out mis-sized.
   // Pin the reported delay here so such a bump fails CI instead;
   // update kOpusEncoderDelay in lockstep with this expectation.
   iamf_tools_cli_proto::UserMetadata user_metadata;

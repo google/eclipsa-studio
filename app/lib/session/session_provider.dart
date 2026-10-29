@@ -66,12 +66,20 @@ class SessionState {
   /// Last error message from a failed operation, or null.
   final String? lastError;
 
+  /// The loaded session's media path when that media failed to load, or
+  /// null. A save writes it while no other media is loaded, so the
+  /// session keeps its media reference (ES-843). Cleared when the video's
+  /// file changes outside a load, and by
+  /// [SessionNotifier.clearMissingMedia].
+  final String? missingMediaPath;
+
   const SessionState({
     this.filePath,
     this.name = 'Untitled',
     this.dirty = false,
     this.loading = false,
     this.lastError,
+    this.missingMediaPath,
   });
 
   SessionState copyWith({
@@ -82,6 +90,7 @@ class SessionState {
     String? lastError,
     bool clearPath = false,
     bool clearError = false,
+    bool clearMissingMedia = false,
   }) {
     return SessionState(
       filePath: clearPath ? null : (filePath ?? this.filePath),
@@ -89,6 +98,7 @@ class SessionState {
       dirty: dirty ?? this.dirty,
       loading: loading ?? this.loading,
       lastError: clearError ? null : (lastError ?? this.lastError),
+      missingMediaPath: clearMissingMedia ? null : missingMediaPath,
     );
   }
 
@@ -109,6 +119,14 @@ class SessionNotifier extends Notifier<SessionState> {
     ref.onDispose(() {
       _loadGeneration++;
       _halfApplied = false;
+    });
+    // A change of the video's file outside a load (a video loaded or
+    // removed) clears the missing media path. A load's own video writes
+    // happen while `loading` is set.
+    ref.listen(videoProvider.select((v) => v.filePath), (_, _) {
+      if (!state.loading && state.missingMediaPath != null) {
+        state = state.copyWith(clearMissingMedia: true);
+      }
     });
     return const SessionState();
   }
@@ -136,6 +154,18 @@ class SessionNotifier extends Notifier<SessionState> {
   /// after an await stops without writing providers or [state], so a
   /// session opened or created during it is not overwritten (ES-841).
   int _loadGeneration = 0;
+
+  /// Returns a test that is true while the providers hold the session
+  /// they hold now. It turns false when a load or New Session starts
+  /// and when the workspace leaves Creator. An edit that waits for a
+  /// dialog or a file read takes one first and drops its result once
+  /// the test fails: another session can be opened from the native menu
+  /// while a Flutter dialog is up, and the result must not land in that
+  /// session (ES-868).
+  bool Function() sessionGuard() {
+    final generation = _loadGeneration;
+    return () => ref.mounted && generation == _loadGeneration;
+  }
 
   /// Bumped by every [markDirty]. A save clears `dirty` only when no
   /// edit arrived while it was writing (ES-842).
@@ -167,8 +197,8 @@ class SessionNotifier extends Notifier<SessionState> {
     ref.read(elementsProvider.notifier).set([]);
     ref.read(mixesNotifierProvider.notifier).set([kDefaultMix]);
     ref.read(activeMixProvider.notifier).set(0);
-    ref.read(transportProvider.notifier).resetPosition();
     ref.read(playingProvider.notifier).set(false);
+    ref.read(transportProvider.notifier).resetPosition();
     // A leftover region would hijack return-on-stop in the fresh
     // session (returnToPlayStart prefers the region start, ES-277).
     // clear() also disarms the loop toggle when a region existed.
@@ -366,6 +396,15 @@ class SessionNotifier extends Notifier<SessionState> {
     }
   }
 
+  /// Drops the reference to the session's media that failed to load, so
+  /// the next save writes no media path, and marks the session dirty.
+  /// No effect when no media is missing.
+  void clearMissingMedia() {
+    if (state.missingMediaPath == null) return;
+    state = state.copyWith(clearMissingMedia: true);
+    markDirty();
+  }
+
   /// Build a [SessionModel] snapshot from current provider state.
   SessionModel _snapshot() {
     return SessionModel(
@@ -373,7 +412,7 @@ class SessionNotifier extends Notifier<SessionState> {
       iamfProfile: ref.read(iamfProfileProvider),
       elements: ref.read(elementsProvider),
       mixes: ref.read(mixesNotifierProvider),
-      mediaPath: ref.read(videoProvider).filePath,
+      mediaPath: ref.read(videoProvider).filePath ?? state.missingMediaPath,
       vizState: ref.read(vizStateProvider.notifier).snapshot(),
     );
   }
@@ -448,19 +487,27 @@ class SessionNotifier extends Notifier<SessionState> {
     }
     ref.read(iamfProfileProvider.notifier).set(session.iamfProfile);
     ref.read(activeMixProvider.notifier).set(0);
-    ref.read(transportProvider.notifier).resetPosition();
     ref.read(playingProvider.notifier).set(false);
+    ref.read(transportProvider.notifier).resetPosition();
     // Loop regions are not persisted; drop the previous session's so
     // it can't hijack return-on-stop in the loaded one (ES-277).
     ref.read(loopRegionProvider.notifier).clear();
     ref.read(vizStateProvider.notifier).apply(session.vizState);
 
     // Restore the video / still image if saved
+    String? missingMediaPath;
     if (session.mediaPath != null) {
       final err = await ref
           .read(videoProvider.notifier)
           .loadFile(session.mediaPath!);
+      // Checked before the unload below, which would otherwise cancel
+      // the video load of a newer session.
+      if (_superseded(generation, path)) return false;
       if (err != null) {
+        // A failed load leaves the previous session's media loaded, and
+        // a save would write its path into this session (ES-843).
+        await ref.read(videoProvider.notifier).unload();
+        missingMediaPath = session.mediaPath;
         ref
             .read(importNoticeProvider.notifier)
             .showWarning(err, title: "Couldn't Load Video");
@@ -481,7 +528,11 @@ class SessionNotifier extends Notifier<SessionState> {
     warnOnProfileConflicts(session);
 
     _halfApplied = false;
-    state = SessionState(filePath: path, name: _nameFromPath(path));
+    state = SessionState(
+      filePath: path,
+      name: _nameFromPath(path),
+      missingMediaPath: missingMediaPath,
+    );
     return true;
   }
 
@@ -576,6 +627,7 @@ class SessionNotifier extends Notifier<SessionState> {
       engineOrder.add(e.id);
       final (oarType, oarSubType, oarCh) = elementToOarType(e);
       engine.setElementType(e.id, oarType, oarSubType, oarCh);
+      engine.setElementChannelOrder(e.id, elementChannelOrder(e));
       engine.setElementGain(e.id, e.gain);
       engine.setElementMute(e.id, e.mute);
       engine.setElementSolo(e.id, e.solo);

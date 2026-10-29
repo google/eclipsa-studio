@@ -20,6 +20,8 @@
 // registration during open, double-open semantics, and shutdown
 // ordering.
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -34,8 +36,19 @@
 #include "engine.h"
 #include "gtest/gtest.h"
 #include "iamf/iamf_probe_ffi.h"
+#include "renderer/oar_renderer.h"
 #include "test/test_wav_helper.h"
 #include "transport_fade.h"
+
+// Sets OarRenderer's creation-failure seam. Declared a friend by
+// OarRenderer, so it must live in the global namespace.
+class OarRendererTestPeer {
+ public:
+  static void SetFailCreate(bool fail) {
+    OarRenderer::fail_create_for_testing_.store(fail,
+                                                std::memory_order_relaxed);
+  }
+};
 
 namespace {
 
@@ -257,6 +270,128 @@ TEST_F(PlaybackFfiTest, OpenMalformedBytesReturnsError) {
   EXPECT_LT(r->status, 0);
   EXPECT_NE(r->error_message, nullptr);
   eclipsa_studio_playback_open_result_free(r);
+}
+
+// ES-906: a playback open whose OAR commit fails must remove the
+// elements it registered, as playback_close does; otherwise every
+// later rebuild includes elements of a session that does not exist.
+// oar_create() fails only when an allocation fails, so the test
+// forces the failure through OarRendererTestPeer. The commit rebuilds
+// only when a rendering config is staged, so a WAV element registered
+// with OAR stages one before the open. A WAV element beside a playback
+// session is a state engine.h calls unsupported; if playback_open starts
+// rejecting it, this test needs another way to stage the config.
+TEST_F(PlaybackFfiTest, FailedCommitRemovesSessionElementsFromOar) {
+  constexpr uint32_t kWavId = 101;
+  constexpr int32_t kOarLayoutMono = 1;  // ck_oar_layout_mono
+
+  // The fixture's element ids, from a successful open.
+  EclipsaStudioPlaybackOpenResult* r =
+      eclipsa_studio_playback_open(fixture_.c_str());
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->status, 0);
+  std::vector<uint32_t> session_ids;
+  for (uint32_t i = 0; i < r->num_audio_elements; ++i) {
+    session_ids.push_back(r->audio_elements[i].audio_element_id);
+  }
+  eclipsa_studio_playback_open_result_free(r);
+  eclipsa_studio_playback_close();
+  ASSERT_FALSE(session_ids.empty());
+
+  const std::string wav = test_wav::temp_dir() + "/ffi_commit_fail.wav";
+  ASSERT_TRUE(test_wav::write_sine(wav, 1, 48000, 16, 440.f, 1.f));
+  ASSERT_EQ(eclipsa_studio_element_add(wav.c_str(), kWavId), 0);
+  ASSERT_EQ(eclipsa_studio_element_set_type(kWavId, 0, kOarLayoutMono, 1), 0);
+  // Mode 2 (head-locked) differs from the default, so this stages a
+  // change and the open's commit rebuilds.
+  ASSERT_EQ(eclipsa_studio_element_set_rendering_config(kWavId, 2, 0), 0);
+
+  OarRendererTestPeer::SetFailCreate(true);
+  r = eclipsa_studio_playback_open(fixture_.c_str());
+  OarRendererTestPeer::SetFailCreate(false);
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->status, -7) << "the open did not fail at the commit";
+  eclipsa_studio_playback_open_result_free(r);
+  EXPECT_EQ(eclipsa_studio_playback_status().session_open, 0);
+
+  // set_rendering_config returns -1 for an id OAR does not track.
+  for (const uint32_t id : session_ids) {
+    EXPECT_EQ(eclipsa_studio_element_set_rendering_config(id, 1, 0), -1)
+        << "element " << id << " is still registered with OAR";
+  }
+  EXPECT_EQ(eclipsa_studio_element_set_rendering_config(kWavId, 1, 0), 0)
+      << "the rollback removed an element the session did not add";
+
+  // The next open rebuilds the renderer.
+  r = eclipsa_studio_playback_open(fixture_.c_str());
+  ASSERT_NE(r, nullptr);
+  EXPECT_EQ(r->status, 0);
+  eclipsa_studio_playback_open_result_free(r);
+  EXPECT_GT(eclipsa_studio_monitoring_get_channels(), 0u);
+}
+
+// ES-906: an open over an attached session closes that session first.
+// When the new open then fails, the old session's elements must not
+// stay registered with OAR either.
+TEST_F(PlaybackFfiTest, FailedReopenRemovesPreviousSessionElementsFromOar) {
+  EclipsaStudioPlaybackOpenResult* r =
+      eclipsa_studio_playback_open(fixture_.c_str());
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->status, 0);
+  std::vector<uint32_t> session_ids;
+  for (uint32_t i = 0; i < r->num_audio_elements; ++i) {
+    session_ids.push_back(r->audio_elements[i].audio_element_id);
+  }
+  eclipsa_studio_playback_open_result_free(r);
+  ASSERT_FALSE(session_ids.empty());
+
+  r = eclipsa_studio_playback_open("/no/such/file.iamf");
+  ASSERT_NE(r, nullptr);
+  ASSERT_LT(r->status, 0);
+  eclipsa_studio_playback_open_result_free(r);
+  EXPECT_EQ(eclipsa_studio_playback_status().session_open, 0);
+
+  for (const uint32_t id : session_ids) {
+    EXPECT_EQ(eclipsa_studio_element_set_rendering_config(id, 1, 0), -1)
+        << "element " << id << " is still registered with OAR";
+  }
+}
+
+// ES-906: a successful open over an attached session must not leave the
+// old session's elements registered when the new file does not reuse
+// their ids.
+TEST_F(PlaybackFfiTest, ReopenRemovesPreviousSessionElementsFromOar) {
+  EclipsaStudioPlaybackOpenResult* r =
+      eclipsa_studio_playback_open(fixture_.c_str());
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->status, 0);
+  std::vector<uint32_t> old_ids;
+  for (uint32_t i = 0; i < r->num_audio_elements; ++i) {
+    old_ids.push_back(r->audio_elements[i].audio_element_id);
+  }
+  eclipsa_studio_playback_open_result_free(r);
+
+  const std::string mono = FindFixture("sine_128samp_mono_pcm.iamf");
+  ASSERT_FALSE(mono.empty()) << "fixture missing";
+  r = eclipsa_studio_playback_open(mono.c_str());
+  ASSERT_NE(r, nullptr);
+  ASSERT_EQ(r->status, 0);
+  std::vector<uint32_t> new_ids;
+  for (uint32_t i = 0; i < r->num_audio_elements; ++i) {
+    new_ids.push_back(r->audio_elements[i].audio_element_id);
+  }
+  eclipsa_studio_playback_open_result_free(r);
+
+  int dropped = 0;
+  for (const uint32_t id : old_ids) {
+    if (std::find(new_ids.begin(), new_ids.end(), id) != new_ids.end()) {
+      continue;
+    }
+    ++dropped;
+    EXPECT_EQ(eclipsa_studio_element_set_rendering_config(id, 1, 0), -1)
+        << "element " << id << " is still registered with OAR";
+  }
+  ASSERT_GT(dropped, 0) << "the new file reuses every old element id";
 }
 
 TEST_F(PlaybackFfiTest, ReopenReplacesSession) {

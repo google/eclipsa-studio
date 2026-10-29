@@ -58,4 +58,15 @@ class LabelPainterCache {
       )..layout(),
     );
   }
+
+  /// Disposes every cached painter. The cache stays usable and lays out
+  /// painters again on the next [painterFor].
+  void dispose() {
+    for (final tp in _painters.values) {
+      tp.dispose();
+    }
+    _painters.clear();
+    _fontMode = null;
+    _themeMode = null;
+  }
 }

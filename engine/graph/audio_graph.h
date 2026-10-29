@@ -27,14 +27,16 @@
 #include "dsp/pink_noise.h"
 #include "graph/audio_buffer.h"
 #include "meters/meter_state.h"
+#include "renderer/channel_order.h"
 
 // Forward declarations (implementations included in audio_graph.cc).
-class WavReader;
+class WavStream;
+class WavStreamer;
 class IamfPlaybackSession;
 class IamfRingSource;
 class PeakMeter;
 class RmsMeter;
-class LoudnessMeter;
+class LiveLoudnessMeter;
 class ChannelStats;
 class OarRenderer;
 namespace dsp {
@@ -100,8 +102,17 @@ struct ElementControlState {
 
   // Source channel count (from WAV). Cached so the audio-thread remap
   // step can reset `buf` to the WAV view at the top of each callback
-  // without touching the WavReader.
+  // without touching the WavStream.
   uint32_t wav_channels = 0;
+
+  // The order of the element's channels after routing, as the host
+  // declares it (renderer/channel_order.h: kChannelOrderOar feeds OAR
+  // as it is, kChannelOrder916Alt is a 9.1.6 element in OBR's alt
+  // order). Control thread writes via set_element_channel_order; the
+  // audio thread reads it at the OAR feed and picks the input table by
+  // it, after the routing remap, the gains and the meters, so meters
+  // and stats stay in the element's own order.
+  std::atomic<uint32_t> channel_order{0};
 
   /// Reinitialize every field to its default-constructed value.
   void reset() {
@@ -122,6 +133,7 @@ struct ElementControlState {
     object_el2.store(0.0f, std::memory_order_relaxed);
     object_dist2.store(1.0f, std::memory_order_relaxed);
     wav_channels = 0;
+    channel_order.store(0, std::memory_order_relaxed);
   }
 
   /// Wholesale copy from `src` (atomics via relaxed load/store).
@@ -157,6 +169,8 @@ struct ElementControlState {
     object_dist2.store(src.object_dist2.load(std::memory_order_relaxed),
                        std::memory_order_relaxed);
     wav_channels = src.wav_channels;
+    channel_order.store(src.channel_order.load(std::memory_order_relaxed),
+                        std::memory_order_relaxed);
   }
 };
 
@@ -167,18 +181,22 @@ struct ElementChain {
   uint32_t id = 0;
 
   // Grouped control fields — see ElementControlState. Routing state
-  // stays out of the group: routing_map points into this chain's own
-  // storage arrays, so move_from() has to recompute it rather than
-  // copy it (see below).
+  // stays out of the group: it has its own publication protocol (see
+  // the routing slots below).
   ElementControlState ctrl;
 
   // Processing pipeline (allocated once, used on audio thread).
-  // Exactly one of {wav_reader, iamf_ring_source} is set per active
-  // chain: WAV-sourced in Creator, IAMF-sourced in Playback.
-  std::unique_ptr<WavReader> wav_reader;
+  // Exactly one of {wav_stream, iamf_ring_source} is set per active
+  // chain: WAV-sourced in Creator, IAMF-sourced in Playback. The
+  // graph's WavStreamer holds a weak reference to the stream and reads
+  // the file into its ring on the disk thread; the audio thread reads
+  // only the ring (ES-836). The chain holds the only strong reference
+  // outside the disk thread, so resetting it on the control thread
+  // releases the stream.
+  std::shared_ptr<WavStream> wav_stream;
   // Sample-rate converter. Non-null iff the WAV's native rate differs
   // from the engine output rate; on the matched-rate fast path
-  // WavReader::read writes straight into chain.buf.
+  // WavStream::read writes straight into chain.buf.
   std::unique_ptr<dsp::Resampler> resampler;
   std::unique_ptr<IamfRingSource> iamf_ring_source;
   std::unique_ptr<dsp::Gain> gain;
@@ -200,16 +218,60 @@ struct ElementChain {
   // point at it; no allocation on the audio thread.
   float buf_remap_storage[kGraphMaxChannels * kGraphMaxFrames] = {};
 
-  // Input routing map. routing_map is a pointer to one of the two
-  // storage slots (double-buffered for lock-free publish). Convention:
-  // routing_map[dest] = src_channel, where src is a WAV channel index,
-  // or -1 to silence that dest. nullptr = identity (fast path; no
-  // remap step, buf unchanged).
-  std::atomic<const int8_t*> routing_map{nullptr};
-  int8_t routing_storage_a[kGraphMaxChannels] = {};
-  int8_t routing_storage_b[kGraphMaxChannels] = {};
-  uint8_t routing_active_slot = 0;  // which of {a,b} is currently published.
-  uint8_t routing_len = 0;
+  // Input routing map, published by the control thread
+  // (AudioGraph::set_element_routing) to the audio thread (the remap
+  // step in process()) through three slots, a lock-free triple buffer.
+  // Each slot index belongs to exactly one party at a time: routing_back
+  // to the control thread, routing_front to the audio thread, and the
+  // third is parked in routing_shared. The control thread fills its
+  // slot, then exchanges it into routing_shared with kRoutingFresh set
+  // and takes the parked index as its next slot. When the audio thread
+  // sees kRoutingFresh at the remap step of a block, it exchanges its
+  // slot for the parked one. Neither side waits, a slot is never written
+  // while the other side reads it, and the map and its length are in
+  // the same slot, so a block always pairs a map with its own length.
+  // The acq_rel exchanges order each slot's contents with the hand-off.
+  struct RoutingSlot {
+    // map[dest] = src, a source channel index, or -1 to silence dest.
+    int8_t map[kGraphMaxChannels] = {};
+    // Destination channel count; 0 = identity (no remap step, buf
+    // unchanged).
+    uint8_t len = 0;
+  };
+  static constexpr uint8_t kRoutingSlotMask = 0x3;
+  static constexpr uint8_t kRoutingFresh = 0x4;
+  // Starting owners of the three slot indices; reset() restores them.
+  static constexpr uint8_t kRoutingInitialFront = 0;
+  static constexpr uint8_t kRoutingInitialShared = 1;
+  static constexpr uint8_t kRoutingInitialBack = 2;
+  std::array<RoutingSlot, 3> routing_slots = {};
+  std::atomic<uint8_t> routing_shared{kRoutingInitialShared};
+  uint8_t routing_front = kRoutingInitialFront;  // Audio thread.
+  uint8_t routing_back = kRoutingInitialBack;    // Control thread.
+
+  // Joining the program (ES-986). A WAV chain added while the program
+  // plays must start at the program position, in step with the other
+  // WAV chains, not at frame 0 of its file. add_element() sets
+  // join_pending before it publishes the chain. At the chain's first
+  // block the audio thread posts a seek to join_frame, a block boundary
+  // AudioGraph::kJoinLeadSeconds or more ahead of the program position,
+  // keeps the chain silent until the program reaches join_frame, and
+  // starts it there with its mute gain ramping up from silence. The
+  // audio thread also sets join_pending on a chain that has fallen
+  // behind the program: one whose ring read came up short without EOF
+  // (the disk thread stalled for longer than the ring holds), or whose
+  // seek was still unapplied when the seek hold's watchdog ended the
+  // hold. A global seek clears both flags, since it moves every WAV
+  // chain to the same position. The control thread writes these fields
+  // only before the chain is published, under the pause and quiescence
+  // barrier (reset(), move_from()), or with the audio thread stopped
+  // (set_sample_rate()); otherwise they are the audio thread's.
+  bool join_pending = false;
+  bool joining = false;
+  uint64_t join_frame = 0;  // Engine-rate program frame.
+  // Joins that found the ring unprimed at join_frame; each doubles the
+  // lead, up to AudioGraph::kMaxJoinLeadDoublings.
+  uint8_t join_attempts = 0;
 
   /// Reset this chain to a default-constructed state (frees unique_ptrs).
   /// Defined in audio_graph.cc (needs complete types for unique_ptr reset).
@@ -219,6 +281,18 @@ struct ElementChain {
   /// left in a reset state.  buf_storage is NOT moved (caller must re-seat
   /// buf.data afterward).
   void move_from(ElementChain& src);
+
+  /// Control thread: the slot to fill before publish_routing().
+  RoutingSlot& routing_back_slot() { return routing_slots[routing_back]; }
+
+  /// Control thread: publish routing_back_slot(), which the caller has
+  /// filled, and take the parked slot as the next to fill.
+  void publish_routing();
+
+  /// Audio thread: take the newest published routing slot if one
+  /// arrived since the last call, and return the slot to read for this
+  /// block.
+  const RoutingSlot& routing_for_block();
 };
 
 /// Pull-based audio processing graph.
@@ -329,6 +403,13 @@ class AudioGraph {
                                    float el_deg, float dist, float az2_deg,
                                    float el2_deg, float dist2);
 
+  /// Declare the order of an element's channels after routing
+  /// (renderer/channel_order.h: kChannelOrderOar, or kChannelOrder916Alt
+  /// for a 9.1.6 element in OBR's alt order). The audio thread applies
+  /// the matching input table at the OAR feed from the next callback.
+  /// Lock-free: one relaxed atomic store.
+  void set_element_channel_order(uint32_t id, uint32_t order);
+
   /// Set per-element IAMF mix gain (passed to OAR as element metadata).
   /// This is the element_mix_gain from the active mix presentation,
   /// semantically distinct from set_element_gain() which controls the
@@ -356,11 +437,13 @@ class AudioGraph {
   /// Set the input channel routing map for an element. `map[dest] = src`
   /// where src is a WAV channel index (or -1 to silence that dest).
   /// Passing nullptr or len==0 clears to identity (no remap, fast path).
-  /// Safe to call from the control thread during playback — publish is
-  /// lock-free via double-buffered storage and release-store.
+  /// Safe to call from the control thread during playback: the map is
+  /// published through the chain's routing slots (see ElementChain),
+  /// which neither thread waits on. The next block applies the latest
+  /// map set before it starts.
   void set_element_routing(uint32_t id, const int8_t* map, uint32_t len);
 
-  /// Set output mix gain (master fader, passed to OAR as group metadata).
+  /// Set the output mix gain (passed to OAR as group metadata).
   /// Same slew-and-ramp semantics as set_element_mix_gain.
   void set_output_mix_gain(float gain_db);
 
@@ -387,6 +470,32 @@ class AudioGraph {
     return monitor_dim_.load(std::memory_order_relaxed);
   }
 
+  /// Output-channel solo and mute of the monitoring target (ES-999). Bit
+  /// `c` of each mask is the target's output channel `c` in monitoring
+  /// channel order, the order of the routing matrix rows and the output
+  /// meters. A muted channel and, while any channel is soloed, every
+  /// channel that is not are silenced, the rule element solo and mute
+  /// follow. The cut is applied in the routing scatter, after the
+  /// render and the limiter; the output meters and the loudness meter
+  /// read the render without it. It never reaches the mix, an export or
+  /// a measurement, and calibration noise is not cut. Control thread
+  /// writes; while program plays, the audio thread ramps each channel's
+  /// gain over 15 ms each way, and otherwise sets it at once
+  /// (settle_output_solo_mute()).
+  void set_output_solo_mute(uint64_t soloed, uint64_t muted);
+  /// The channels the cut silences, as a mask in the same order.
+  uint64_t output_silenced() const {
+    return output_silenced_.load(std::memory_order_relaxed);
+  }
+
+  /// Sets the output solo and mute gain of every channel from `from` up
+  /// to its target without a ramp. Audio thread only. process() calls it
+  /// for a block that carries no program to the device, and for the
+  /// channels above the target's count; the paused branch of the audio
+  /// callback, which skips process(), calls it every callback. A change
+  /// made while no program plays is then complete when program resumes.
+  void settle_output_solo_mute(uint32_t from = 0);
+
   /// Called from the audio thread — no allocation.
   /// Writes interleaved float32 output to `out` (frames * channels samples).
   void process(float* out, uint32_t frames, uint32_t channels);
@@ -398,13 +507,12 @@ class AudioGraph {
   /// Reposition every element chain to `frame_pos` (engine-rate
   /// frames). Both session types STAGE the seek for the audio thread
   /// (ES-473 for IAMF, ES-536 for WAV): it fades the program down
-  /// (kSeekFadeSeconds), applies the seek RT-safely (session post for
-  /// IAMF, reader reposition for WAV), holds muted until primed (IAMF
-  /// waits for ~40 ms of refill; WAV completes in one block), then
-  /// fades back in — replacing the old hard-edged silence gaps and
-  /// butt-joint splices with click-free ramps. While paused, the
-  /// paused hook applies the seek without the fade (nothing is
-  /// audible). Control thread only.
+  /// (kSeekFadeSeconds), posts the seek RT-safely (to the IAMF session,
+  /// or to every chain's WavStream), holds muted until primed (IAMF
+  /// waits for kSeekPrimeFrames of refill, WAV for
+  /// wav_prime_frames(); ES-836), then fades back in. While paused, the
+  /// paused hook posts the seek without the fade (nothing is audible).
+  /// Control thread only.
   void seek(uint64_t frame_pos);
 
   /// Audio-thread hook for the paused transport branch, mirroring
@@ -413,15 +521,23 @@ class AudioGraph {
   /// otherwise sit unconsumed until the next play — and resume would
   /// start from the stale position. The output is already silent
   /// while paused, so the fade-out stage is skipped for both session
-  /// types. IAMF: post immediately and enter the priming hold with
-  /// the fade gain at zero, so a resume stays muted until the refill
-  /// is primed, then fades in. WAV (ES-536): apply immediately and stay
-  /// transparent (kIdle, gain 1) — no refill exists to hold for, no
-  /// program needs burning at the target, and the transport fade-in
-  /// already covers the resume edge (a priming hold here would only
-  /// double-fade against it). Guarded by the paused-drain disarm gate
-  /// — see the staging-protocol comment.
+  /// types: post immediately and enter the priming hold with the fade
+  /// gain at zero, so a resume stays muted until the refill is primed,
+  /// then fades in. If the disk or I/O thread refilled while paused,
+  /// the first playing block is the fade-in block. Guarded by the
+  /// paused-drain disarm gate — see the staging-protocol comment.
   void consume_pending_seek_paused();
+
+  /// For tests that call process() faster than real time, between
+  /// calls on the thread that calls process(): waits (up to
+  /// `timeout_ms`) until every WAV chain's ring can serve the next block
+  /// of `frames` frames — any posted seek applied and wav_prime_frames()
+  /// buffered, or the end of the file. A device callback leaves the disk
+  /// thread that time between blocks. A stream stalled through
+  /// WavStream::set_stalled_for_testing() is not waited for. Returns
+  /// true at once while an IAMF session is attached (its tests wait on
+  /// the session), and false on timeout.
+  bool wait_for_wav_streams(uint32_t frames, uint32_t timeout_ms = 2000) const;
 
   /// Audio-thread hook for the paused transport branch (ES-530): drains
   /// the OAR pipeline's held tail — the limiter's delay line
@@ -505,9 +621,15 @@ class AudioGraph {
   /// The mix-bus loudness meter, for inspection (tests). Its configuration
   /// is written only on the control thread, inside the loudness fence.
   /// Returns nullptr if not initialized.
-  const LoudnessMeter* mix_loudness_meter() const {
+  const LiveLoudnessMeter* mix_loudness_meter() const {
     return mix_loudness_meter_.get();
   }
+
+  /// Feed every block process() has handed the mix-bus loudness meter to
+  /// its analyzer now, and write the readings, instead of waiting for the
+  /// meter thread's next drain. For tests that read the loudness right
+  /// after calling process(). Any thread except the audio thread.
+  void drain_loudness_meter();
 
   /// Switch the OAR monitoring layout and reconfigure the mix-bus loudness
   /// meter for the new channel count and BS.1770 weights (the table in
@@ -517,7 +639,9 @@ class AudioGraph {
   /// never feeds the meter a block from the new layout while it is still
   /// sized for the old one. While offline-exclusive mode is held the OAR
   /// rebuild is deferred and the meter keeps its old configuration until
-  /// end_offline_exclusive() replays the rebuild.
+  /// end_offline_exclusive() replays the rebuild. With the layout OAR
+  /// already renders there is no rebuild, and the meter is still
+  /// reconfigured.
   /// @returns false if OarRenderer::set_layout() fails.
   bool set_monitoring_layout(uint32_t layout);
 
@@ -536,8 +660,8 @@ class AudioGraph {
   /// rebuild keeps the channel count unless an earlier rebuild failed and
   /// left it at 0; this covers that case. In that case the renderer has
   /// already produced blocks at the new count before this call, so
-  /// LoudnessMeter::process() skips and logs at least one mismatched block
-  /// first. Returns without raising the loudness fence when the meter
+  /// LiveLoudnessMeter::push() skips and logs at least one mismatched
+  /// block first. Returns without raising the loudness fence when the meter
   /// already matches.
   void resync_loudness_meter_if_stale();
 
@@ -562,7 +686,7 @@ class AudioGraph {
   /// 2=col (post-routing, `channel` indexes the device output channel).
   /// `amp` is the linear gain (10^(dbfs/20)); while a cell is lit the program
   /// is muted and the generator runs at this fixed level, bypassing the
-  /// master fader. Control-thread only; published lock-free to the audio
+  /// output mix gain. Control-thread only; published lock-free to the audio
   /// thread via a single packed atomic.
   void set_noise(uint8_t mode, uint32_t channel, float amp);
 
@@ -584,9 +708,6 @@ class AudioGraph {
   void set_bypass_oar(bool v) {
     bypass_oar_.store(v, std::memory_order_relaxed);
   }
-  bool bypass_oar() const {
-    return bypass_oar_.load(std::memory_order_relaxed);
-  }
 
   /// Enable/disable the visualizer channel-stats pass. Default off —
   /// the audio thread skips the whole ChannelStats::process() call
@@ -596,6 +717,10 @@ class AudioGraph {
   void set_channel_stats_enabled(bool enabled);
 
  private:
+  // Reaches an element's WavStream for its test seam
+  // (WavStream::set_stalled_for_testing()).
+  friend class AudioGraphTestPeer;
+
   ElementChain* find_element(uint32_t id);
 
   /// Audio-thread only. Record an IAMF ring starvation event (a short
@@ -629,22 +754,27 @@ class AudioGraph {
   std::atomic<uint32_t> element_count_{0};
 
   // Single shared meter state for all elements + mix bus loudness.
-  // Written by the audio thread; Dart reads via
+  // Written by the audio thread (element_count by the control thread,
+  // see meters/meter_state.h); Dart reads via
   // eclipsa_studio_get_meter_state().
   EclipsaStudioMeterState global_meter_state_ = {};
 
-  // Mix bus loudness meter (writes to global_meter_state_.loudness).
-  std::unique_ptr<LoudnessMeter> mix_loudness_meter_;
+  // Mix bus loudness meter. process() hands it each rendered block with
+  // push(); its own thread runs the analyzer and writes
+  // global_meter_state_.loudness (ES-905).
+  std::unique_ptr<LiveLoudnessMeter> mix_loudness_meter_;
 
   // ── Mix-bus loudness reconfigure fence (issue ES-145) ──────────────────
-  // LoudnessMeter::reset()/reconfigure() free and reallocate the backing
-  // EbuR128Analyzer (it has no in-place reset). Those run on the control
-  // thread while the audio thread may be inside LoudnessMeter::process()
-  // (called from process() below) — a use-after-free. Mirror the
+  // LiveLoudnessMeter::reset()/reconfigure() rewind the ring that push()
+  // writes and change the channel count push() checks, and reconfigure()
+  // reallocates the ring when its size changes. Those run on the control
+  // thread while the audio thread may be inside push() (called from
+  // process() below) — a data race, and a use-after-free when the ring
+  // is reallocated. Mirror the
   // OarRenderer reconfiguring_/ack_counter_ handshake: the control thread
   // raises loudness_reconfiguring_ and spin-waits until the audio thread
   // acknowledges (it skips the meter and bumps loudness_ack_) before
-  // rebuilding the analyzer, then lowers the flag.
+  // reconfiguring the meter, then lowers the flag.
   //
   // The raise (store true), the control thread's ack snapshot and wait
   // loads, and the audio thread's flag load and ack increment are all
@@ -661,9 +791,10 @@ class AudioGraph {
   std::atomic<bool> audio_running_{false};
 
   // Control-thread only. Raise the loudness fence, wait for the audio
-  // thread to leave LoudnessMeter::process(), run `fn` (which rebuilds the
-  // analyzer), then lower the fence. `fn` therefore frees/reallocates the
-  // analyzer with the audio thread provably outside it. See issue ES-145.
+  // thread to leave LiveLoudnessMeter::push(), run `fn` (which
+  // reconfigures the meter), then lower the fence. `fn` therefore
+  // rewinds or reallocates the meter's ring with the audio thread
+  // provably outside it. See issue ES-145.
   template <typename Fn>
   void with_loudness_fenced(Fn&& fn) {
     loudness_reconfiguring_.store(true, std::memory_order_seq_cst);
@@ -677,11 +808,11 @@ class AudioGraph {
   // returning bool) inside the loudness fence, then resyncs the meter to
   // the renderer before the fence drops. Ordering: the fence is raised and
   // acknowledged first, so the audio thread is outside
-  // LoudnessMeter::process() and stays out while OAR rebuilds and
+  // LiveLoudnessMeter::push() and stays out while OAR rebuilds and
   // publishes its new channel count; the meter is reconfigured for that
   // count; only then is the fence lowered (release), and the audio
-  // thread's acquire load of the flag makes the rebuilt analyzer visible
-  // before its next process() call. Shared by set_monitoring_layout() and
+  // thread's acquire load of the flag makes the resized ring visible
+  // before its next push() call. Shared by set_monitoring_layout() and
   // end_offline_exclusive() (issue ES-833).
   template <typename Fn>
   bool change_oar_loudness_fenced(Fn&& change, bool force_meter_reconfigure) {
@@ -735,11 +866,22 @@ class AudioGraph {
   // Audio-thread scratch for one block of generated noise (avoids a large
   // stack array in process()); written then scattered each callback.
   float noise_storage_[kGraphMaxFrames] = {};
+  // Audio-thread scratch for the rendered block in monitoring channel
+  // order (renderer/channel_order.h): planar with stride fr, matching
+  // OAR's output block. Filled only for a layout whose
+  // monitoring order differs from OLR's (9.1.6, ES-960); the scatter and
+  // the output meters then read it instead of OAR's buffer.
+  float monitoring_storage_[eclipsa_studio::kChannelOrderMaxChannels *
+                            kGraphMaxFrames] = {};
 
   // When Playback mode is active, owns the stream feeding every
   // iamf_ring_source in the element_ array. Null in Creator mode.
   std::unique_ptr<IamfPlaybackSession> iamf_session_;
   std::string iamf_error_;
+
+  // Disk thread that fills every WAV chain's ring (ES-836). Created by the
+  // first add_element(), destroyed by shutdown().
+  std::unique_ptr<WavStreamer> wav_streamer_;
 
   // ── Seek de-click: mute-until-primed (ES-473, WAV since ES-536) ───────
   // A seek used to go straight to the source from the control thread;
@@ -748,16 +890,17 @@ class AudioGraph {
   // session types the seek point itself was a butt-joint splice.
   // Instead, seek() stages the request here and the audio thread runs
   // a small state machine: fade the program out (kSeekFadeSeconds),
-  // apply the seek RT-safely, hold muted until primed, then fade back
-  // in. IAMF holds with ring reads SKIPPED until the refill lands;
-  // WAV repositions instantly (WavReader::seek is a cursor
-  // assignment), so its hold lasts exactly one block and its reads
-  // continue (muted) to keep the reader tracking the transport.
+  // post the seek RT-safely, hold muted until primed, then fade back
+  // in. Both session types hold with ring reads SKIPPED until the
+  // refill lands: the IAMF session's I/O thread refills the AE rings,
+  // and the WavStreamer's disk thread refills each WAV chain's ring
+  // (ES-836).
   //
   // Staging protocol — NOTE the dual units: the control thread stores
   // the position, then bumps the count; for an IAMF session the value
   // is FILE-rate and pre-clamped, for a WAV session it is ENGINE-rate
-  // and unclamped (WavReader::seek clamps downstream). The branch in
+  // and unclamped (apply_wav_seek_rt() converts per chain, and the disk
+  // thread clamps to each file's length). The branch in
   // post_staged_seek_rt() resolves the unit by session presence, so a
   // staged pair is only meaningful for the session type that staged
   // it — close_iamf() clears the staging unconditionally (even with
@@ -791,21 +934,52 @@ class AudioGraph {
   // Session request count captured when the audio thread posts, so
   // the prime check can require the I/O thread to have APPLIED the
   // seek (discard floors published) before trusting buffered_frames —
-  // otherwise the stale pre-seek backlog reads as "primed".
+  // otherwise the stale pre-seek backlog reads as "primed". Each
+  // WavStream keeps the same count for its own ring.
   uint64_t seek_posted_request_count_ = 0;  // audio-thread only
   // Engine-rate frames spent in the current priming hold; reset on
   // every post. Drives the kSeekPrimeTimeoutSeconds watchdog.
   uint32_t seek_prime_hold_frames_ = 0;  // audio-thread only
+  // The program position in engine-rate frames: the frame every WAV
+  // chain reads at the start of the current block (ES-986). Set to the
+  // target when a WAV seek is posted, and advanced by the block size at
+  // the end of every block whose ring reads were not held by the seek
+  // hold — the reads that move the chains. A chain that underruns falls
+  // behind it, as does one whose seek was still unapplied when the
+  // hold's watchdog gave up; both join the program again
+  // (step_join_rt()). Audio-thread only; set_sample_rate() rescales it
+  // with the audio thread stopped.
+  uint64_t program_frame_ = 0;
+  /// Least time from the program position to the block boundary where
+  /// a joining WAV chain starts (ES-986): the time the disk thread has to
+  /// apply the chain's seek and refill its ring. The chain is silent
+  /// until that boundary. Each join that finds the ring unprimed there
+  /// doubles the lead, up to kMaxJoinLeadDoublings times, and logs it.
+  static constexpr float kJoinLeadSeconds = 0.17f;
+  static constexpr uint8_t kMaxJoinLeadDoublings = 3;
+  /// Audio-thread: post `chain`'s seek to the first block boundary at
+  /// least the join lead ahead of program_frame_, for blocks of `frames`
+  /// frames, and mark it joining (ES-986).
+  void start_join_rt(ElementChain& chain, uint32_t frames);
+  /// Audio-thread: advance `chain`'s join (ES-986) for a block of `frames`
+  /// frames. `program_moves` is false during a seek hold; `muted` is the
+  /// chain's mute target this block. While the program moves, a chain
+  /// whose seek is unapplied and that is not joining is set joining
+  /// first. Returns true while the chain must skip its reads.
+  bool step_join_rt(ElementChain& chain, uint32_t frames, bool program_moves,
+                    bool muted);
+  /// The file frame of WAV `chain` that plays at engine-rate frame
+  /// `engine_frame`: the same frame, or converted by the resampler's
+  /// rate ratio.
+  static uint64_t wav_file_frame(const ElementChain& chain,
+                                 uint64_t engine_frame);
   /// Fade length: 10 ms nominal, matching the transport edge fades
   /// (kTransportFadeOutMs, ES-530/ES-536). Precisely: the per-BLOCK step
   /// is frames/(fade·rate), so the effective fade is max(10 ms, one
   /// block) — 21/43 ms at 1024/2048-frame buffers — unlike the
   /// transport fade, whose gain persists across callbacks and is
   /// exactly 10 ms everywhere. Long enough to kill the discontinuity,
-  /// short enough to be imperceptible as a fade. Note the WAV seek's
-  /// one-block hold also leaves the reader one block behind the
-  /// free-running transport counter — fixed and non-cumulative, like
-  /// the IAMF prime-hold offset described at kSeekPrimeFrames.
+  /// short enough to be imperceptible as a fade.
   static constexpr float kSeekFadeSeconds = 0.010f;
   /// Post-seek refill (file-rate frames) required before fading back
   /// in. ~43 ms at 48 kHz — inside the issue's 20-50 ms window, and
@@ -818,43 +992,93 @@ class AudioGraph {
   /// advancing) by the hold duration — a fixed ~20-60 ms offset per
   /// seek, comparable to the pre-ES-473 underrun gap, not cumulative.
   static constexpr uint32_t kSeekPrimeFrames = 2048;
-  /// Watchdog on the priming hold. iamf_rings_primed() requires EVERY
+  /// Post-seek refill (file-rate frames) a WAV chain's ring needs before
+  /// the hold ends, at least: 21 ms at 48 kHz. The disk thread wakes
+  /// within WavStreamer::kIdleInterval, applies every pending seek, and
+  /// then reads one 4096-frame chunk per WAV element per pass, so the
+  /// hold lasts the wake-up plus one chunk read per element. The
+  /// threshold is raised to two blocks of the chain's input by
+  /// wav_prime_frames() so the first block after the fade-in does not
+  /// run dry. Like the IAMF hold, it defers the program behind the
+  /// free-running transport counter by the hold's length, once per
+  /// seek.
+  static constexpr uint32_t kWavPrimeFrames = 1024;
+  /// The refill `chain`'s ring needs before a hold ends, for blocks of
+  /// `frames` engine-rate frames: kWavPrimeFrames, or two blocks of the
+  /// chain's file-rate input if that is more, capped at the most the
+  /// disk thread fills a ring to (WavStream::kRingFrames less one
+  /// chunk).
+  static uint32_t wav_prime_frames(const ElementChain& chain, uint32_t frames);
+  /// Watchdog on the priming hold. rings_primed() requires EVERY
   /// attached ring to reach the threshold or EOF — but a ring can
   /// starve indefinitely without EOF (e.g. the ES-238 partial-temporal-
   /// unit case, where one AE's ring gets nothing until a re-seek), and
   /// because the hold also skips reads, the healthy rings stay full
   /// and park the pump. Without a bound that turns a one-element
   /// dropout into a permanent whole-mix mute. On timeout, give up and
-  /// fade back in unprimed: the starved element degrades to the old
-  /// behaviour (underruns, counted and logged) while the rest play.
+  /// fade back in unprimed while the rest play: a starved IAMF element
+  /// underruns (counted and logged), and a WAV element whose seek is
+  /// still unapplied joins the program again (step_join_rt()). A WAV
+  /// element added during the hold restarts the timeout.
   static constexpr float kSeekPrimeTimeoutSeconds = 0.25f;
   /// Audio-thread: advance the state machine and compute this block's
   /// fade bracket. Called at the top of process().
   void update_seek_mute_state(uint32_t frames);
-  /// Audio-thread: reposition every WAV chain to the staged
-  /// engine-rate position (per-chain rate conversion) (ES-536).
+  /// Audio-thread: post the staged engine-rate position to every WAV
+  /// chain's WavStream (per-chain rate conversion) (ES-536, ES-836).
   void apply_wav_seek_rt(uint64_t engine_frame_pos);
   /// Audio-thread: apply the staged seek — IAMF posts to the session,
   /// WAV goes through apply_wav_seek_rt() — then drop every chain's
   /// resampler history.
   void post_staged_seek_rt();
-  /// Audio-thread: true when every attached IAMF ring has the seek
-  /// applied and either kSeekPrimeFrames buffered or EOF.
-  bool iamf_rings_primed() const;
+  /// Audio-thread: with an IAMF session attached, true when every
+  /// attached IAMF ring has the seek applied and either kSeekPrimeFrames
+  /// buffered or EOF (WAV chains beside a session are not seeked). With
+  /// no session, true when every WAV chain's ring has the seek applied
+  /// and either wav_prime_frames() buffered or EOF. `frames` is the
+  /// block size.
+  bool rings_primed(uint32_t frames) const;
+  /// Audio-thread: true while a WAV chain added since the last block has
+  /// not had its join started (ES-986). The seek hold does not end then:
+  /// the chain's ring was filled from frame 0 and so looks primed, and
+  /// the chain must first join the hold (step_join_rt()).
+  bool wav_join_pending() const;
 
   // When true (the default), process() feeds each IAMF chain's mix
   // gain from the stream's per-TU report (default-presentation gains).
   // See set_iamf_stream_gains().
   std::atomic<bool> iamf_stream_gains_{true};
 
-  // IAMF output mix gain target (master fader). Control thread writes,
-  // audio thread reads each callback and produces a slew-limited
-  // linear ramp to OAR via oar_update_metadata on group 0. Same
-  // mechanism as per-element mix gain above.
+  // IAMF output mix gain target. Control thread writes, audio thread
+  // reads each callback and produces a slew-limited linear ramp to OAR
+  // via oar_update_metadata on group 0. Same mechanism as per-element
+  // mix gain above.
   std::atomic<float> output_mix_gain_db_{0.0f};
   // Audio-thread only — slew-limited target and last value sent.
   float output_mix_gain_slewed_db_ = 0.0f;
   float output_mix_gain_last_sent_db_ = 0.0f;
+
+  // Input fade-in for a new OAR instance (ES-987). Every rebuild (layout
+  // switch, rendering-config commit, element add or remove, format
+  // change, and the deferred rebuild replayed when offline-exclusive
+  // mode ends) creates an instance whose limiter delay line
+  // (limiter_delay(), 240 samples at 48 kHz) and binaural filters start
+  // empty. Its first 240 output samples are zeros, and the output
+  // fade-in (OarRenderer::fade_in: 5 ms, or one block when the block is
+  // longer) is part-way through or over when the program reaches the
+  // output: at 512-frame blocks the output gain there is 0.47. The
+  // first blocks rendered by a new instance are therefore ramped up
+  // from silence at its input, over kOarInputFadeSeconds, so the
+  // program reaches the delay line and the filters as a ramp.
+  // oar_generation_fed_ is the instance_generation() of the last
+  // instance that rendered a block. Both are audio-thread only, except
+  // that init() resets oar_generation_fed_ before the audio thread
+  // starts.
+  uint32_t oar_generation_fed_ = 0;
+  float oar_input_fade_gain_ = 1.0f;
+  /// Stretched to one block when the block is longer, like the seek
+  /// fade.
+  static constexpr float kOarInputFadeSeconds = kSeekFadeSeconds;
 
   // Monitor DIM (ES-629): control thread writes the target, the audio
   // thread ramps monitor_dim_gain_ (linear, 1.0 undimmed) toward it.
@@ -865,6 +1089,14 @@ class AudioGraph {
   /// target. Audio thread only; the last step of process() and
   /// render_noise(), after every meter tap.
   void apply_monitor_dim(float* out, uint32_t frames, uint32_t channels);
+
+  // Output-channel solo and mute (ES-999): the control thread writes the
+  // mask of silenced channels; the audio thread ramps each channel's
+  // gain in output_channel_gains_ (linear, 1.0 unity, indexed like
+  // routing_) toward it in the scatter. init() sets every gain to 1.0
+  // before the audio thread starts.
+  std::atomic<uint64_t> output_silenced_{0};
+  float output_channel_gains_[kMaxRoutingChannels] = {};
 
   // Output peak and RMS levels (written after OAR render, read by Dart
   // via FFI). RMS is a per-sample EMA of the squared signal so the UI
@@ -888,7 +1120,10 @@ class AudioGraph {
   RelaxedAtomic<uint8_t> output_clip_[kMaxOutputChannels] =
       {};  // sticky, >= 0 dBFS
   float output_rms_alpha_ = 0.0f;
-  uint32_t output_channel_count_ = 0;
+  // Channels metered in the last block. The audio thread writes it in
+  // process() and render_noise(); get_output_*() read it on the
+  // control thread, once per call.
+  RelaxedAtomic<uint32_t> output_channel_count_;
 
   // Clip-clear handshake. The audio thread is the sole writer of the
   // clip flags (per-element clip[] and output_clip_), so a clear

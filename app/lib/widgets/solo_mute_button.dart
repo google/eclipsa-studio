@@ -19,7 +19,8 @@ import 'chrome_surface.dart';
 
 /// Compact "S" / "M" monitoring toggle shared by every solo/mute site
 /// (elements view track panel, mix view channel strip, renderer view
-/// playback cards) so the control looks and behaves the same everywhere.
+/// playback cards, the output meter's solo and mute panel) so the
+/// control looks and behaves the same everywhere.
 ///
 /// Solo uses [T.meterYellow] and Mute uses [T.meterRed] as [activeColor]
 /// at all call sites — these sit alongside the meter UI, not error states.

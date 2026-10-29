@@ -27,6 +27,9 @@ extern "C" {
 #include "oar.h"
 }
 
+// channel_order.h repeats the value to stay free of the OAR dependency.
+static_assert(eclipsa_studio::kOarLayout916 == ck_oar_layout_916);
+
 // Map our element type ints to OAR's enum.
 static audio_element_type_t to_oar_type(int type) {
   switch (type) {
@@ -59,6 +62,7 @@ bool OarRenderer::init(uint32_t sample_rate, uint32_t buffer_size,
 
   const uint32_t ch = oar_get_number_of_output_channels(renderer_);
   channel_count_.store(ch, std::memory_order_relaxed);
+  rendered_layout_.store(layout, std::memory_order_relaxed);
   output_.resize(static_cast<size_t>(ch) * buffer_size, 0.0f);
 
   // Generous interleaved scratch buffer.
@@ -96,6 +100,7 @@ void OarRenderer::shutdown_locked() {
     renderer_ = nullptr;
   }
   channel_count_.store(0, std::memory_order_relaxed);
+  rendered_layout_.store(0, std::memory_order_relaxed);
   limiter_delay_.store(0, std::memory_order_relaxed);
   output_.clear();
   interleaved_tmp_.clear();
@@ -115,6 +120,8 @@ void OarRenderer::reap_zombies_locked() {
 }
 
 oar_t* OarRenderer::create_renderer(uint32_t layout) {
+  if (fail_create_for_testing_.load(std::memory_order_relaxed)) return nullptr;
+
   oar_config_t cfg{};
   cfg.target_layout = static_cast<oar_layout_t>(layout);
   cfg.samples_per_channel = buffer_size_.load(std::memory_order_relaxed);
@@ -129,16 +136,21 @@ oar_t* OarRenderer::create_renderer(uint32_t layout) {
   // Disable OAR's internal loudness normalisation — Eclipsa Studio
   // handles that.
   oar_enable_loudness_processor(r, 0);
-  // The -1 dBFS peak limiter is always on — live monitoring, offline
-  // measurement, every OAR instance. There is deliberately no off switch
-  // (ES-491/ES-492 decision; the exported bitstream is still unlimited).
-  oar_enable_limiter(r, 1);
+  // The -1 dBFS peak limiter is on in live monitoring and in the app's
+  // offline measurement; the app has no off switch (ES-491/ES-492 decision;
+  // the exported bitstream is still unlimited). set_limiter_enabled()
+  // turns it off for the measure CLI's unlimited render only.
+  const bool limiter_on = limiter_enabled_.load(std::memory_order_relaxed);
+  oar_enable_limiter(r, limiter_on ? 1 : 0);
   // The delay cache follows the instance: create_renderer() is the
   // only place a new OAR instance is built, so rebuilds (layout /
-  // device switches) refresh it by construction.
+  // device switches) refresh it by construction. A disabled limiter
+  // does not delay the block.
   limiter_delay_.store(
-      static_cast<uint32_t>(std::max(0, oar_get_limiter_delay(r))),
+      limiter_on ? static_cast<uint32_t>(std::max(0, oar_get_limiter_delay(r)))
+                 : 0u,
       std::memory_order_relaxed);
+  instance_generation_.fetch_add(1, std::memory_order_relaxed);
 
   // Add all currently tracked elements.
   for (const auto& el : elements_) {
@@ -168,7 +180,34 @@ oar_t* OarRenderer::create_renderer(uint32_t layout) {
         static_cast<oar_headphones_rendering_mode_t>(el.headphones_mode);
     aecfg.parameters.element_rendering_config.binaural_filter_profile =
         static_cast<oar_binaural_filter_profile_t>(el.binaural_profile);
-    oar_add_audio_element(r, /*gid=*/0, el.id, &aecfg);
+    if (oar_add_audio_element(r, /*gid=*/0, el.id, &aecfg) != ck_oar_ok) {
+      char buf[96];
+      snprintf(buf, sizeof(buf),
+               "create_renderer: oar_add_audio_element failed for id=%u",
+               el.id);
+      engine_log(ECLIPSA_STUDIO_LOG_WARN, "oar", buf);
+      continue;
+    }
+
+    // OAR creates an element's gain queue, and reserves its storage, on
+    // the first gain push for the element's id. The audio thread pushes
+    // a gain every callback (set_element_mix_gain), so push one here on
+    // the control thread: a zero-duration gain covers no sample and is
+    // dropped, without a log, at the first render in which an element has
+    // data.
+    oar_metadata_t gain{};
+    gain.type = ck_metadata_gain;
+    gain.gain.id = el.id;
+    gain.gain.param_type = ck_param_constant;
+    gain.duration = 0;
+    if (oar_update_audio_element_metadata(r, el.id, &gain) != ck_oar_ok) {
+      char buf[128];
+      snprintf(buf, sizeof(buf),
+               "create_renderer: no gain queue for id=%u; the first "
+               "callback creates it",
+               el.id);
+      engine_log(ECLIPSA_STUDIO_LOG_WARN, "oar", buf);
+    }
   }
 
   return r;
@@ -275,9 +314,9 @@ bool OarRenderer::commit_rendering_config() {
   return ok;
 }
 
-void OarRenderer::update_element_data(uint32_t element_id, const float* data,
-                                      uint32_t channels, uint32_t frames,
-                                      uint32_t stride) {
+void OarRenderer::update_element_data(
+    uint32_t element_id, const float* data, uint32_t channels, uint32_t frames,
+    uint32_t stride, const eclipsa_studio::ChannelOrder* input_order) {
   // OAR expects planar float data (ch0[0..N], ch1[0..N], ...).
   // Our AudioBuffer is planar with `stride` (capacity_frames) between channels.
   const size_t total = static_cast<size_t>(channels) * frames;
@@ -312,11 +351,22 @@ void OarRenderer::update_element_data(uint32_t element_id, const float* data,
 
   // Compact planar data: our AudioBuffer uses `stride` (capacity_frames)
   // between channels, but OAR expects contiguous planar (frames between
-  // channels).  When stride == frames, the data is already contiguous.
+  // channels). When stride == frames and the channels are fed as they
+  // are, the data is already contiguous. An input order is applied in
+  // the same copy: OAR channel c takes source channel
+  // input_order->source[c]. A table whose channel count differs from
+  // `channels` is ignored, so every source index stays below
+  // `channels` (a table's entries are below its own count).
+  const uint8_t* source =
+      input_order != nullptr && input_order->channels == channels
+          ? input_order->source
+          : nullptr;
   const float* planar = data;
-  if (stride != frames) {
+  if (stride != frames || source != nullptr) {
     for (uint32_t c = 0; c < channels; ++c) {
-      std::memcpy(interleaved_tmp_.data() + c * frames, data + c * stride,
+      const uint32_t s = source != nullptr ? source[c] : c;
+      std::memcpy(interleaved_tmp_.data() + c * frames,
+                  data + static_cast<size_t>(s) * stride,
                   frames * sizeof(float));
     }
     planar = interleaved_tmp_.data();
@@ -411,12 +461,42 @@ const float* OarRenderer::render(uint32_t frames) {
   return output_.data();
 }
 
+bool OarRenderer::set_limiter_enabled(bool enabled) {
+  std::lock_guard<std::mutex> lock(control_mutex_);
+  // The audio thread renders without control_mutex_, OAR must not see
+  // overlapping calls, and turning the limiter back on resets its delay
+  // line mid-stream, so only an instance no audio thread drives
+  // changes. Refusing an unbuilt one too keeps the setting off every
+  // instance the live renderer's init() and rebuilds create.
+  if (!no_audio_thread_) {
+    engine_log(ECLIPSA_STUDIO_LOG_ERROR, "oar",
+               "set_limiter_enabled refused: the instance is not marked "
+               "set_no_audio_thread()");
+    return false;
+  }
+  limiter_enabled_.store(enabled, std::memory_order_relaxed);
+  // A disabled OAR limiter returns before updating its envelope, so its
+  // last value would read as reduction in every later block.
+  if (!enabled) limiter_env_.store(1.0, std::memory_order_relaxed);
+  if (renderer_ == nullptr) return true;
+  oar_enable_limiter(renderer_, enabled ? 1 : 0);
+  // oar_get_limiter_delay() reports the delay line's size whether or not
+  // the limiter runs.
+  limiter_delay_.store(enabled ? static_cast<uint32_t>(std::max(
+                                     0, oar_get_limiter_delay(renderer_)))
+                               : 0u,
+                       std::memory_order_relaxed);
+  return true;
+}
+
 double OarRenderer::limiter_env() const {
   return limiter_env_.load(std::memory_order_relaxed);
 }
 
 void OarRenderer::snapshot_limiter_env() {
-  if (renderer_) {
+  // While the limiter is off OAR's envelope keeps its last value, and
+  // set_limiter_enabled(false) left the cache at 1.0.
+  if (renderer_ && limiter_enabled_.load(std::memory_order_relaxed)) {
     limiter_env_.store(oar_get_limiter_env(renderer_),
                        std::memory_order_relaxed);
   }
@@ -425,6 +505,17 @@ void OarRenderer::snapshot_limiter_env() {
 bool OarRenderer::set_layout(uint32_t layout) {
   std::lock_guard<std::mutex> lock(control_mutex_);
   const uint32_t prev = layout_;
+  // The current instance already renders this layout with every tracked
+  // element (or, while offline-exclusive mode is held, the deferred
+  // rebuild will build it), so a rebuild would only cut the output
+  // while it runs. Playback sets the monitoring layout on every mix
+  // switch (ES-987).
+  if (layout == prev && renderer_ != nullptr) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "set_layout: %u unchanged, no rebuild", layout);
+    engine_log(ECLIPSA_STUDIO_LOG_INFO, "oar", buf);
+    return true;
+  }
   layout_ = layout;
   bool ok = rebuild();
   {
@@ -597,6 +688,7 @@ bool OarRenderer::rebuild() {
 
   if (elements_.empty() && layout_ == 0) {
     channel_count_.store(0, std::memory_order_relaxed);
+    rendered_layout_.store(0, std::memory_order_relaxed);
     reconfiguring_.store(false, std::memory_order_release);
     fade_in();
     return true;
@@ -605,6 +697,7 @@ bool OarRenderer::rebuild() {
   renderer_ = create_renderer(layout_);
   if (!renderer_) {
     channel_count_.store(0, std::memory_order_relaxed);
+    rendered_layout_.store(0, std::memory_order_relaxed);
     reconfiguring_.store(false, std::memory_order_release);
     fade_in();
     return false;
@@ -612,6 +705,7 @@ bool OarRenderer::rebuild() {
 
   const uint32_t ch = oar_get_number_of_output_channels(renderer_);
   channel_count_.store(ch, std::memory_order_relaxed);
+  rendered_layout_.store(layout_, std::memory_order_relaxed);
   output_.assign(static_cast<size_t>(ch) * buf_size, 0.0f);
   interleaved_tmp_.assign(static_cast<size_t>(28) * buf_size, 0.0f);
 

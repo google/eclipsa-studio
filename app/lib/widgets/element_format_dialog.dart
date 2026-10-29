@@ -17,11 +17,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../export/iamf_profile_rules.dart';
 import '../models/audio_element_enums.dart';
+import '../models/layout_916.dart';
 import '../state.dart';
 import '../theme.dart';
 import 'ae_type_badge.dart';
 import 'app_button.dart';
 import 'app_dialog.dart';
+import 'status_tag.dart';
 
 /// Outcome of [showElementFormatDialog].
 class ElementFormatChoice {
@@ -45,6 +47,12 @@ class ElementFormatChoice {
   /// responsible for actually applying the switch.
   final IamfProfile? bumpTo;
 }
+
+/// The note under the format options: where the channel routing is changed
+/// once the WAV is in the session.
+const String _routingNote =
+    'The channel routing can be changed afterwards: click the element\'s '
+    'type in its track panel to open Type & Routing.';
 
 /// Ask the user which element format an ambiguous WAV should open as (ES-152).
 ///
@@ -70,6 +78,10 @@ class ElementFormatChoice {
 /// [remainingSameCount] > 0 shows the "Apply to N more X-channel files"
 /// checkbox for batch drops; [confirmLabel] is "Import" for new elements and
 /// "Replace" for the drop-onto-existing-element path.
+///
+/// Under the options the dialog notes that the channel routing can be
+/// changed afterwards, in the Type & Routing window the element's type chip
+/// opens.
 Future<ElementFormatChoice?> showElementFormatDialog(
   BuildContext context, {
   required String fileName,
@@ -160,10 +172,14 @@ String _configDescription(ElementConfig c) {
       return '5.1 bed plus four heights';
     case 'Channel · 7.1.2':
       return '7.1 bed plus a height pair';
+    // IAMF ambisonics: ACN channel order, SN3D normalization. 3OA is the
+    // only order with a second interpretation (16 channels), so the only
+    // one shown with a description.
     case 'Scene · 3OA':
-      return 'Third-order ambisonics soundfield';
+      return 'Third-order ambisonics soundfield, ACN/SN3D';
     case 'Channel · 9.1.6':
-      return 'Immersive bed with six heights';
+      return 'Immersive bed with six heights, default channel order '
+          '${alt916Labels.join(' ')}';
     default:
       return '';
   }
@@ -274,6 +290,11 @@ class _ElementFormatDialogState extends ConsumerState<_ElementFormatDialog> {
                 style: TextStyle(fontSize: T.fontSmall, color: T.objAmber),
               ),
             ],
+            const SizedBox(height: T.gapPair),
+            Text(
+              _routingNote,
+              style: TextStyle(fontSize: T.fontSmall, color: T.textTertiary),
+            ),
             if (widget.remainingSameCount > 0) ...[
               const SizedBox(height: T.gapPair),
               _applyToRemainingRow(),
@@ -319,103 +340,86 @@ class _ElementFormatDialogState extends ConsumerState<_ElementFormatDialog> {
         ? 'Switches the session to the ${bump.label} profile'
         : 'Needs the ${minProfileForConfig(cfg)?.label ?? '—'} profile';
 
-    return Padding(
-      padding: const EdgeInsets.only(bottom: T.gapPair),
-      child: InkWell(
-        onTap: enabled ? () => setState(() => _selected = i) : null,
-        borderRadius: BorderRadius.circular(T.radiusMd),
-        child: Container(
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: selected ? T.purple.withValues(alpha: 0.10) : T.bgBase,
-            borderRadius: BorderRadius.circular(T.radiusMd),
-            border: Border.all(color: selected ? T.purpleLight : T.border),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(
-                selected
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_unchecked,
-                size: 16,
-                color: selected
-                    ? T.purpleLight
-                    : enabled
-                    ? T.textTertiary
-                    : T.textGhost,
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Icon(
-                          aeTypeIcon(cfg.type),
-                          size: 12,
-                          color: enabled
-                              ? typeColor
-                              : typeColor.withValues(alpha: 0.4),
-                        ),
-                        const SizedBox(width: T.gapPair),
-                        Flexible(
-                          child: Text(
-                            cfg.label,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: T.fontBody,
-                              fontWeight: FontWeight.w600,
-                              color: enabled ? T.textPrimary : T.textMuted,
-                            ),
+    // The 9.1.6 row's tooltip spells out the WAV's channel order.
+    final orderTip = layout916OrderTooltip(cfg.layout ?? '');
+    final row = InkWell(
+      onTap: enabled ? () => setState(() => _selected = i) : null,
+      borderRadius: BorderRadius.circular(T.radiusMd),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: selected ? T.purple.withValues(alpha: 0.10) : T.bgBase,
+          borderRadius: BorderRadius.circular(T.radiusMd),
+          border: Border.all(color: selected ? T.purpleLight : T.border),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              selected
+                  ? Icons.radio_button_checked
+                  : Icons.radio_button_unchecked,
+              size: 16,
+              color: selected
+                  ? T.purpleLight
+                  : enabled
+                  ? T.textTertiary
+                  : T.textGhost,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      AeTypeGlyph(
+                        type: cfg.type,
+                        size: 12,
+                        color: enabled
+                            ? typeColor
+                            : typeColor.withValues(alpha: 0.4),
+                      ),
+                      const SizedBox(width: T.gapPair),
+                      Flexible(
+                        child: Text(
+                          cfg.label,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: T.fontBody,
+                            fontWeight: FontWeight.w600,
+                            color: enabled ? T.textPrimary : T.textMuted,
                           ),
                         ),
-                        if (recommended) ...[
-                          const SizedBox(width: 8),
-                          _mostCommonTag(),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      description,
-                      style: TextStyle(
-                        fontSize: T.fontSmall,
-                        color: !enabled
-                            ? T.textMuted
-                            : bump != null
-                            ? T.objAmber
-                            : T.textSecondary,
                       ),
+                      if (recommended) ...[
+                        const SizedBox(width: 8),
+                        StatusTag('Most common', color: T.purpleLight),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    description,
+                    style: TextStyle(
+                      fontSize: T.fontSmall,
+                      color: !enabled
+                          ? T.textMuted
+                          : bump != null
+                          ? T.objAmber
+                          : T.textSecondary,
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
-  }
-
-  /// Compact pill marking the recommended interpretation, based on the
-  /// [AeTypeBadge] / [YouTubeSupportBadge] pill style.
-  Widget _mostCommonTag() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-      decoration: BoxDecoration(
-        color: T.purple.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(T.radiusSm),
-      ),
-      child: Text(
-        'Most common',
-        style: TextStyle(
-          fontSize: T.fontCaption,
-          color: T.purpleLight,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: T.gapPair),
+      child: orderTip == null ? row : Tooltip(message: orderTip, child: row),
     );
   }
 

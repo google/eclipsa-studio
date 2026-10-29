@@ -27,7 +27,7 @@ import '../theme.dart';
 /// whole box — with the default deferToChild only the glyph itself
 /// would be tappable and near-misses would fall through to whatever is
 /// behind. [color] exists for backgrounds where the ghost tone lacks
-/// contrast (e.g. the purple layout chips use T.textTertiary).
+/// contrast (e.g. a selected ConsoleChip passes its own ink).
 class RemoveXButton extends ConsumerWidget {
   final VoidCallback onTap;
   final double width;

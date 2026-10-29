@@ -20,6 +20,7 @@ import 'package:ffi/ffi.dart' as ffi_pkg;
 
 import '../ffi/engine_bindings.dart';
 import '../ffi_bridge.dart';
+import '../models/layout_916.dart' show kChannelOrderOar;
 import 'element_clip_stats.dart';
 
 /// One element's contribution to an offline mix render, mirroring
@@ -64,6 +65,13 @@ class MixMeasureElement {
   final double elevation2;
   final double distance2;
 
+  /// The order of the element's channels after routing, an
+  /// `eclipsa_studio_element_set_channel_order()` value
+  /// (`elementChannelOrder()` in state.dart): a 16-channel "9.1.6"
+  /// element is in OBR's alt order and the render permutes it into
+  /// OAR's order at the feed; everything else is fed as it is.
+  final int channelOrder;
+
   const MixMeasureElement({
     required this.sourceWavPath,
     required this.gainDb,
@@ -84,6 +92,7 @@ class MixMeasureElement {
     this.azimuth2 = 0,
     this.elevation2 = 0,
     this.distance2 = 1,
+    this.channelOrder = kChannelOrderOar,
   });
 }
 
@@ -97,7 +106,7 @@ typedef MixMeasureResult = ({
 /// Trace series ids, mirroring `eclipsa_studio::MixTraceSeries` (engine.h).
 const int _kTraceMomentaryLufs = 0;
 const int _kTraceShortTermLufs = 1;
-const int _kTraceShortTermPeakDbfs = 2;
+// Series 2, the short-term sample peak in dBFS, is not read.
 const int _kTraceShortTermPsrDb = 3;
 const int _kTraceLimiterGrDb = 4;
 
@@ -112,7 +121,6 @@ class MixMeasureTraces {
 
   final Float32List momentaryLufs; // 400 ms window, ungated
   final Float32List shortTermLufs; // 3 s sliding window, ungated
-  final Float32List shortTermPeakDbfs; // max sample peak per 3 s window
   final Float32List shortTermPsrDb; // peak minus short-term loudness
 
   /// Limiter envelope sampled once per render block, max-reduced per
@@ -132,17 +140,12 @@ class MixMeasureTraces {
   /// for a short-term block.
   final double? loudnessRangeLu;
 
-  /// EBU TECH 3341 "stable after 60 s" criterion for [loudnessRangeLu].
-  final bool lraStable;
-
   const MixMeasureTraces({
     required this.momentaryLufs,
     required this.shortTermLufs,
-    required this.shortTermPeakDbfs,
     required this.shortTermPsrDb,
     required this.limiterGrDb,
     required this.loudnessRangeLu,
-    required this.lraStable,
   });
 
   /// Engagement threshold: GR above this counts as "limiting" (~0.1%
@@ -250,6 +253,13 @@ Future<MixMeasureOutcome?> runMixMeasureOnIsolate({
           if (routingPtr != nullptr) ffi_pkg.malloc.free(routingPtr);
         }
         if (rc != 0) return null;
+        if (e.channelOrder != kChannelOrderOar) {
+          bindings.mixRendererSetElementChannelOrder(
+            handle,
+            e.elementId,
+            e.channelOrder,
+          );
+        }
         // Object elements need their polar position(s) or they render
         // (and therefore measure) as silence on loudspeaker layouts.
         if (e.elementType == 2) {
@@ -268,25 +278,10 @@ Future<MixMeasureOutcome?> runMixMeasureOnIsolate({
       }
       setGain(handle, outputMixGainDb);
 
-      final MixMeasureResult scalars;
-      final lufs = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
-      final tp = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
-      final dp = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
-      try {
-        // A failed measure must fail the pass: the out values are not
-        // written on error, and treating them as data would ship a
-        // bogus -120 LUFS into exported loudness metadata.
-        if (measure(handle, lufs, tp, dp) != 0) return null;
-        scalars = (
-          integratedLufs: lufs.value.toDouble(),
-          truePeakDbtp: tp.value.toDouble(),
-          digitalPeakDbfs: dp.value.toDouble(),
-        );
-      } finally {
-        ffi_pkg.malloc.free(lufs);
-        ffi_pkg.malloc.free(tp);
-        ffi_pkg.malloc.free(dp);
-      }
+      final scalars = readMeasureScalars(
+        (lufs, tp, dp) => measure(handle, lufs, tp, dp),
+      );
+      if (scalars == null) return null;
       // Pull per-element overload stats (cheap scalars, so always —
       // the export gate needs them regardless of traces).
       final clipStats = <int, ElementClipStats>{};
@@ -315,56 +310,91 @@ Future<MixMeasureOutcome?> runMixMeasureOnIsolate({
       if (!withTraces) {
         return MixMeasureOutcome(scalars: scalars, elementClipStats: clipStats);
       }
-
-      // Copy each series out of the renderer into an isolate-sendable
-      // Float32List (caller-allocated native scratch, freed before
-      // return — no ownership crosses the FFI).
-      Float32List copySeries(int series) {
-        final len = bindings.mixRendererTraceLen(handle, series);
-        if (len == 0) return Float32List(0);
-        final buf = ffi_pkg.malloc.allocate<Float>(len * sizeOf<Float>());
-        try {
-          final copied = bindings.mixRendererCopyTrace(
-            handle,
-            series,
-            buf,
-            len,
-          );
-          return Float32List.fromList(buf.asTypedList(copied));
-        } finally {
-          ffi_pkg.malloc.free(buf);
-        }
-      }
-
-      double? lraLu;
-      var lraStable = false;
-      final lra = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
-      final stable = ffi_pkg.malloc.allocate<Int32>(sizeOf<Int32>());
-      try {
-        if (bindings.mixRendererLoudnessRange(handle, lra, stable) == 0) {
-          lraLu = lra.value.toDouble();
-          lraStable = stable.value != 0;
-        }
-      } finally {
-        ffi_pkg.malloc.free(lra);
-        ffi_pkg.malloc.free(stable);
-      }
-
       return MixMeasureOutcome(
         scalars: scalars,
         elementClipStats: clipStats,
-        traces: MixMeasureTraces(
-          momentaryLufs: copySeries(_kTraceMomentaryLufs),
-          shortTermLufs: copySeries(_kTraceShortTermLufs),
-          shortTermPeakDbfs: copySeries(_kTraceShortTermPeakDbfs),
-          shortTermPsrDb: copySeries(_kTraceShortTermPsrDb),
-          limiterGrDb: copySeries(_kTraceLimiterGrDb),
-          loudnessRangeLu: lraLu,
-          lraStable: lraStable,
+        traces: readMeasureTraces(
+          traceLen: (series) => bindings.mixRendererTraceLen(handle, series),
+          copyTrace: (series, out, cap) =>
+              bindings.mixRendererCopyTrace(handle, series, out, cap),
+          loudnessRange: (lra, stable) =>
+              bindings.mixRendererLoudnessRange(handle, lra, stable),
         ),
       );
     } finally {
       destroy(handle);
     }
   });
+}
+
+/// Reads the loudness scalars a measure call wrote into caller-owned
+/// native floats, or null when the call reported a failure. Shared by
+/// the offline measurers: a failed measure must fail the pass, because
+/// the out values are not written on error and treating them as data
+/// would ship a bogus -120 LUFS into exported loudness metadata.
+MixMeasureResult? readMeasureScalars(
+  int Function(Pointer<Float> lufs, Pointer<Float> tp, Pointer<Float> dp)
+  measure,
+) {
+  final lufs = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
+  final tp = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
+  final dp = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
+  try {
+    if (measure(lufs, tp, dp) != 0) return null;
+    return (
+      integratedLufs: lufs.value.toDouble(),
+      truePeakDbtp: tp.value.toDouble(),
+      digitalPeakDbfs: dp.value.toDouble(),
+    );
+  } finally {
+    ffi_pkg.malloc.free(lufs);
+    ffi_pkg.malloc.free(tp);
+    ffi_pkg.malloc.free(dp);
+  }
+}
+
+/// Copies the recorded time series and the loudness range out of an
+/// offline measurer after a successful measure, through the three
+/// query functions of its C ABI (the mix renderer's and the IAMF
+/// measurer's have the same shape). Each series lands in an
+/// isolate-sendable Float32List; the native scratch is freed before
+/// return, so no ownership crosses the FFI.
+MixMeasureTraces readMeasureTraces({
+  required int Function(int series) traceLen,
+  required int Function(int series, Pointer<Float> out, int cap) copyTrace,
+  required int Function(Pointer<Float> lra, Pointer<Int32> stable)
+  loudnessRange,
+}) {
+  Float32List copySeries(int series) {
+    final len = traceLen(series);
+    if (len == 0) return Float32List(0);
+    final buf = ffi_pkg.malloc.allocate<Float>(len * sizeOf<Float>());
+    try {
+      final copied = copyTrace(series, buf, len);
+      return Float32List.fromList(buf.asTypedList(copied));
+    } finally {
+      ffi_pkg.malloc.free(buf);
+    }
+  }
+
+  double? lraLu;
+  final lra = ffi_pkg.malloc.allocate<Float>(sizeOf<Float>());
+  // The engine also writes the LRA stability flag, which nothing reads.
+  final stable = ffi_pkg.malloc.allocate<Int32>(sizeOf<Int32>());
+  try {
+    if (loudnessRange(lra, stable) == 0) {
+      lraLu = lra.value.toDouble();
+    }
+  } finally {
+    ffi_pkg.malloc.free(lra);
+    ffi_pkg.malloc.free(stable);
+  }
+
+  return MixMeasureTraces(
+    momentaryLufs: copySeries(_kTraceMomentaryLufs),
+    shortTermLufs: copySeries(_kTraceShortTermLufs),
+    shortTermPsrDb: copySeries(_kTraceShortTermPsrDb),
+    limiterGrDb: copySeries(_kTraceLimiterGrDb),
+    loudnessRangeLu: lraLu,
+  );
 }

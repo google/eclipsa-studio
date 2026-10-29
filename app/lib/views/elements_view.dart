@@ -17,7 +17,8 @@ import 'dart:math';
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, listEquals;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, listEquals, visibleForTesting;
 import 'package:flutter/gestures.dart'
     show PointerDeviceKind, PointerScrollEvent, kDoubleTapTimeout;
 import 'package:flutter/material.dart';
@@ -39,6 +40,7 @@ import '../video/video_provider.dart';
 import '../video/video_track.dart';
 import '../waveform/waveform.dart';
 import '../widgets/ae_type_badge.dart';
+import '../widgets/console_widgets.dart' show SelectorChrome;
 import '../widgets/drop_zone.dart';
 import '../widgets/element_format_dialog.dart';
 import '../widgets/gain_knob.dart';
@@ -106,11 +108,7 @@ AudioElement _buildElementFromWav(
 }
 
 /// Theme colour (ARGB) assigned to elements of [type].
-int _colorForElementType(String type) => type == 'Object'
-    ? T.typeObject.toARGB32()
-    : type == 'Scene'
-    ? T.typeScene.toARGB32()
-    : T.typeChannel.toARGB32();
+int _colorForElementType(String type) => aeTypeColor(type).toARGB32();
 
 /// Format a WAV decode/IO failure into a short user-facing message.
 ///
@@ -142,8 +140,10 @@ String wavImportErrorMessage(String wavPath, Object e) {
 ///   preserving name/color/layout/gain/mute/solo/routing, and
 ///   re-registers the file with the engine.
 /// * Loaded slot with a different channel count → removes the old
-///   element (engine + state) and inserts a freshly-built element at
-///   the same list index so the visual position is preserved.
+///   element (engine, state and mix settings) and inserts a
+///   freshly-built element at the same list index so the visual
+///   position is preserved. The new element must fit the active
+///   profile beside the other elements, as an added element must.
 ///
 /// [configOverride] applies to the different-channel-count path only —
 /// the other two keep the element's existing config. Callers resolve
@@ -155,8 +155,10 @@ Future<String?> assignWavToElement(
   String wavPath, {
   ElementConfig? configOverride,
 }) async {
+  final sameSession = container.read(sessionProvider.notifier).sessionGuard();
   try {
     final newInfo = await WavDecoder.readInfo(wavPath);
+    if (!sameSession()) return _sessionChangedMessage(wavPath);
     final elems = container.read(elementsProvider);
     final idx = elems.indexWhere((e) => e.id == elementId);
     if (idx < 0) return 'Element no longer exists';
@@ -193,54 +195,39 @@ Future<String?> assignWavToElement(
       container.read(elementsProvider.notifier).set(updated);
       _recalcDuration(container, updated);
       final engine = container.read(eclipsaStudioEngineProvider);
-      if (engine != null) {
-        // The remove compacts engine slots (swap-with-last) and the
-        // re-add appends — mirror both in the slot→element map (ES-531).
-        engine.removeElement(old.id);
-        container.read(engineOrderProvider.notifier).removeCompacted(old.id);
-        final rc = engine.addElement(old.id, wavPath);
-        Log.d(
-          LogCat.engine,
-          'replaceElement(id=${old.id}, '
-          'path="$wavPath") -> rc=$rc',
-        );
-        if (rc == 0) {
-          container.read(engineOrderProvider.notifier).set([
-            ...container.read(engineOrderProvider),
-            old.id,
-          ]);
-          final el = updated[idx];
-          final (oarType, oarSubType, oarCh) = elementToOarType(el);
-          engine.setElementType(el.id, oarType, oarSubType, oarCh);
-          engine.setElementGain(el.id, el.gain);
-          engine.setElementMute(el.id, el.mute);
-          engine.setElementSolo(el.id, el.solo);
-        } else {
-          Log.w(
-            LogCat.engine,
-            'Failed to reload element ${old.id} after WAV swap '
-            '(rc=$rc)',
-          );
-          return 'Engine failed to reload "${p.basename(wavPath)}"';
-        }
-      }
-      return null;
+      if (engine == null) return null;
+      // The remove compacts engine slots (swap-with-last) and the
+      // re-add appends — mirror both in the slot→element map (ES-531).
+      // The re-add starts from the engine's defaults, so it takes the
+      // same full sync as a new element.
+      engine.removeElement(old.id);
+      container.read(engineOrderProvider.notifier).removeCompacted(old.id);
+      return _syncElementToEngine(container, updated[idx]);
     }
 
     // Case C: different channel count → delete old element, insert a
     // fresh one at the same index.
+    final fresh = _buildElementFromWav(elems, wavPath, newInfo, configOverride);
+    final others = List<AudioElement>.from(elems)..removeAt(idx);
+    final refusal = _profileRefusal(
+      container.read(iamfProfileProvider),
+      others,
+      fresh,
+      newInfo.channels,
+    );
+    if (refusal != null) return refusal;
+
     final engine = container.read(eclipsaStudioEngineProvider);
     engine?.removeElement(old.id);
     container.read(engineOrderProvider.notifier).removeCompacted(old.id);
 
-    final fresh = _buildElementFromWav(elems, wavPath, newInfo, configOverride);
-    final updated = List<AudioElement>.from(elems)
-      ..removeAt(idx)
-      ..insert(idx, fresh);
+    final updated = others..insert(idx, fresh);
     container.read(elementsProvider.notifier).set(updated);
-    container
-        .read(mixesNotifierProvider.notifier)
-        .ensureElementSettings(fresh.id);
+    // Ids are reused (max + 1), so the old id's settings must leave
+    // every mix with it.
+    container.read(mixesNotifierProvider.notifier)
+      ..removeElementSettings(old.id)
+      ..ensureElementSettings(fresh.id);
     _recalcDuration(container, updated);
     return _syncElementToEngine(container, fresh);
   } on FormatException catch (e) {
@@ -279,25 +266,15 @@ Future<String?> addNewElementFromWav(
     return '${profile.label} profile limit of '
         '${profile.maxAudioElements} elements reached';
   }
+  final sameSession = container.read(sessionProvider.notifier).sessionGuard();
   try {
     final wavInfo = await WavDecoder.readInfo(wavPath);
+    if (!sameSession()) return _sessionChangedMessage(wavPath);
     final currentElements = container.read(elementsProvider);
     // Re-check in case the list grew during the async decode.
     if (currentElements.length >= profile.maxAudioElements) {
       return '${profile.label} profile limit of '
           '${profile.maxAudioElements} elements reached';
-    }
-    // Sum from the model fields (not wavInfo, which is absent for elements
-    // whose WAV is missing/undecoded), matching profileConflicts and the ADM
-    // dialog's budget so the three surfaces agree.
-    final totalChannels = currentElements.fold<int>(
-      0,
-      (sum, e) => sum + audioElementChannelCount(e),
-    );
-    if (totalChannels + wavInfo.channels > profile.maxChannels) {
-      return 'Adding ${wavInfo.channels} channels would exceed '
-          'the ${profile.label} profile limit of '
-          '${profile.maxChannels} total channels';
     }
     final newElement = _buildElementFromWav(
       currentElements,
@@ -305,36 +282,13 @@ Future<String?> addNewElementFromWav(
       wavInfo,
       configOverride,
     );
-    if (newElement.type == 'Object' && !profile.allowObjectBased) {
-      return 'Object-based elements are not allowed by '
-          'the ${profile.label} profile';
-    }
-    // Mixed element types, mirroring profileConflicts' mixedTypesNotAllowed —
-    // the gated pickers prevent this, but the WAV drop/picker path auto-types
-    // from the channel count and would otherwise slip a second type past a
-    // profile that forbids mixing (e.g. a Scene drop onto a Channel session
-    // under Base).
-    if (!profile.allowMixedTypes &&
-        currentElements.any((e) => e.type != newElement.type)) {
-      final existing =
-          (currentElements.map((e) => e.type).toSet().toList()..sort()).join(
-            ', ',
-          );
-      return '${profile.label} does not allow mixing element types '
-          '(adding ${newElement.type} to $existing)';
-    }
-    // Expanded channel layouts (e.g. 9.1.6) are gated by the profile's spec
-    // version, mirroring profileConflicts' elementLayoutNotAllowed — the
-    // count/budget checks above don't catch a layout the profile predates.
-    if (newElement.type == 'Channel') {
-      final layout = LoudspeakerLayout.fromDisplayName(newElement.layout);
-      if (layout != null && !profileAllowsLayout(profile, layout)) {
-        final min = minProfileForLayout(layout);
-        return 'The ${layout.displayName} layout is not allowed by the '
-            '${profile.label} profile'
-            '${min == null ? '' : ' (needs ${min.label})'}.';
-      }
-    }
+    final refusal = _profileRefusal(
+      profile,
+      currentElements,
+      newElement,
+      wavInfo.channels,
+    );
+    if (refusal != null) return refusal;
 
     final updated = [...currentElements, newElement];
     container.read(elementsProvider.notifier).set(updated);
@@ -356,6 +310,66 @@ Future<String?> addNewElementFromWav(
     return wavImportErrorMessage(wavPath, e);
   }
 }
+
+/// Why [profile] refuses [candidate], an element built from a WAV of
+/// [channels] channels, beside [others]; null when it fits. Checks the
+/// channel budget, object elements, mixed element types and the channel
+/// layout, as profileConflicts does for a whole session. The element
+/// count is the caller's check.
+String? _profileRefusal(
+  IamfProfile profile,
+  List<AudioElement> others,
+  AudioElement candidate,
+  int channels,
+) {
+  // Sum from the model fields (not wavInfo, which is absent for elements
+  // whose WAV is missing/undecoded), matching profileConflicts and the ADM
+  // dialog's budget so the three surfaces agree.
+  final totalChannels = others.fold<int>(
+    0,
+    (sum, e) => sum + audioElementChannelCount(e),
+  );
+  if (totalChannels + channels > profile.maxChannels) {
+    return 'Adding $channels channels would exceed '
+        'the ${profile.label} profile limit of '
+        '${profile.maxChannels} total channels';
+  }
+  if (candidate.type == 'Object' && !profile.allowObjectBased) {
+    return 'Object-based elements are not allowed by '
+        'the ${profile.label} profile';
+  }
+  // Mixed element types, mirroring profileConflicts' mixedTypesNotAllowed —
+  // the gated pickers prevent this, but the WAV drop/picker path auto-types
+  // from the channel count and would otherwise slip a second type past a
+  // profile that forbids mixing (e.g. a Scene drop onto a Channel session
+  // under Base).
+  if (!profile.allowMixedTypes && others.any((e) => e.type != candidate.type)) {
+    final existing = (others.map((e) => e.type).toSet().toList()..sort()).join(
+      ', ',
+    );
+    return '${profile.label} does not allow mixing element types '
+        '(adding ${candidate.type} to $existing)';
+  }
+  // Expanded channel layouts (e.g. 9.1.6) are gated by the profile's spec
+  // version, mirroring profileConflicts' elementLayoutNotAllowed — the
+  // count/budget checks above don't catch a layout the profile predates.
+  if (candidate.type == 'Channel') {
+    final layout = LoudspeakerLayout.fromDisplayName(candidate.layout);
+    if (layout != null && !profileAllowsLayout(profile, layout)) {
+      final min = minProfileForLayout(layout);
+      return 'The ${layout.displayName} layout is not allowed by the '
+          '${profile.label} profile'
+          '${min == null ? '' : ' (needs ${min.label})'}.';
+    }
+  }
+  return null;
+}
+
+/// The message for an import dropped because the session changed while
+/// its file was read ([SessionNotifier.sessionGuard]).
+String _sessionChangedMessage(String wavPath) =>
+    '"${p.basename(wavPath)}" was not imported: the session changed '
+    'while it was being read';
 
 void _recalcDuration(ProviderContainer container, List<AudioElement> elements) {
   // Audio duration in seconds (longest element), but the transport
@@ -393,7 +407,8 @@ void _recalcDuration(ProviderContainer container, List<AudioElement> elements) {
 /// playback is silent.
 ///
 /// Mirrors the per-element logic in [SessionNotifier._syncElementsToEngine]
-/// — if the engine sync protocol changes, update both.
+/// and its push of the active mix's settings — if the engine sync
+/// protocol changes, update both.
 String? _syncElementToEngine(
   ProviderContainer container,
   AudioElement element,
@@ -423,10 +438,22 @@ String? _syncElementToEngine(
     );
     return 'Engine failed to load "${p.basename(element.wavPath!)}"';
   }
-  // Register element type with OAR renderer and commit so the
-  // change takes effect immediately (including during playback).
+  // Register element type with OAR renderer. The add left the element
+  // included at 0 dB mix gain and the type call gave it OAR's default
+  // rendering config, so push the active sub-mix's settings for it,
+  // then commit so the change takes effect immediately (including
+  // during playback).
   final (oarType, oarSubType, oarCh) = elementToOarType(element);
   engine.setElementType(element.id, oarType, oarSubType, oarCh);
+  engine.setElementChannelOrder(element.id, elementChannelOrder(element));
+  final sub = activeSubMixOf(
+    container.read(mixesNotifierProvider),
+    container.read(activeMixProvider),
+    container.read(activeSubMixProvider),
+  );
+  if (sub != null) {
+    stageElementMixSettings(engine, element, sub.settingsFor(element.id));
+  }
   engine.commitRenderingConfig();
   engine.setElementGain(element.id, element.gain);
   engine.setElementMute(element.id, element.mute);
@@ -453,7 +480,8 @@ class ElementsView extends ConsumerWidget {
 
 /// Replace an element in the elements list by ID and sync
 /// audio-critical properties (gain, mute, solo) to the C++ engine.
-void _updateElementById(WidgetRef ref, AudioElement updated) {
+@visibleForTesting
+void updateElementById(WidgetRef ref, AudioElement updated) {
   final elems = ref.read(elementsProvider);
   final idx = elems.indexWhere((e) => e.id == updated.id);
   if (idx < 0) return;
@@ -472,6 +500,18 @@ void _updateElementById(WidgetRef ref, AudioElement updated) {
   if (typeChanged) {
     final (oarType, oarSubType, oarCh) = elementToOarType(updated);
     engine.setElementType(updated.id, oarType, oarSubType, oarCh);
+    engine.setElementChannelOrder(updated.id, elementChannelOrder(updated));
+    // The type call gives the element OAR's default rendering config;
+    // stage the active sub-mix's again and commit.
+    final sub = activeSubMixOf(
+      ref.read(mixesNotifierProvider),
+      ref.read(activeMixProvider),
+      ref.read(activeSubMixProvider),
+    );
+    if (sub != null) {
+      stageElementMixSettings(engine, updated, sub.settingsFor(updated.id));
+      engine.commitRenderingConfig();
+    }
   }
   if (updated.gain != previous.gain) {
     engine.setElementGain(updated.id, updated.gain);
@@ -581,7 +621,11 @@ class _TimelineState extends ConsumerState<_Timeline> {
                 // overlap track controls).
                 // Panel + label-gutter backdrop: one strip so the
                 // gutter column reads continuously across the video
-                // row, add slot, and below the last track.
+                // row, add slot, and below the last track. Its right
+                // border is the divider the resize handle moves: 1 px,
+                // as the panel borders are, and as the border under the
+                // video is (ES-1009). It lies inside the gutter's 6 px
+                // right padding.
                 Positioned(
                   left: 0,
                   top: 0,
@@ -590,9 +634,7 @@ class _TimelineState extends ConsumerState<_Timeline> {
                   child: Container(
                     decoration: BoxDecoration(
                       color: trackPanelStripColor(),
-                      border: Border(
-                        right: BorderSide(color: T.border, width: 0.5),
-                      ),
+                      border: Border(right: BorderSide(color: T.border)),
                     ),
                   ),
                 ),
@@ -763,30 +805,14 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
   bool _editing = false;
   bool _editingGain = false;
 
+  // From aeTypeColor, as the handle and the lane are, so an element of a
+  // type the session loader does not recognise is drawn in one colour.
   WaveformStyle get _style {
-    switch (widget.element.type) {
-      case 'Object':
-        return WaveformStyle.object;
-      case 'Channel':
-        return WaveformStyle.channel;
-      case 'Scene':
-        return WaveformStyle.scene;
-      default:
-        return WaveformStyle.object;
-    }
-  }
-
-  String get _typeGlyph {
-    switch (widget.element.type) {
-      case 'Object':
-        return '\u25C9'; // ◉
-      case 'Channel':
-        return '\u2630'; // ☰
-      case 'Scene':
-        return '\u25CE'; // ◎
-      default:
-        return '\u25C9';
-    }
+    final color = aeTypeColor(widget.element.type);
+    return WaveformStyle(
+      waveColor: color,
+      rmsColor: color.withValues(alpha: 0.31),
+    );
   }
 
   Future<void> _onDragDone(DropDoneDetails details) async {
@@ -812,6 +838,9 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
     ref
         .read(lastImportDirProvider.notifier)
         .set(p.dirname(wavFiles.first.path));
+    // The native menu stays usable behind the format dialog, so another
+    // session can be opened before the replace is confirmed.
+    final sameSession = ref.read(sessionProvider.notifier).sessionGuard();
 
     // Resolve an ambiguous channel count before replacing (ES-152). The
     // different-count / same-count / undecodable decision lives in
@@ -852,7 +881,7 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
     );
     if (replacePlan.aborted) return; // Cancelled — keep the element.
     final configOverride = replacePlan.override;
-    if (!mounted) return;
+    if (!mounted || !sameSession()) return;
 
     final err = await assignWavToElement(
       ProviderScope.containerOf(context, listen: false),
@@ -860,6 +889,7 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
       wavPath,
       configOverride: configOverride,
     );
+    if (!mounted || !sameSession()) return;
 
     final fyis = <String>[];
     if (wavFiles.length > 1) {
@@ -895,7 +925,7 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
   }
 
   void _updateElement(AudioElement updated) {
-    _updateElementById(ref, updated);
+    updateElementById(ref, updated);
   }
 
   void _toggleSolo() {
@@ -1026,6 +1056,7 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
   Widget build(BuildContext context) {
     final elem = widget.element;
     final cache = widget.cache;
+    final laneLabels = _gutterLaneLabels(elem);
     final trackScale = ref.watch(
       timelineViewportProvider.select((v) => v.trackScale),
     );
@@ -1059,7 +1090,8 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Row 1: type icon + name + delete
+                  // Row 1: drag handle + name + delete. The type glyph
+                  // is on the format chip below.
                   Row(
                     children: [
                       ReorderableDragStartListener(
@@ -1073,10 +1105,10 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
                               height: 24,
                               child: Center(
                                 child: Text(
-                                  _typeGlyph,
+                                  '\u2630', // ☰
                                   style: TextStyle(
                                     fontSize: T.fontHeading,
-                                    color: Color(elem.color),
+                                    color: aeTypeColor(elem.type),
                                   ),
                                 ),
                               ),
@@ -1291,7 +1323,11 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
                       if (widget.gutterWidth > 0)
                         _ChannelLabelGutter(
                           width: widget.gutterWidth,
-                          labels: _gutterLaneLabels(elem),
+                          labels: laneLabels,
+                          tooltips: channelLaneTooltips(
+                            elem.layout,
+                            laneLabels,
+                          ),
                         ),
                       Expanded(
                         child: Padding(
@@ -1302,12 +1338,16 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
                               borderRadius: BorderRadius.circular(T.radiusMd),
                               border: Border.all(
                                 color: _isDragOver
-                                    ? Color(elem.color).withValues(alpha: 0.6)
+                                    ? aeTypeColor(
+                                        elem.type,
+                                      ).withValues(alpha: 0.6)
                                     : Colors.transparent,
                                 width: 1.5,
                               ),
                               color: _isDragOver
-                                  ? Color(elem.color).withValues(alpha: 0.06)
+                                  ? aeTypeColor(
+                                      elem.type,
+                                    ).withValues(alpha: 0.06)
                                   : null,
                             ),
                             child: elem.wavPath != null && elem.wavInfo != null
@@ -1322,7 +1362,7 @@ class _AudioTrackState extends ConsumerState<_AudioTrack> {
                                         ? 'Drop WAV file'
                                         : 'No WAV file',
                                     isDragOver: _isDragOver,
-                                    accentColor: Color(elem.color),
+                                    accentColor: aeTypeColor(elem.type),
                                   ),
                           ),
                         ),
@@ -1412,10 +1452,17 @@ double _channelGutterWidth(BuildContext context, List<AudioElement> elements) {
 /// the waveform rows via [MultiChannelWaveform.laneHeight], never
 /// overlapping audio.
 class _ChannelLabelGutter extends StatelessWidget {
-  const _ChannelLabelGutter({required this.width, required this.labels});
+  const _ChannelLabelGutter({
+    required this.width,
+    required this.labels,
+    required this.tooltips,
+  });
 
   final double width;
   final List<String> labels;
+
+  /// One tooltip per label, from [channelLaneTooltips].
+  final List<String> tooltips;
 
   @override
   Widget build(BuildContext context) {
@@ -1469,7 +1516,7 @@ class _ChannelLabelGutter extends StatelessWidget {
                             height: chHeight,
                             fontSize: fontSize,
                             show: show,
-                            tooltip: channelFullName(labels[i]),
+                            tooltip: tooltips[i],
                           ),
                         ),
                     ],
@@ -1523,7 +1570,6 @@ class _TimelineWaveformState extends ConsumerState<_TimelineWaveform> {
     super.didUpdateWidget(old);
     if (old.element.wavPath != widget.element.wavPath ||
         old.element.wavGeneration != widget.element.wavGeneration ||
-        old.element.color != widget.element.color ||
         old.element.type != widget.element.type ||
         old.element.layout != widget.element.layout ||
         old.element.gain != widget.element.gain ||
@@ -1536,7 +1582,7 @@ class _TimelineWaveformState extends ConsumerState<_TimelineWaveform> {
 
   void _rebuildStableChild() {
     final elem = widget.element;
-    _blockColor = Color(elem.color);
+    _blockColor = aeTypeColor(elem.type);
     _infoLabel = fileInfoLabel(
       elem.wavInfo!,
       p.basename(elem.wavPath!),
@@ -1680,12 +1726,16 @@ class _TimelineWaveformState extends ConsumerState<_TimelineWaveform> {
 }
 
 /// Theme-aware scrim for the region past a track's end of media; see
-/// [T.pastEndScrim] for the per-theme rationale.
-class _PastEndScrim extends StatelessWidget {
+/// [T.pastEndScrim] for the per-theme rationale. Built as a const
+/// instance, so it watches the theme itself.
+class _PastEndScrim extends ConsumerWidget {
   const _PastEndScrim();
 
   @override
-  Widget build(BuildContext context) => ColoredBox(color: T.pastEndScrim);
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(themeModeProvider);
+    return ColoredBox(color: T.pastEndScrim);
+  }
 }
 
 /// Shift the timeline viewport by a fractional delta and suppress
@@ -1902,11 +1952,16 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
     if (wavFiles.isNotEmpty) {
       ref.read(lastImportDirProvider.notifier).set(p.dirname(wavFiles.first));
     }
-    await _importBatch(wavFiles, rejected);
+    await _importBatch(
+      wavFiles,
+      rejected,
+      ref.read(sessionProvider.notifier).sessionGuard(),
+    );
   }
 
   Future<void> _pickAndAdd() async {
     final initialDir = ref.read(lastImportDirProvider);
+    final sameSession = ref.read(sessionProvider.notifier).sessionGuard();
     final result = await FilePicker.pickFiles(
       dialogTitle: 'Select WAV files to add as Audio Elements',
       type: FileType.custom,
@@ -1914,7 +1969,7 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
       allowMultiple: true,
       initialDirectory: initialDir,
     );
-    if (result == null) return;
+    if (result == null || !mounted || !sameSession()) return;
     final wavFiles = result.files
         .map((f) => f.path)
         .whereType<String>()
@@ -1922,14 +1977,21 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
     if (wavFiles.isNotEmpty) {
       ref.read(lastImportDirProvider.notifier).set(p.dirname(wavFiles.first));
     }
-    await _importBatch(wavFiles, 0);
+    await _importBatch(wavFiles, 0, sameSession);
   }
 
   /// Import [wavFiles] as new audio elements, capping at the active
   /// IAMF profile's element limit, and surface a single aggregated
   /// notice describing any skipped / failed items. [rejectedByExt]
   /// counts files that were dropped but didn't pass the WAV filter.
-  Future<void> _importBatch(List<String> wavFiles, int rejectedByExt) async {
+  /// The batch stops without a notice once [sameSession] fails, as it
+  /// does when another session is opened from the native menu while
+  /// the batch's dialogs are up.
+  Future<void> _importBatch(
+    List<String> wavFiles,
+    int rejectedByExt,
+    bool Function() sameSession,
+  ) async {
     // Deliberate snapshot: one profile for the whole batch (pre-filter,
     // dialogs, sticky map) keeps the run self-consistent even if the
     // profile changes mid-batch; addNewElementFromWav re-reads the live
@@ -2000,7 +2062,7 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
     // the batch with the session untouched.
     final overrides = plan.overrides;
     profile = plan.profile;
-    if (!mounted) return;
+    if (!mounted || !sameSession()) return;
     if (profile != startProfile) {
       Log.i(
         LogCat.elements,
@@ -2017,6 +2079,7 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
     final failures = <String, int>{};
     final container = ProviderScope.containerOf(context, listen: false);
     for (final path in toImport) {
+      if (!sameSession()) return;
       final err = await addNewElementFromWav(
         container,
         path,
@@ -2026,6 +2089,7 @@ class _AddNewTrackSlotState extends ConsumerState<_AddNewTrackSlot> {
         failures.update(err, (n) => n + 1, ifAbsent: () => 1);
       }
     }
+    if (!mounted || !sameSession()) return;
 
     final notices = <String>[];
     if (rejectedByExt > 0) {
@@ -2794,17 +2858,21 @@ class _TrackTypeParams extends ConsumerWidget {
   /// an element's type/layout — and apply its result: the routing
   /// matrix plus an optional format change.
   Future<void> _openFormatDialog(BuildContext context, WidgetRef ref) async {
+    // A session loaded while the dialog is open can reuse this
+    // element's id; its result must not land on that element (ES-868).
+    final sameSession = ref.read(sessionProvider.notifier).sessionGuard();
     final result = await showRoutingMatrixDialog(
       context: context,
       element: element,
       profile: ref.read(iamfProfileProvider),
     );
     if (!context.mounted || result == null) return; // Cancel
+    if (!sameSession()) return;
     // Patch the live element, not the constructor-frozen `element`
     // snapshot: this widget doesn't rebuild while the dialog is open,
     // so applying the result to the snapshot would silently revert any
     // concurrent edit (gain, mute, a WAV reload) when
-    // _updateElementById wholesale-replaces the provider entry.
+    // updateElementById wholesale-replaces the provider entry.
     final elems = ref.read(elementsProvider);
     final idx = elems.indexWhere((e) => e.id == element.id);
     if (idx < 0) return; // Deleted while the dialog was open.
@@ -2902,21 +2970,18 @@ class _TrackTypeParams extends ConsumerWidget {
   }
 
   void _updateElem(WidgetRef ref, AudioElement updated) {
-    _updateElementById(ref, updated);
+    updateElementById(ref, updated);
   }
 }
 
-/// Clickable element-format chip — the entry point for the Format &
+/// Clickable element-format chip, the entry point for the Format &
 /// Routing dialog, which owns type/layout switching.
 ///
-/// Same pill species as the passive [AeTypeBadge] in the mix and
-/// renderer views (shared [aeTypePill] body), full-width, with a
-/// trailing matrix glyph announcing what's behind the click — the
-/// routing-matrix dialog. The glyph doubles as the routing-state cue:
-/// purple (the matrix cells' colour) when a custom input routing is
-/// active, type-coloured otherwise. Rests on the neutral control
-/// background like the S/M buttons beside it — the type tint appears
-/// only on hover and press.
+/// Drawn as a dropdown control ([SelectorChrome]): the type glyph in the
+/// type colour, the config label in the control's ink, and a trailing
+/// matrix glyph for the routing-matrix dialog behind the click. The
+/// matrix glyph is purple (the matrix cells' colour) when a custom input
+/// routing is active and takes the caret colour otherwise.
 class _FormatChip extends StatefulWidget {
   final AudioElement element;
   final VoidCallback onTap;
@@ -2929,18 +2994,11 @@ class _FormatChip extends StatefulWidget {
 
 class _FormatChipState extends State<_FormatChip> {
   bool _hover = false;
-  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
     final el = widget.element;
-    final color = aeTypeColor(el.type);
     final routed = el.inputRouting != null;
-    final fill = _pressed
-        ? color.withValues(alpha: 0.20)
-        : _hover
-        ? color.withValues(alpha: 0.12)
-        : T.bgControls;
     // One tooltip for the whole chip: a nested tooltip on the glyph
     // would stack with this one (hover reaches every MouseRegion whose
     // bounds contain the pointer, not just the innermost).
@@ -2952,34 +3010,32 @@ class _FormatChipState extends State<_FormatChip> {
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         onEnter: (_) => setState(() => _hover = true),
-        onExit: (_) => setState(() {
-          _hover = false;
-          _pressed = false;
-        }),
+        onExit: (_) => setState(() => _hover = false),
         child: GestureDetector(
           onTap: widget.onTap,
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) => setState(() => _pressed = false),
-          onTapCancel: () => setState(() => _pressed = false),
-          child: aeTypePill(
-            type: el.type,
-            label: el.configLabel,
-            height: 24,
-            expand: true,
-            fill: fill,
-            borderColor: _hover || _pressed
-                ? color.withValues(alpha: 0.6)
-                : T.borderStrong,
-            fontSize: T.fontBody,
-            trailing: [
-              Icon(
-                Icons.grid_on,
-                size: T.iconXs,
-                color: routed
-                    ? T.purple
-                    : color.withValues(alpha: _hover ? 1.0 : 0.7),
-              ),
-            ],
+          child: Container(
+            height: SelectorChrome.height,
+            padding: SelectorChrome.padding,
+            decoration: SelectorChrome.decoration(hover: _hover, dim: 1),
+            child: Row(
+              children: [
+                AeTypeGlyph(type: el.type, size: T.iconXs),
+                const SizedBox(width: T.gapSm),
+                Expanded(
+                  child: Text(
+                    el.configLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: SelectorChrome.labelStyle(1),
+                  ),
+                ),
+                Icon(
+                  Icons.grid_on,
+                  size: T.iconXs,
+                  color: routed ? T.purple : SelectorChrome.caretColor(1),
+                ),
+              ],
+            ),
           ),
         ),
       ),

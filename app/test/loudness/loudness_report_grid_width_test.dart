@@ -80,11 +80,9 @@ const _mixes = [
 final _traces = MixMeasureTraces(
   momentaryLufs: Float32List(0),
   shortTermLufs: Float32List(0),
-  shortTermPeakDbfs: Float32List(0),
   shortTermPsrDb: Float32List(0),
   limiterGrDb: Float32List.fromList([119.9, 119.9]),
   loudnessRangeLu: -119.9,
-  lraStable: true,
 );
 
 const _scalars = (

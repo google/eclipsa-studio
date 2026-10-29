@@ -12,85 +12,204 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import 'package:flutter/material.dart';
+import 'dart:math' as math;
 
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../state.dart';
 import '../theme.dart';
 
-/// Icon for an audio-element type ('Object' / 'Scene' / 'Channel').
-/// Shared by [AeTypeBadge] and the format pickers so every surface
-/// speaks the same visual language.
-IconData aeTypeIcon(String type) {
-  final t = type.toLowerCase();
-  if (t.contains('object')) return Icons.circle;
-  if (t.contains('scene')) return Icons.blur_on;
-  return Icons.speaker_group;
-}
-
-/// Theme colour for an audio-element type.
-Color aeTypeColor(String type) {
-  final t = type.toLowerCase();
-  if (t.contains('object')) return T.typeObject;
-  if (t.contains('scene')) return T.typeScene;
-  return T.typeChannel;
-}
-
-/// Shared pill body for the passive [AeTypeBadge] and interactive
-/// variants (the elements-view format chip): tinted rounded container
-/// with the type icon and a label in the type colour.
+/// Glyph for an audio-element type ('Object' / 'Scene' / 'Channel'),
+/// shared by [AeTypeBadge], the elements-view format chip and the format
+/// pickers.
 ///
-/// [fill] overrides the default 12 % type tint — interactive hosts
-/// pass a neutral rest colour and tint on hover / press; [borderColor]
-/// adds the 0.5-wide border every clickable console surface carries
-/// (passive badges stay borderless); [trailing] appends state or
-/// action glyphs after the label. With [expand] the label claims all
-/// remaining width (full-width button hosts) instead of
-/// shrink-wrapping (inline badge).
-Widget aeTypePill({
-  required String type,
-  required String label,
-  List<Widget> trailing = const [],
-  double? height,
-  Color? fill,
-  Color? borderColor,
-  double? fontSize,
-  bool expand = false,
-  EdgeInsetsGeometry padding = const EdgeInsets.symmetric(
-    horizontal: T.gapPair,
-    vertical: 2,
-  ),
-}) {
-  final color = aeTypeColor(type);
-  final text = Text(
-    label,
-    overflow: TextOverflow.ellipsis,
-    style: TextStyle(fontSize: fontSize ?? T.fontCaption, color: color),
+/// Channel is a loudspeaker, a Material icon. Object draws a source on
+/// an orbit ([_OrbitGlyphPainter]) and Scene four first-order lobes
+/// ([_SceneGlyphPainter]). [color] defaults to [aeTypeColor].
+///
+/// Watches the theme so a `const` call site still repaints in the new
+/// type colour on a theme switch.
+class AeTypeGlyph extends ConsumerWidget {
+  final String type;
+  final double size;
+  final Color? color;
+
+  const AeTypeGlyph({
+    super.key,
+    required this.type,
+    required this.size,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(themeModeProvider);
+    final c = color ?? aeTypeColor(type);
+    final t = type.toLowerCase();
+    Widget painted(CustomPainter painter) => SizedBox.square(
+      dimension: size,
+      child: CustomPaint(painter: painter),
+    );
+    if (t.contains('object')) return painted(_OrbitGlyphPainter(c));
+    if (t.contains('scene')) return painted(_SceneGlyphPainter(c));
+    return Icon(Icons.speaker, size: size, color: c);
+  }
+}
+
+/// The object glyph: a source on an orbit around a listener. A ring of
+/// outer radius r and stroke r/5, open for 1.5 rad around its
+/// upper-right point, a disc of radius r/2.6 centred on the ring's
+/// stroke at that point, and a disc of radius r/6 at the centre.
+///
+/// r is 20/24 of half the box, as for [_SceneGlyphPainter].
+class _OrbitGlyphPainter extends CustomPainter {
+  final Color color;
+
+  const _OrbitGlyphPainter(this.color);
+
+  /// Angle of the source on the ring: upper right, with y pointing down.
+  static const double _sourceAngle = -math.pi / 4;
+
+  /// Half the ring's opening around the source, in radians.
+  static const double _gap = 0.75;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = size.center(Offset.zero);
+    final r = size.shortestSide * 10 / 24;
+    final w = r / 5;
+    final ringRadius = r - w / 2;
+    canvas.drawArc(
+      Rect.fromCircle(center: c, radius: ringRadius),
+      _sourceAngle + _gap,
+      2 * math.pi - 2 * _gap,
+      false,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = w,
+    );
+    final fill = Paint()..color = color;
+    final source =
+        c + Offset(math.cos(_sourceAngle), math.sin(_sourceAngle)) * ringRadius;
+    canvas.drawCircle(source, r / 2.6, fill);
+    canvas.drawCircle(c, r / 6, fill);
+  }
+
+  @override
+  bool shouldRepaint(_OrbitGlyphPainter old) => old.color != color;
+}
+
+/// The scene glyph: four discs of radius r/2 on the horizontal and
+/// vertical axes, each passing through the centre. These are the polar
+/// patterns of the first-order X and Y ambisonic components (r = cos θ
+/// is a circle through the origin). They are filled with the even-odd
+/// rule, so the lens where two adjacent discs overlap stays empty.
+///
+/// The glyph spans 2r, 20/24 of the box: the extent of a Material
+/// icon's glyph in its 24 px box, so it draws at the size of the Channel
+/// glyph.
+class _SceneGlyphPainter extends CustomPainter {
+  final Color color;
+
+  const _SceneGlyphPainter(this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = size.center(Offset.zero);
+    final h = size.shortestSide * 5 / 24;
+    final path = Path()..fillType = PathFillType.evenOdd;
+    for (final d in [
+      Offset(0, -h),
+      Offset(h, 0),
+      Offset(0, h),
+      Offset(-h, 0),
+    ]) {
+      path.addOval(Rect.fromCircle(center: c + d, radius: h));
+    }
+    canvas.drawPath(path, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(_SceneGlyphPainter old) => old.color != color;
+}
+
+/// One line of an element card's details: a glyph and a label, with no
+/// fill or border.
+///
+/// The Mix strip draws one for the element type; the Renderer card
+/// stacks them for the element type, the mix gain and the headphones
+/// rendering, and `MixStatusBadge` draws the "Not in mix presentation"
+/// line with it. The label draws at `fontBody` in `textSecondary`
+/// ([numeric] labels use [valueStyle]); [dim] draws it in
+/// `textTertiary`, for the headphones line under the gain line, and
+/// [color] replaces either.
+///
+/// Watches the theme and the font size so a `const` call site still
+/// rebuilds with the new colours and sizes.
+class ElementDetailRow extends ConsumerWidget {
+  /// Size the callers draw [glyph] at, so every line's glyph matches.
+  static const double glyphSize = T.iconSm;
+
+  /// Label style of a detail line; [dim] for `textTertiary`.
+  static TextStyle labelStyle({bool dim = false}) => TextStyle(
+    fontSize: T.fontBody,
+    color: dim ? T.textTertiary : T.textSecondary,
   );
-  return Container(
-    height: height,
-    padding: padding,
-    decoration: BoxDecoration(
-      color: fill ?? color.withValues(alpha: 0.12),
-      borderRadius: BorderRadius.circular(T.radiusSm),
-      border: borderColor == null
-          ? null
-          : Border.all(color: borderColor, width: 0.5),
-    ),
-    child: Row(
-      mainAxisSize: expand ? MainAxisSize.max : MainAxisSize.min,
+
+  /// Numeric values: [T.monoFamily] at `fontSmall`, one step under the
+  /// labels, because the monospace family draws larger than the UI font
+  /// at the same size.
+  static TextStyle valueStyle({bool dim = false}) => labelStyle(
+    dim: dim,
+  ).copyWith(fontFamily: T.monoFamily, fontSize: T.fontSmall);
+
+  final Widget glyph;
+  final String label;
+
+  /// Draws the label with [valueStyle].
+  final bool numeric;
+  final bool dim;
+
+  /// Label colour in place of the style's.
+  final Color? color;
+
+  const ElementDetailRow({
+    super.key,
+    required this.glyph,
+    required this.label,
+    this.numeric = false,
+    this.dim = false,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(themeModeProvider);
+    ref.watch(fontSizeModeProvider);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(aeTypeIcon(type), size: 10, color: color),
-        const SizedBox(width: 4),
-        if (expand) Expanded(child: text) else Flexible(child: text),
-        ...trailing,
+        glyph,
+        const SizedBox(width: T.gapPair),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: (numeric ? valueStyle(dim: dim) : labelStyle(dim: dim))
+                .copyWith(color: color),
+          ),
+        ),
       ],
-    ),
-  );
+    );
+  }
 }
 
-/// Compact audio-element type + layout label.
-///
-/// Shows "Object · Mono", "Channel · 7.1.4", "Scene · 3OA", etc.
-/// Styled to match _BinauralSettings: bgControls pill with icon.
+/// Audio-element type and layout line of the Mix and Renderer cards:
+/// "Object · Mono", "Channel · 7.1.4", "Scene · 3OA", with the type
+/// glyph in the type colour.
 class AeTypeBadge extends StatelessWidget {
   final String type;
   final String layout;
@@ -99,6 +218,9 @@ class AeTypeBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return aeTypePill(type: type, label: '$type · $layout');
+    return ElementDetailRow(
+      glyph: AeTypeGlyph(type: type, size: ElementDetailRow.glyphSize),
+      label: '$type · $layout',
+    );
   }
 }

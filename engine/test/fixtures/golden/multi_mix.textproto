@@ -11,9 +11,7 @@ ia_sequence_header_metadata {
 codec_config_metadata {
   codec_config_id: 200
   codec_config {
-    codec_id: CODEC_ID_LPCM
     num_samples_per_frame: 1024
-    audio_roll_distance: 0
     decoder_config_lpcm {
       sample_format_flags: LPCM_LITTLE_ENDIAN
       sample_size: 24
@@ -34,8 +32,6 @@ audio_element_metadata {
       output_gain_is_present_flag: 0
       recon_gain_is_present_flag: 0
       reserved_a: 0
-      substream_count: 1
-      coupled_substream_count: 1
     }
   }
 }
@@ -52,8 +48,6 @@ audio_element_metadata {
       output_gain_is_present_flag: 0
       recon_gain_is_present_flag: 0
       reserved_a: 0
-      substream_count: 1
-      coupled_substream_count: 1
     }
   }
 }
@@ -75,7 +69,9 @@ mix_presentation_metadata {
           param_definition_mode: 1
           reserved: 0
         }
-        default_mix_gain: -768
+        default_mix_gain_db {
+          q7_dot8: -768
+        }
       }
     }
     audio_elements {
@@ -91,7 +87,9 @@ mix_presentation_metadata {
           param_definition_mode: 1
           reserved: 0
         }
-        default_mix_gain: 0
+        default_mix_gain_db {
+          q7_dot8: 0
+        }
       }
     }
     output_mix_gain {
@@ -101,7 +99,9 @@ mix_presentation_metadata {
         param_definition_mode: 1
         reserved: 0
       }
-      default_mix_gain: -384
+      default_mix_gain_db {
+        q7_dot8: -384
+      }
     }
     layouts {
       loudness_layout {
@@ -138,7 +138,9 @@ mix_presentation_metadata {
           param_definition_mode: 1
           reserved: 0
         }
-        default_mix_gain: 512
+        default_mix_gain_db {
+          q7_dot8: 512
+        }
       }
     }
     output_mix_gain {
@@ -148,7 +150,9 @@ mix_presentation_metadata {
         param_definition_mode: 1
         reserved: 0
       }
-      default_mix_gain: 0
+      default_mix_gain_db {
+        q7_dot8: 0
+      }
     }
     layouts {
       loudness_layout {
@@ -171,6 +175,8 @@ audio_frame_metadata {
   wav_filename: "bed.wav"
   samples_to_trim_at_end: 0
   samples_to_trim_at_start: 0
+  samples_to_trim_at_start_includes_codec_delay: false
+  samples_to_trim_at_end_includes_padding: false
   audio_element_id: 300
   channel_metadatas: [{ channel_id: 0 channel_label: CHANNEL_LABEL_L_2 }, { channel_id: 1 channel_label: CHANNEL_LABEL_R_2 }]
 }
@@ -178,6 +184,8 @@ audio_frame_metadata {
   wav_filename: "vocal.wav"
   samples_to_trim_at_end: 0
   samples_to_trim_at_start: 0
+  samples_to_trim_at_start_includes_codec_delay: false
+  samples_to_trim_at_end_includes_padding: false
   audio_element_id: 301
   channel_metadatas: [{ channel_id: 0 channel_label: CHANNEL_LABEL_L_2 }, { channel_id: 1 channel_label: CHANNEL_LABEL_R_2 }]
 }

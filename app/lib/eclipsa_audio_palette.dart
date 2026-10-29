@@ -20,15 +20,11 @@ import 'package:flutter/material.dart';
 ///
 /// The greyscale symbol uses [grey400], [grey500] and [grey600] with a
 /// [black] or [white] core; the wordmark is [black] on a light ground
-/// and [white] on a dark one. Outside the logo the app uses [grey500]
-/// and [grey700] for the caption beside it on the landing screen.
+/// and [white] on a dark one.
 class EclipsaAudioPalette {
   EclipsaAudioPalette._();
 
   static const Color black = Color(0xFF000000);
-
-  /// Grey 700.
-  static const Color grey700 = Color(0xFF5F6368);
 
   /// Grey 600.
   static const Color grey600 = Color(0xFF80868B);

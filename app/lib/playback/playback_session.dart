@@ -46,6 +46,19 @@ class MixApplication {
   final Set<int> approximatedElementIds;
 }
 
+/// The element mix gain of each element [mix] includes, by audio element
+/// id, without the sub-mix output mix gain that [computeMixApplication]
+/// folds in: what the Renderer view's cards show beside the output mix
+/// gain footer. Falls back to the first-sub-mix convenience list when
+/// [mix] has no enriched sub-mixes, as [computeMixApplication] does.
+Map<int, double> elementMixGainsDb(IamfMixPresentation mix) => {
+  if (mix.subMixes.isEmpty)
+    for (final el in mix.elements) el.audioElementId: el.defaultGainDb
+  else
+    for (final sm in mix.subMixes)
+      for (final el in sm.elements) el.audioElementId: el.defaultGainDb,
+};
+
 /// Compute the engine application of [mix] for a session whose decoded
 /// audio elements are [sessionElementIds]. Falls back to the
 /// first-sub-mix convenience list when [mix] has no enriched sub-mixes
@@ -149,7 +162,7 @@ List<double> computeMixMeterScales(
   ];
 }
 
-/// Value for the renderer view's read-only OUTPUT MIX GAIN readout in
+/// Value for the renderer view's read-only output mix gain readout in
 /// Playback (ES-293), extracted from the widget so the branches are
 /// unit-testable. `show` is false when there is no session, no active
 /// presentation, or the presentation carries no sub-mixes. `gainDb` is
@@ -159,10 +172,9 @@ List<double> computeMixMeterScales(
 ({bool show, double? gainDb}) playbackOutputMixGainReadout(
   PlaybackSession? session,
 ) {
-  final mps = session?.report.mixPresentations ?? const [];
-  final idx = session?.activeMixIndex ?? -1;
-  if (idx < 0 || idx >= mps.length) return (show: false, gainDb: null);
-  final subs = mps[idx].subMixes;
+  final mix = session?.selectedMix;
+  if (mix == null) return (show: false, gainDb: null);
+  final subs = mix.subMixes;
   if (subs.isEmpty) return (show: false, gainDb: null);
   final first = subs.first.outputMixGainDb;
   final agree = subs.every((s) => s.outputMixGainDb == first);
@@ -197,6 +209,15 @@ class PlaybackSession {
   /// output layout — OAR renders to the selected monitoring target, not
   /// the file's native layout (see [PlaybackSessionNotifier.open]).
   final int activeMixIndex;
+
+  /// The mix presentation at [activeMixIndex], or null when the index
+  /// is outside `report.mixPresentations`.
+  IamfMixPresentation? get selectedMix {
+    final mps = report.mixPresentations;
+    return activeMixIndex >= 0 && activeMixIndex < mps.length
+        ? mps[activeMixIndex]
+        : null;
+  }
 
   /// Stream info from the engine's IAMF session. `sampleRate` and
   /// `totalFrames` come from

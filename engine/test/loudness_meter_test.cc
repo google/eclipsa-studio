@@ -80,13 +80,13 @@ constexpr uint32_t Ms(uint32_t ms) { return (kSampleRate * ms) / 1000u; }
 
 // ── Silence ───────────────────────────────────────────────────────────────
 //
-// With pure silence the analyzer reports a very-low loudness sentinel
-// (kMinDBFS ≈ -10000 LKFS) for every loudness field — it does NOT return
-// nullopt the way one might expect from the absolute -70 LKFS gate. Our
-// wrapper passes that sentinel through unchanged, so the -120 fallback in
-// LoudnessMeter::update_state() is effectively unreachable for steady
-// silence. We just assert each field is quieter than -50 LKFS, which is
-// well below any musical signal but well above the sentinel.
+// Every 400 ms block of silence falls below the absolute -70 LKFS gate.
+// The analyzer then returns its kMinLKFS floor (-10000 LKFS) for
+// integrated loudness; it returns nullopt only before the first block.
+// LoudnessMeter::publish() passes the floor through, so its -120 fallback
+// does not apply to 1 s of silence. The test asserts that integrated
+// loudness, momentary loudness and true peak are each below -50, well
+// above the floor.
 
 TEST(LoudnessMeterTest, SilenceProducesVeryLowReadings) {
   LongBuf b(Ms(1000));  // 1 s of silence — past the 400 ms momentary gate.

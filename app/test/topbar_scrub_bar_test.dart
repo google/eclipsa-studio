@@ -22,8 +22,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// Which tabs carry the transport scrub bar in the topbar, and that
-/// the bar seeks and follows the theme there (ES-35, ES-783).
+/// The topbar carries the transport scrub bar on every tab, and the
+/// bar seeks and follows the theme there (ES-35, ES-783, ES-988).
 void main() {
   tearDown(() => T.setMode(T.defaultMode));
 
@@ -61,75 +61,44 @@ void main() {
     return container;
   }
 
-  test('showsScrubBar: every Playback tab, every Creator tab but Elements', () {
-    for (final tab in WorkspaceTabs.allowedIn(WorkspaceMode.playback)) {
-      expect(showsScrubBar(WorkspaceMode.playback, tab), isTrue, reason: tab);
+  for (final mode in [WorkspaceMode.creator, WorkspaceMode.playback]) {
+    for (final tab in WorkspaceTabs.allowedIn(mode)) {
+      testWidgets('${mode.name}, $tab tab: bar', (tester) async {
+        await pumpTopbar(tester, mode: mode, tab: tab);
+        expect(find.byType(TransportScrubBar), findsOneWidget);
+      });
     }
-    expect(
-      showsScrubBar(WorkspaceMode.creator, WorkspaceTabs.elements),
-      isFalse,
-    );
-    expect(showsScrubBar(WorkspaceMode.creator, WorkspaceTabs.mix), isTrue);
-    expect(
-      showsScrubBar(WorkspaceMode.creator, WorkspaceTabs.renderer),
-      isTrue,
-    );
-    expect(showsScrubBar(WorkspaceMode.none, WorkspaceTabs.elements), isFalse);
-  });
-
-  for (final (mode, tab, shown) in [
-    (WorkspaceMode.creator, WorkspaceTabs.elements, false),
-    (WorkspaceMode.creator, WorkspaceTabs.mix, true),
-    (WorkspaceMode.creator, WorkspaceTabs.renderer, true),
-    (WorkspaceMode.playback, WorkspaceTabs.renderer, true),
-    (WorkspaceMode.playback, WorkspaceTabs.inspector, true),
-  ]) {
-    testWidgets('${mode.name}, $tab tab: ${shown ? 'bar' : 'no bar'}', (
-      tester,
-    ) async {
-      await pumpTopbar(tester, mode: mode, tab: tab);
-      expect(
-        find.byType(TransportScrubBar),
-        shown ? findsOneWidget : findsNothing,
-      );
-    });
   }
 
-  testWidgets('switching from Elements to Renderer adds the bar in place', (
-    tester,
-  ) async {
-    final container = await pumpTopbar(
+  testWidgets('the landing screen has no bar', (tester) async {
+    await pumpTopbar(
       tester,
-      mode: WorkspaceMode.creator,
+      mode: WorkspaceMode.none,
       tab: WorkspaceTabs.elements,
     );
     expect(find.byType(TransportScrubBar), findsNothing);
-    container.read(activeTabProvider.notifier).set(WorkspaceTabs.renderer);
-    await tester.pump();
-    expect(find.byType(TransportScrubBar), findsOneWidget);
-    container.read(activeTabProvider.notifier).set(WorkspaceTabs.elements);
-    await tester.pump();
-    expect(find.byType(TransportScrubBar), findsNothing);
   });
 
-  testWidgets('a tap on the bar in the Renderer tab seeks the transport', (
-    tester,
-  ) async {
-    final container = await pumpTopbar(
+  for (final tab in WorkspaceTabs.allowedIn(WorkspaceMode.creator)) {
+    testWidgets('a tap on the bar in the $tab tab seeks the transport', (
       tester,
-      mode: WorkspaceMode.creator,
-      tab: WorkspaceTabs.renderer,
-    );
-    final duration = container.read(transportProvider).durationSamples;
-    expect(duration, greaterThan(0));
-    expect(container.read(transportAnalyzingProvider), isFalse);
+    ) async {
+      final container = await pumpTopbar(
+        tester,
+        mode: WorkspaceMode.creator,
+        tab: tab,
+      );
+      final duration = container.read(transportProvider).durationSamples;
+      expect(duration, greaterThan(0));
+      expect(container.read(transportAnalyzingProvider), isFalse);
 
-    final bar = tester.getRect(find.byType(TransportScrubBar));
-    await tester.tapAt(Offset(bar.left + bar.width / 2, bar.center.dy));
-    await tester.pump();
-    final pos = container.read(transportProvider).samplePosition;
-    expect((pos - duration / 2).abs(), lessThan(duration * 0.01));
-  });
+      final bar = tester.getRect(find.byType(TransportScrubBar));
+      await tester.tapAt(Offset(bar.left + bar.width / 2, bar.center.dy));
+      await tester.pump();
+      final pos = container.read(transportProvider).samplePosition;
+      expect((pos - duration / 2).abs(), lessThan(duration * 0.01));
+    });
+  }
 
   testWidgets('a loop region shows on the bar as a band', (tester) async {
     final container = await pumpTopbar(

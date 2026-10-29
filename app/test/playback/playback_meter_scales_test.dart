@@ -18,7 +18,7 @@
 // reflect the selected presentation's mix gains (which the engine
 // applies after the per-element meter tap), and
 // playbackOutputMixGainReadout (ES-293), the resolution behind the
-// renderer view's read-only OUTPUT MIX GAIN footer.
+// renderer view's read-only output mix gain footer.
 
 import 'dart:math' as math;
 
@@ -179,6 +179,33 @@ void main() {
         _presentation(const [sub6]),
       ], activeMixIndex: 1);
       expect(playbackOutputMixGainReadout(s), (show: true, gainDb: 6.0));
+    });
+  });
+
+  // The Renderer view's Playback cards show each element's mix gain
+  // beside the output mix gain footer. The element figures must not
+  // include the sub-mix output gain, and the footer must not include
+  // any element gain (ES-1006).
+  test('elementMixGainsDb leaves out the sub-mix output gain', () {
+    final mix = _presentation([
+      const IamfSubMixInfo(
+        elements: [
+          IamfMixElementGain(audioElementId: 11, defaultGainDb: -3),
+          IamfMixElementGain(audioElementId: 12, defaultGainDb: 2),
+        ],
+        outputMixGainDb: -6,
+      ),
+      const IamfSubMixInfo(
+        elements: [IamfMixElementGain(audioElementId: 13, defaultGainDb: 0)],
+        outputMixGainDb: 4,
+      ),
+    ]);
+    expect(elementMixGainsDb(mix), {11: -3.0, 12: 2.0, 13: 0.0});
+    // The engine still applies the two folded.
+    expect(computeMixApplication(mix, [11, 12, 13]).gainsByElementId, {
+      11: -9.0,
+      12: -4.0,
+      13: 4.0,
     });
   });
 }

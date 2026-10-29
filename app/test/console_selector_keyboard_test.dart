@@ -25,7 +25,9 @@ import 'package:flutter_test/flutter_test.dart';
 // assistive technology (ES-572): Tab reaches the trigger, Enter, Space
 // and the arrow keys open the menu with focus on the selected row, the
 // arrow keys walk the rows, Enter picks one, Escape closes, and the
-// trigger is a button whose value is the selected label.
+// trigger is a button whose value is the selected label. The focus
+// ring follows key presses only, and a menu the pointer opens hands
+// focus back when it closes.
 void main() {
   tearDown(() => T.setMode(T.defaultMode));
 
@@ -150,6 +152,62 @@ void main() {
     expect(triggerFocused(tester), isTrue);
     await key(tester, LogicalKeyboardKey.enter);
     expect(find.byType(MenuItemButton), findsNothing);
+    // A key closed it, so focus stays for the next one.
+    expect(triggerFocused(tester), isTrue);
+  });
+
+  testWidgets('a row picked with the pointer hands focus back', (tester) async {
+    int? picked;
+    await tester.pumpWidget(host(onChanged: (v) => picked = v));
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    await tester.tap(row('5.1'));
+    await tester.pumpAndSettle();
+    expect(picked, 3);
+    expect(find.byType(MenuItemButton), findsNothing);
+    expect(triggerFocused(tester), isFalse);
+    // The keyboard still reaches the trigger.
+    await key(tester, LogicalKeyboardKey.tab);
+    expect(triggerFocused(tester), isTrue);
+  });
+
+  testWidgets('a pointer-opened menu dismissed outside hands focus back', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host());
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pumpAndSettle();
+    expect(find.byType(MenuItemButton), findsNothing);
+    expect(triggerFocused(tester), isFalse);
+  });
+
+  testWidgets('a pointer tap that closes the menu hands focus back', (
+    tester,
+  ) async {
+    await tester.pumpWidget(host());
+    await key(tester, LogicalKeyboardKey.tab);
+    await key(tester, LogicalKeyboardKey.enter);
+    expect(find.byType(MenuItemButton), findsNWidgets(3));
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    expect(find.byType(MenuItemButton), findsNothing);
+    expect(triggerFocused(tester), isFalse);
+  });
+
+  testWidgets('a pointer-opened menu picked from the keyboard keeps focus', (
+    tester,
+  ) async {
+    int? picked;
+    await tester.pumpWidget(host(onChanged: (v) => picked = v));
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    await key(tester, LogicalKeyboardKey.arrowDown);
+    await key(tester, LogicalKeyboardKey.arrowDown);
+    await key(tester, LogicalKeyboardKey.enter);
+    expect(picked, 3);
+    expect(triggerFocused(tester), isTrue);
   });
 
   testWidgets('ArrowDown on a pointer-opened menu moves focus into it', (
@@ -262,6 +320,77 @@ void main() {
       );
       await tester.pumpWidget(const SizedBox());
     }
+  });
+
+  testWidgets('a menu opened with the pointer draws no ring', (tester) async {
+    alwaysShowFocus();
+    await tester.pumpWidget(host());
+    final rest = rim(tester);
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    expect(triggerFocused(tester), isTrue);
+    expect(rim(tester), rest, reason: 'open');
+    await tester.tap(row('5.1'));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+      expect(rim(tester), rest, reason: 'frame $i after the pick');
+    }
+  });
+
+  testWidgets('a key on a pointer-opened trigger brings the ring back', (
+    tester,
+  ) async {
+    alwaysShowFocus();
+    await tester.pumpWidget(host());
+    final rest = rim(tester);
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    expect(rim(tester), rest);
+    await key(tester, LogicalKeyboardKey.enter);
+    expect(find.byType(MenuItemButton), findsNothing);
+    expect(rim(tester).color, SelectorChrome.focusColor);
+  });
+
+  testWidgets('Escape on a pointer-opened menu keeps focus and the ring', (
+    tester,
+  ) async {
+    alwaysShowFocus();
+    await tester.pumpWidget(host());
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+      expect(triggerFocused(tester), isTrue, reason: 'frame $i');
+      expect(rim(tester).color, SelectorChrome.focusColor, reason: 'frame $i');
+    }
+  });
+
+  testWidgets('a modifier key on a pointer-opened menu draws no ring', (
+    tester,
+  ) async {
+    alwaysShowFocus();
+    await tester.pumpWidget(host());
+    final rest = rim(tester);
+    await tester.tap(trigger());
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(rim(tester), rest);
+  });
+
+  testWidgets('a pointer press elsewhere hides the ring of a focused trigger', (
+    tester,
+  ) async {
+    alwaysShowFocus();
+    await tester.pumpWidget(host());
+    final rest = rim(tester);
+    await key(tester, LogicalKeyboardKey.tab);
+    expect(rim(tester).color, SelectorChrome.focusColor);
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pump();
+    expect(triggerFocused(tester), isTrue);
+    expect(rim(tester), rest);
   });
 
   testWidgets('the trigger is a button whose value is the selected label', (

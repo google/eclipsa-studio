@@ -108,52 +108,90 @@ const char* ContainerName(Container c) {
   return ::testing::AssertionSuccess();
 }
 
+// 48 frames fit in one decode tile of 256 frames; 600 cross two full tiles
+// and end in a partial one.
 TEST(ReaderMatrix, AcceptsAndDecodesEveryCell) {
-  constexpr uint32_t kFrames = 48;
   int idx = 0;
-  for (const Container container : kContainers) {
-    for (const SampleFormat format : kFormats) {
-      for (const bool extensible : {false, true}) {
-        for (const uint16_t channels : kChannelCounts) {
-          SCOPED_TRACE(std::string(ContainerName(container)) + "/" +
-                       SampleFormatName(format) +
-                       (extensible ? "/ext" : "/plain") + "/" +
-                       std::to_string(channels) + "ch");
-          wt::FixtureSpec spec;
-          spec.container = container;
-          spec.format = format;
-          spec.extensible = extensible;
-          spec.channels = channels;
-          spec.num_frames = kFrames;
-          const std::string path =
-              wt::WriteFixture("matrix_" + std::to_string(idx++), spec);
+  for (const uint32_t frames : {48u, 600u}) {
+    for (const Container container : kContainers) {
+      for (const SampleFormat format : kFormats) {
+        for (const bool extensible : {false, true}) {
+          for (const uint16_t channels : kChannelCounts) {
+            SCOPED_TRACE(std::string(ContainerName(container)) + "/" +
+                         SampleFormatName(format) +
+                         (extensible ? "/ext" : "/plain") + "/" +
+                         std::to_string(channels) + "ch");
+            wt::FixtureSpec spec;
+            spec.container = container;
+            spec.format = format;
+            spec.extensible = extensible;
+            spec.channels = channels;
+            spec.num_frames = frames;
+            const std::string path =
+                wt::WriteFixture("matrix_" + std::to_string(idx++), spec);
 
-          auto r = Reader::Open(path);
-          ASSERT_TRUE(r.ok()) << r.error();
-          const Info& info = r->info();
-          EXPECT_EQ(info.container, container);
-          EXPECT_EQ(info.format, format);
-          EXPECT_EQ(info.channels, channels);
-          EXPECT_EQ(info.sample_rate, 48000u);
-          EXPECT_EQ(info.num_frames, kFrames);
-          EXPECT_EQ(info.extensible, extensible);
-          EXPECT_EQ(info.channel_mask,
-                    extensible ? wt::FixtureChannelMask(channels) : 0u);
-          EXPECT_EQ(info.valid_bits, extensible ? BitsPerSample(format) : 0);
+            auto r = Reader::Open(path);
+            ASSERT_TRUE(r.ok()) << r.error();
+            const Info& info = r->info();
+            EXPECT_EQ(info.container, container);
+            EXPECT_EQ(info.format, format);
+            EXPECT_EQ(info.channels, channels);
+            EXPECT_EQ(info.sample_rate, 48000u);
+            EXPECT_EQ(info.num_frames, frames);
+            EXPECT_EQ(info.extensible, extensible);
+            EXPECT_EQ(info.channel_mask,
+                      extensible ? wt::FixtureChannelMask(channels) : 0u);
+            EXPECT_EQ(info.valid_bits, extensible ? BitsPerSample(format) : 0);
 
-          std::vector<std::vector<float>> f;
-          auto nf = r->ReadPlanarFloat(0, kFrames, f);
-          ASSERT_TRUE(nf.ok()) << nf.error();
-          ASSERT_EQ(*nf, kFrames);
-          EXPECT_TRUE(FloatDecodeMatches(f, format, 0, kFrames, channels));
+            std::vector<std::vector<float>> f;
+            auto nf = r->ReadPlanarFloat(0, frames, f);
+            ASSERT_TRUE(nf.ok()) << nf.error();
+            ASSERT_EQ(*nf, frames);
+            EXPECT_TRUE(FloatDecodeMatches(f, format, 0, frames, channels));
 
-          std::vector<std::vector<int32_t>> lj;
-          auto nl = r->ReadPlanarInt32LeftJustified(0, kFrames, lj);
-          ASSERT_TRUE(nl.ok()) << nl.error();
-          ASSERT_EQ(*nl, kFrames);
-          EXPECT_TRUE(LjDecodeMatches(lj, format, 0, kFrames, channels));
+            std::vector<std::vector<int32_t>> lj;
+            auto nl = r->ReadPlanarInt32LeftJustified(0, frames, lj);
+            ASSERT_TRUE(nl.ok()) << nl.error();
+            ASSERT_EQ(*nl, frames);
+            EXPECT_TRUE(LjDecodeMatches(lj, format, 0, frames, channels));
+          }
         }
       }
+    }
+  }
+}
+
+// Ranged reads that start inside a decode tile and cross tile boundaries
+// decode the same samples as a read from frame 0.
+TEST(ReaderMatrix, RangedReadsAcrossDecodeTilesAreExact) {
+  int idx = 0;
+  for (const SampleFormat format : kFormats) {
+    SCOPED_TRACE(SampleFormatName(format));
+    wt::FixtureSpec spec;
+    spec.format = format;
+    spec.channels = 3;
+    spec.num_frames = 600;
+    const std::string path =
+        wt::WriteFixture("tiles_" + std::to_string(idx++), spec);
+    auto r = Reader::Open(path);
+    ASSERT_TRUE(r.ok()) << r.error();
+
+    for (const auto& [start, count] : {std::pair<uint64_t, uint64_t>{300, 300},
+                                       std::pair<uint64_t, uint64_t>{100, 400},
+                                       std::pair<uint64_t, uint64_t>{255, 2}}) {
+      SCOPED_TRACE("start " + std::to_string(start) + " count " +
+                   std::to_string(count));
+      std::vector<std::vector<float>> f;
+      auto nf = r->ReadPlanarFloat(start, count, f);
+      ASSERT_TRUE(nf.ok()) << nf.error();
+      ASSERT_EQ(*nf, count);
+      EXPECT_TRUE(FloatDecodeMatches(f, format, start, count, 3));
+
+      std::vector<std::vector<int32_t>> lj;
+      auto nl = r->ReadPlanarInt32LeftJustified(start, count, lj);
+      ASSERT_TRUE(nl.ok()) << nl.error();
+      ASSERT_EQ(*nl, count);
+      EXPECT_TRUE(LjDecodeMatches(lj, format, start, count, 3));
     }
   }
 }

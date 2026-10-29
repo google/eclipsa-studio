@@ -31,8 +31,9 @@ import '../widgets/window_titlebar.dart';
 /// file name as [title], the platform's window controls and drag to
 /// move. Closing goes through the window controls. A
 /// [StatusbarStrip] under the picture shows [readout], the playhead
-/// and the clip's duration. So the picture lies between the two strips
-/// and only chrome meets the window's corners, as in the main window.
+/// and the clip's duration, in the middle of the strip. So the
+/// picture lies between the two strips and only chrome meets the
+/// window's corners, as in the main window.
 /// In fullscreen there is neither strip. The picture takes a
 /// double-click for fullscreen; the caller wires it. The only key the
 /// window acts on is Esc in fullscreen, which runs [onLeaveFullscreen]
@@ -124,10 +125,12 @@ class PopoutChrome extends StatelessWidget {
         if (!fullscreen)
           StatusbarStrip(
             children: [
+              const Spacer(),
               ValueListenableBuilder<String>(
                 valueListenable: readout,
                 builder: (_, text, _) => _Readout(text: text),
               ),
+              const Spacer(),
             ],
           ),
       ],

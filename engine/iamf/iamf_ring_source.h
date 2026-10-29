@@ -27,10 +27,10 @@ class PcmRing;
 /// Per-element-chain source that reads one Audio Element's decoded
 /// PCM out of a shared `IamfPlaybackSession`.
 ///
-/// Mirrors the read/seek surface of `WavReader` so the graph's
-/// `ElementChain` can hold either type behind a common contract. The
-/// session owns the decoder; the ring source is a thin view that knows
-/// its AE index and tracks its own cursor.
+/// The IAMF counterpart of `WavStream` (io/wav_stream.h): both read a
+/// ring another thread fills, and an `ElementChain` holds one or the
+/// other. The session owns the decoder; the ring source is a thin view
+/// that knows its AE index and tracks its own cursor.
 ///
 /// Seek goes through the session and therefore moves every attached
 /// ring source together — consistent with how a single stream's AEs

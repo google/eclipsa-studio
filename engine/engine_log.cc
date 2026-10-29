@@ -20,6 +20,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -176,6 +177,37 @@ void engine_log(EclipsaStudioLogLevel level, const char* cat, const char* msg) {
   // thread (see deliver_to_callback for why calling it here, on an
   // arbitrary producer thread, aborts the process).
   ring_push(level, cat, msg, /*stderr_on_drop=*/true);
+}
+
+void engine_log_lines(EclipsaStudioLogLevel level, const char* category,
+                      std::string_view text) noexcept {
+  constexpr size_t kMaxChunk = sizeof(LogEntry::message) - 1;
+  char chunk[kMaxChunk + 1];
+  while (!text.empty()) {
+    const size_t nl = text.find('\n');
+    const size_t len = nl == std::string_view::npos ? text.size() : nl;
+    std::string_view line = text;
+    line.remove_suffix(text.size() - len);
+    text.remove_prefix(nl == std::string_view::npos ? len : len + 1);
+    if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+    while (!line.empty()) {
+      size_t n = std::min(line.size(), kMaxChunk);
+      // A UTF-8 character is a lead byte and up to 3 continuation bytes
+      // (10xxxxxx). A cut before a continuation byte moves back to the
+      // lead byte, at most 3 bytes, so no entry splits a valid character
+      // and each entry before the last one of a line holds at least 508
+      // bytes, valid UTF-8 or not.
+      for (int step = 0; step < 3 && n < line.size() &&
+                         (static_cast<unsigned char>(line[n]) & 0xC0) == 0x80;
+           ++step) {
+        --n;
+      }
+      std::memcpy(chunk, line.data(), n);
+      chunk[n] = '\0';
+      engine_log(level, category, chunk);
+      line.remove_prefix(n);
+    }
+  }
 }
 
 void engine_log_rt(EclipsaStudioLogLevel level, const char* cat,

@@ -65,7 +65,8 @@ class ElementBouncer {
   /// Returns 0 on success, negative on error:
   ///   -1  failed to open input WAV
   ///   -2  failed to open output WAV
-  ///   -3  read/write error during processing
+  ///   -3  read/write error during processing, or finalizing the output
+  ///       failed
   static int32_t Bounce(const Config& config);
 };
 

@@ -94,13 +94,7 @@ IamfProbeReport _thinReport() => IamfProbeReport(
   sampleRate: 48000,
   totalSamples: 480000,
   audioElements: const [
-    IamfAe(
-      id: 1,
-      type: IamfAeType.channelBased,
-      layoutLabel: 'Stereo',
-      ambisonicsOrder: -1,
-      numChannels: 2,
-    ),
+    IamfAe(id: 1, layoutLabel: 'Stereo', ambisonicsOrder: -1, numChannels: 2),
   ],
   mixPresentations: const [
     IamfMixPresentation(
@@ -172,6 +166,7 @@ void main() {
       expect(layouts[0].layoutType, 'loudspeakers_ss_convention');
       expect(layouts[0].soundSystem, 'Stereo');
       expect(layouts[0].integratedLoudnessLufs, -16.2);
+      expect(layouts[0].digitalPeakDbfs, -1.1);
       expect(layouts[0].truePeakDbtp, -0.9);
     });
 

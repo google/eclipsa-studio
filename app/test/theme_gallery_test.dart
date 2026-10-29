@@ -14,8 +14,8 @@
 
 import 'package:eclipsa_studio/state.dart';
 import 'package:eclipsa_studio/theme.dart';
+import 'package:eclipsa_studio/widgets/mix_presentation_label.dart';
 import 'package:eclipsa_studio/widgets/theme_gallery.dart';
-import 'package:eclipsa_studio/widgets/topbar_selector.dart';
 import 'package:eclipsa_studio/widgets/transport_clock.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';

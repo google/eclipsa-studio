@@ -20,10 +20,12 @@
 // stream tests live in offline_mix_renderer_test.cc; here the point is
 // the extern "C" boundary in engine.cc.
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "engine.h"
 #include "gtest/gtest.h"
@@ -248,6 +250,49 @@ TEST(MixRendererFfiTest, FailedMeasureReturnsErrorNotSilence) {
             0);
   EXPECT_EQ(eclipsa_studio_mix_renderer_measure(r, &s.lufs, &s.tp, &s.dp), -2);
   eclipsa_studio_mix_renderer_destroy(r);
+}
+
+// The element channel order reaches the offline render (ES-960). A 9.1.6
+// WAV with a tone on channel 0 only is measured on a 9.1.6 target: in
+// OBR's alt order that channel is FLc, fed to OLR's L30 channel, whose
+// BS.1770 weight is 1.0; in OAR's order it is FL, OLR's L60 channel,
+// weighted 1.41 (+1.5 dB). Nothing else differs, so the two loudness
+// readings sit 10 * log10(1.41) = 1.49 LU apart.
+TEST(MixRendererFfiTest, ElementChannelOrderReachesTheRender) {
+  constexpr uint32_t kCh = 16;
+  // The literal, not kOarLayout916: this file exercises the C ABI alone,
+  // as the Dart isolate does.
+  constexpr uint32_t k916 = 10;  // oar_layout_t 9.1.6
+  const int frames = 2 * static_cast<int>(kSampleRate);
+  std::vector<int16_t> pcm(static_cast<size_t>(frames) * kCh, 0);
+  for (int i = 0; i < frames; ++i) {
+    const float t = static_cast<float>(i) / static_cast<float>(kSampleRate);
+    pcm[static_cast<size_t>(i) * kCh] = static_cast<int16_t>(
+        std::sin(2.0f * 3.14159265f * 997.0f * t) * 0.25f * 32767.0f);
+  }
+  const std::string src = test_wav::temp_dir() + "/ffi_916_order_src.wav";
+  ASSERT_TRUE(test_wav::write_frames_s16(src, kCh, kSampleRate, pcm));
+
+  const auto measure = [&](uint32_t order) {
+    eclipsa_studio_mix_renderer_t* r =
+        eclipsa_studio_mix_renderer_create(kSampleRate, kBufferSize, k916);
+    EXPECT_NE(r, nullptr);
+    if (r == nullptr) return Scalars{};
+    EXPECT_EQ(
+        eclipsa_studio_mix_renderer_add_element(
+            r, src.c_str(), /*element_id=*/1, /*element_type=*/0,
+            /*element_sub_type=*/k916, kCh, 0.0f, 1, 0, 0.0f, nullptr, 0, 0, 0),
+        0);
+    eclipsa_studio_mix_renderer_set_element_channel_order(r, 1, order);
+    Scalars s;
+    EXPECT_EQ(eclipsa_studio_mix_renderer_measure(r, &s.lufs, &s.tp, &s.dp), 0);
+    eclipsa_studio_mix_renderer_destroy(r);
+    return s;
+  };
+  const Scalars alt = measure(ECLIPSA_STUDIO_CHANNEL_ORDER_916_ALT);
+  const Scalars oar = measure(ECLIPSA_STUDIO_CHANNEL_ORDER_OAR);
+  EXPECT_GT(alt.lufs, -40.0f);
+  EXPECT_NEAR(oar.lufs - alt.lufs, 1.49f, 0.1f);
 }
 
 }  // namespace

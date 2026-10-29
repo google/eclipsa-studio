@@ -16,6 +16,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:three_js/three_js.dart' as three;
 
@@ -23,6 +24,7 @@ import '../theme.dart';
 import 'renderable_scene.dart';
 import 'renderer_capabilities.dart';
 import 'scene_bridge.dart';
+import 'scene_label_overlay.dart';
 import 'scene_renderer.dart';
 
 enum CameraPreset { top, front, perspective }
@@ -48,9 +50,48 @@ class ThreeJsRenderer implements SceneRenderer {
 
   final _objectMeshes = <int, three.Mesh>{};
   final _speakerMeshes = <int, three.Mesh>{};
+  final _speakerLabels = <int, String>{};
   three.Group? _objectGroup;
   three.Group? _speakerGroup;
   three.Group? _soundfieldGroup;
+
+  /// Unit cabinet shared by every speaker mesh; each mesh scales it to
+  /// its speaker's width, height and depth.
+  three.BufferGeometry? _cabinetGeo;
+
+  /// Opacity of the source and object spheres, so sources at the same
+  /// point show through each other. They write no depth, so a sphere
+  /// inside another one is drawn too.
+  static const double _sourceOpacity = 0.6;
+
+  /// Channel sources, one sphere each, reused by index; they share the
+  /// unit sphere [_sourceGeo] and scale it to their radius.
+  final _sourceMeshes = <three.Mesh>[];
+  three.Group? _sourceGroup;
+  three.BufferGeometry? _sourceGeo;
+
+  // Headphones on the listener's head (radius
+  // RenderableHeadphones.headRadius, not drawn), shown on the binaural
+  // target: earcups at ±RenderableHeadphones.cupOffset on the X axis
+  // (audio left is visualizer -X), joined by a half-ring headband over
+  // the head.
+  three.Group? _headphonesGroup;
+  three.MeshPhongMaterial? _bandMat;
+  three.MeshPhongMaterial? _leftCupMat;
+  three.MeshPhongMaterial? _rightCupMat;
+
+  /// Labels for [SceneLabelOverlay]: each speaker's label below its
+  /// cabinet, and L and R below the earcups, in logical pixels of the
+  /// scene viewport. Rebuilt in the animation loop when the camera, the
+  /// viewport or the labelled positions change.
+  final labelsNotifier = ValueNotifier<List<SceneLabel>>(const []);
+  ui.Size _viewSize = ui.Size.zero;
+  bool _labelsDirty = true;
+  final _labelCameraPos = three.Vector3();
+  final _viewPos = three.Vector3();
+
+  /// Gap below a labelled mesh to the centre of its label, in pixels.
+  static const double _labelGap = 7;
 
   // Cached soundfield mesh — topology is static, only colors/alpha
   // change per frame.
@@ -119,17 +160,17 @@ class ThreeJsRenderer implements SceneRenderer {
   double _levelSlew = 0; // smoothed derivative
   final math.Random _rng = math.Random();
 
-  // Per-speaker scratch for _tickParticles — grown to the high-water
+  // Per-source scratch for _tickParticles, grown to the high-water
   // mark and reused so the animation ticker allocates nothing per
-  // frame. Skipped speakers keep stale dir/color entries; consumers
-  // gate on spkLevel, which is rewritten for every slot each tick.
-  Float32List _spkDirX = Float32List(0);
-  Float32List _spkDirY = Float32List(0);
-  Float32List _spkDirZ = Float32List(0);
-  Float32List _spkLevel = Float32List(0);
-  Float32List _spkR = Float32List(0);
-  Float32List _spkG = Float32List(0);
-  Float32List _spkB = Float32List(0);
+  // frame. Skipped sources keep stale dir/color entries; consumers
+  // gate on _srcLevel, which is rewritten for every slot each tick.
+  Float32List _srcDirX = Float32List(0);
+  Float32List _srcDirY = Float32List(0);
+  Float32List _srcDirZ = Float32List(0);
+  Float32List _srcLevel = Float32List(0);
+  Float32List _srcR = Float32List(0);
+  Float32List _srcG = Float32List(0);
+  Float32List _srcB = Float32List(0);
 
   RenderableScene _pendingScene = const RenderableScene();
 
@@ -160,13 +201,20 @@ class ThreeJsRenderer implements SceneRenderer {
 
   /// Initialize the GL context with the given viewport [size].
   /// Must be called once before rendering.
-  void initWithSize(Size size) => _initThreeJs(size);
+  void initWithSize(Size size) {
+    _viewSize = size;
+    _initThreeJs(size);
+  }
 
   /// Build the inner three_js rendering widget.
   Widget buildInnerWidget() => _threeJs.build();
 
   /// Update the camera aspect ratio when the viewport resizes.
   void updateAspect(double width, double height) {
+    if (_viewSize.width != width || _viewSize.height != height) {
+      _viewSize = ui.Size(width, height);
+      _labelsDirty = true;
+    }
     if (_camera != null && width > 0 && height > 0) {
       _camera!.aspect = width / height;
       _camera!.updateProjectionMatrix();
@@ -236,15 +284,22 @@ class ThreeJsRenderer implements SceneRenderer {
     _soundfieldGroup = three.Group();
     _gridGroup = three.Group();
     _axesGroup = three.Group();
+    _headphonesGroup = three.Group()..visible = false;
+    _sourceGroup = three.Group();
     _scene!.add(_objectGroup!);
+    _scene!.add(_sourceGroup!);
     _scene!.add(_speakerGroup!);
     _scene!.add(_soundfieldGroup!);
     _scene!.add(_gridGroup!);
     _scene!.add(_axesGroup!);
+    _scene!.add(_headphonesGroup!);
 
+    _cabinetGeo = _buildSpeakerGeo();
+    _sourceGeo = three.SphereGeometry(1, 16, 16);
     _buildGrid();
     _buildAxes();
     _buildParticles();
+    _buildHeadphones();
 
     _initialized = true;
     // Clear SceneBridge's cross-frame timing so wavefront / animation
@@ -258,7 +313,51 @@ class ThreeJsRenderer implements SceneRenderer {
       _controls?.update();
       _updateCameraRotation();
       _tickParticles(dt);
+      _updateLabels();
     });
+  }
+
+  void _buildHeadphones() {
+    three.MeshPhongMaterial material() =>
+        three.MeshPhongMaterial({three.MaterialProperty.color: 0xFFFFFFFF});
+    final group = _headphonesGroup!;
+    _bandMat = material();
+    // TorusGeometry's arc starts on +X and turns through +Y, so a half
+    // turn runs over the head from one earcup to the other, its tube
+    // resting on the head.
+    const tube = RenderableHeadphones.bandTube;
+    group.add(
+      three.Mesh(
+        three.TorusGeometry(
+          RenderableHeadphones.headRadius + tube,
+          tube,
+          8,
+          32,
+          math.pi,
+        ),
+        _bandMat,
+      ),
+    );
+    three.MeshPhongMaterial addCup(double x) {
+      final mat = material();
+      final cup = three.Mesh(
+        three.CylinderGeometry(
+          RenderableHeadphones.cupRadius,
+          RenderableHeadphones.cupRadius,
+          RenderableHeadphones.cupDepth,
+          24,
+        ),
+        mat,
+      );
+      // CylinderGeometry's axis is Y; turn it onto X, through the ears.
+      cup.rotation.z = math.pi / 2;
+      cup.position.setValues(x, 0, 0);
+      group.add(cup);
+      return mat;
+    }
+
+    _leftCupMat = addCup(-RenderableHeadphones.cupOffset);
+    _rightCupMat = addCup(RenderableHeadphones.cupOffset);
   }
 
   void _buildGrid() {
@@ -367,12 +466,13 @@ class ThreeJsRenderer implements SceneRenderer {
     final col = _particleColorAttr!.array;
     final cdt = dt.clamp(0.001, 0.05);
 
-    final speakers = _pendingScene.speakers;
+    // The cloud follows the channel sources of the scene.
+    final sources = _pendingScene.sources;
 
     // Compute total level + rate of change for color mapping.
     var totalLevel = 0.0;
-    for (final spk in speakers) {
-      totalLevel += spk.level;
+    for (final src in sources) {
+      totalLevel += src.level;
     }
     final levelDelta = (totalLevel - _prevTotalLevel) / cdt;
     _prevTotalLevel = totalLevel;
@@ -404,7 +504,7 @@ class ThreeJsRenderer implements SceneRenderer {
     final visibleRatio = layer?.visibleRatio ?? 1.0;
 
     // Visible count scales with total level and the user ratio.
-    final levelNorm = (totalLevel / math.max(speakers.length, 1)).clamp(
+    final levelNorm = (totalLevel / math.max(sources.length, 1)).clamp(
       0.0,
       1.0,
     );
@@ -415,53 +515,53 @@ class ThreeJsRenderer implements SceneRenderer {
     final visibleCount = (levelNorm * maxVisible).round().clamp(0, maxVisible);
     _particles!.geometry!.setDrawRange(0, visibleCount);
 
-    // Pre-compute normalized speaker directions + levels.
+    // Pre-compute normalized source directions + levels.
     // Avoids redundant sqrt per particle.
-    final nSpk = speakers.length;
-    if (_spkDirX.length < nSpk) {
-      _spkDirX = Float32List(nSpk);
-      _spkDirY = Float32List(nSpk);
-      _spkDirZ = Float32List(nSpk);
-      _spkLevel = Float32List(nSpk);
-      _spkR = Float32List(nSpk);
-      _spkG = Float32List(nSpk);
-      _spkB = Float32List(nSpk);
+    final nSrc = sources.length;
+    if (_srcDirX.length < nSrc) {
+      _srcDirX = Float32List(nSrc);
+      _srcDirY = Float32List(nSrc);
+      _srcDirZ = Float32List(nSrc);
+      _srcLevel = Float32List(nSrc);
+      _srcR = Float32List(nSrc);
+      _srcG = Float32List(nSrc);
+      _srcB = Float32List(nSrc);
     }
-    final spkDirX = _spkDirX;
-    final spkDirY = _spkDirY;
-    final spkDirZ = _spkDirZ;
-    final spkLevel = _spkLevel;
-    final spkR = _spkR;
-    final spkG = _spkG;
-    final spkB = _spkB;
-    for (var s = 0; s < nSpk; s++) {
-      final sp = speakers[s];
+    final srcDirX = _srcDirX;
+    final srcDirY = _srcDirY;
+    final srcDirZ = _srcDirZ;
+    final srcLevel = _srcLevel;
+    final srcR = _srcR;
+    final srcG = _srcG;
+    final srcB = _srcB;
+    for (var s = 0; s < nSrc; s++) {
+      final src = sources[s];
       // Rewrite the level for every slot — it's the consumer-side gate
       // that makes stale dir/color entries in the reused scratch inert.
-      spkLevel[s] = sp.level;
-      if (sp.level < 0.01) continue;
-      final sx = sp.position.x;
-      final sy = sp.position.y;
-      final sz = sp.position.z;
+      srcLevel[s] = src.level;
+      if (src.level < 0.01) continue;
+      final sx = src.position.x;
+      final sy = src.position.y;
+      final sz = src.position.z;
       final d = math.sqrt(sx * sx + sy * sy + sz * sz);
       if (d > 1e-6) {
-        spkDirX[s] = sx / d;
-        spkDirY[s] = sy / d;
-        spkDirZ[s] = sz / d;
+        srcDirX[s] = sx / d;
+        srcDirY[s] = sy / d;
+        srcDirZ[s] = sz / d;
       } else {
-        spkDirX[s] = 0;
-        spkDirY[s] = 0;
-        spkDirZ[s] = 0;
+        srcDirX[s] = 0;
+        srcDirY[s] = 0;
+        srcDirZ[s] = 0;
       }
-      final hex = _colorToHex(sp.color);
-      spkR[s] = ((hex >> 16) & 0xFF) / 255.0;
-      spkG[s] = ((hex >> 8) & 0xFF) / 255.0;
-      spkB[s] = (hex & 0xFF) / 255.0;
+      final hex = _colorToHex(src.color);
+      srcR[s] = ((hex >> 16) & 0xFF) / 255.0;
+      srcG[s] = ((hex >> 8) & 0xFF) / 255.0;
+      srcB[s] = (hex & 0xFF) / 255.0;
     }
 
-    // Dipole strain: each speaker stretches the sphere along
+    // Dipole strain: each source stretches the sphere along
     // its direction.  displacement = sum_j [ level_j * stretch
-    //   * max(0, dot(particleDir, spkDir))^2 * spkDir ]
+    //   * max(0, dot(particleDir, srcDir))^2 * srcDir ]
     // Plus a uniform radial "breathing" expansion with overall
     // level.  Oscillation adds subtle organic motion.
     final stretchK = 2.0 * intensity;
@@ -475,30 +575,30 @@ class ThreeJsRenderer implements SceneRenderer {
       final dz = _pDirZ[i];
       final r = _pRestR[i];
 
-      // Displacement from dipole strain + weighted speaker color.
+      // Displacement from dipole strain + weighted source color.
       var dispX = 0.0, dispY = 0.0, dispZ = 0.0;
       var colAccR = 0.0, colAccG = 0.0, colAccB = 0.0;
       var colWeight = 0.0;
-      for (var s = 0; s < nSpk; s++) {
-        final lv = spkLevel[s];
+      for (var s = 0; s < nSrc; s++) {
+        final lv = srcLevel[s];
         if (lv < 0.01) continue;
-        final dot = dx * spkDirX[s] + dy * spkDirY[s] + dz * spkDirZ[s];
+        final dot = dx * srcDirX[s] + dy * srcDirY[s] + dz * srcDirZ[s];
         if (dot <= 0) continue;
         final scale = dot * dot * lv * stretchK * (0.15 + r);
-        dispX += spkDirX[s] * scale;
-        dispY += spkDirY[s] * scale;
-        dispZ += spkDirZ[s] * scale;
+        dispX += srcDirX[s] * scale;
+        dispY += srcDirY[s] * scale;
+        dispZ += srcDirZ[s] * scale;
 
         // Accumulate color weighted by pull strength.
         final w = dot * dot * lv;
-        colAccR += spkR[s] * w;
-        colAccG += spkG[s] * w;
-        colAccB += spkB[s] * w;
+        colAccR += srcR[s] * w;
+        colAccG += srcG[s] * w;
+        colAccB += srcB[s] * w;
         colWeight += w;
       }
 
       // Uniform radial breathing.
-      final avgLevel = speakers.isEmpty ? 0.0 : totalLevel / speakers.length;
+      final avgLevel = sources.isEmpty ? 0.0 : totalLevel / sources.length;
       final breath = avgLevel.clamp(0.0, 1.0) * breathK * (0.1 + r);
       dispX += dx * breath;
       dispY += dy * breath;
@@ -517,13 +617,13 @@ class ThreeJsRenderer implements SceneRenderer {
       pos[si + 2] = _pRestZ[i] + dispZ;
 
       // Per-particle color: blend rest color toward weighted
-      // speaker color based on pull, tinted by level dynamics.
+      // source color based on pull, tinted by level dynamics.
       if (colWeight > 0.01) {
         final inv = 1.0 / colWeight;
         final sr = colAccR * inv;
         final sg = colAccG * inv;
         final sb = colAccB * inv;
-        // Mix speaker color with dynamics tint.
+        // Mix source color with dynamics tint.
         final t = colWeight.clamp(0.0, 1.0);
         col[si] = coolR + (sr * 0.7 + tgtR * 0.3 - coolR) * t;
         col[si + 1] = coolG + (sg * 0.7 + tgtG * 0.3 - coolG) * t;
@@ -549,8 +649,110 @@ class ThreeJsRenderer implements SceneRenderer {
     if (_scene == null) return;
     _axesGroup?.visible = scene.showAxes;
     _updateObjects(scene.objects);
+    _updateSources(scene.sources);
     _updateSpeakers(scene.speakers);
+    _updateHeadphones(scene.headphones);
     _updateLayers(scene.layers);
+  }
+
+  void _updateSources(List<RenderableSource> sources) {
+    while (_sourceMeshes.length > sources.length) {
+      final mesh = _sourceMeshes.removeLast();
+      _sourceGroup!.remove(mesh);
+      // The geometry is the shared unit sphere.
+      mesh.material?.dispose();
+    }
+    for (var i = 0; i < sources.length; i++) {
+      final src = sources[i];
+      if (i == _sourceMeshes.length) {
+        final mesh = three.Mesh(
+          _sourceGeo,
+          three.MeshPhongMaterial({
+            three.MaterialProperty.color: three.Color.fromHex32(
+              _colorToHex(src.color),
+            ),
+            three.MaterialProperty.transparent: true,
+            three.MaterialProperty.opacity: _sourceOpacity,
+            three.MaterialProperty.depthWrite: false,
+          }),
+        );
+        _sourceMeshes.add(mesh);
+        _sourceGroup!.add(mesh);
+      }
+      final mesh = _sourceMeshes[i];
+      mesh.position.setValues(src.position.x, src.position.y, src.position.z);
+      mesh.scale.setValues(src.radius, src.radius, src.radius);
+      (mesh.material as three.MeshPhongMaterial).color = three.Color.fromHex32(
+        _colorToHex(src.color),
+      );
+    }
+  }
+
+  void _updateHeadphones(RenderableHeadphones? headphones) {
+    final group = _headphonesGroup;
+    if (group == null) return;
+    if (group.visible != (headphones != null)) _labelsDirty = true;
+    group.visible = headphones != null;
+    if (headphones == null) return;
+    _bandMat!.color = three.Color.fromHex32(_colorToHex(headphones.bandColor));
+    _leftCupMat!.color = three.Color.fromHex32(
+      _colorToHex(headphones.leftColor),
+    );
+    _rightCupMat!.color = three.Color.fromHex32(
+      _colorToHex(headphones.rightColor),
+    );
+  }
+
+  /// Projects the labelled positions of the latest scene into the
+  /// viewport ([sceneLabelPosition]) and publishes them on
+  /// [labelsNotifier].
+  void _updateLabels() {
+    final camera = _camera;
+    if (camera == null || _viewSize.isEmpty) return;
+    final eye = camera.position;
+    if (!_labelsDirty &&
+        eye.x == _labelCameraPos.x &&
+        eye.y == _labelCameraPos.y &&
+        eye.z == _labelCameraPos.z) {
+      return;
+    }
+    _labelsDirty = false;
+    _labelCameraPos.setValues(eye.x, eye.y, eye.z);
+    camera.updateMatrixWorld();
+    final labels = <SceneLabel>[];
+    void add(String text, double x, double y, double z, double halfHeight) {
+      final view = _viewPos
+        ..setValues(x, y, z)
+        ..applyMatrix4(camera.matrixWorldInverse);
+      final at = sceneLabelPosition(
+        viewX: view.x,
+        viewY: view.y,
+        viewZ: view.z,
+        fovDeg: camera.fov,
+        near: camera.near,
+        far: camera.far,
+        viewSize: _viewSize,
+        halfHeight: halfHeight,
+        gap: _labelGap,
+      );
+      if (at == null) return;
+      labels.add(SceneLabel(text, at));
+    }
+
+    for (final spk in _pendingScene.speakers) {
+      if (spk.label.isEmpty) continue;
+      final p = spk.position;
+      add(spk.label, p.x, p.y, p.z, spk.height / 2);
+    }
+    if (_pendingScene.headphones != null) {
+      const x = RenderableHeadphones.cupOffset;
+      const r = RenderableHeadphones.cupRadius;
+      add('L', -x, 0, 0, r);
+      add('R', x, 0, 0, r);
+    }
+    if (!listEquals(labels, labelsNotifier.value)) {
+      labelsNotifier.value = labels;
+    }
   }
 
   void _updateLayers(List<VizLayer> layers) {
@@ -868,8 +1070,10 @@ class ThreeJsRenderer implements SceneRenderer {
         .where((id) => !activeIds.contains(id))
         .toList();
     for (final id in toRemove) {
-      _objectGroup!.remove(_objectMeshes[id]!);
-      _objectMeshes.remove(id);
+      final mesh = _objectMeshes.remove(id)!;
+      _objectGroup!.remove(mesh);
+      mesh.geometry?.dispose();
+      mesh.material?.dispose();
     }
 
     for (final obj in objects) {
@@ -881,6 +1085,9 @@ class ThreeJsRenderer implements SceneRenderer {
           three.MaterialProperty.color: three.Color.fromHex32(
             _colorToHex(obj.color),
           ),
+          three.MaterialProperty.transparent: true,
+          three.MaterialProperty.opacity: _sourceOpacity,
+          three.MaterialProperty.depthWrite: false,
         });
         mesh = three.Mesh(geo, mat);
         _objectMeshes[obj.id] = mesh;
@@ -901,8 +1108,12 @@ class ThreeJsRenderer implements SceneRenderer {
         .where((id) => id >= speakers.length)
         .toList();
     for (final id in toRemove) {
-      _speakerGroup!.remove(_speakerMeshes[id]!);
-      _speakerMeshes.remove(id);
+      final mesh = _speakerMeshes.remove(id)!;
+      _speakerLabels.remove(id);
+      _speakerGroup!.remove(mesh);
+      // The geometry is the shared unit cabinet.
+      mesh.material?.dispose();
+      _labelsDirty = true;
     }
 
     for (var i = 0; i < speakers.length; i++) {
@@ -910,19 +1121,27 @@ class ThreeJsRenderer implements SceneRenderer {
       var mesh = _speakerMeshes[i];
 
       if (mesh == null) {
-        final geo = _buildSpeakerGeo(spk.width, spk.height, spk.depth);
         final mat = three.MeshPhongMaterial({
           three.MaterialProperty.color: three.Color.fromHex32(
             _colorToHex(spk.color),
           ),
           three.MaterialProperty.flatShading: true,
         });
-        mesh = three.Mesh(geo, mat);
+        mesh = three.Mesh(_cabinetGeo, mat);
         _speakerMeshes[i] = mesh;
         _speakerGroup!.add(mesh);
       }
 
+      final pos = mesh.position;
+      if (pos.x != spk.position.x ||
+          pos.y != spk.position.y ||
+          pos.z != spk.position.z ||
+          _speakerLabels[i] != spk.label) {
+        _labelsDirty = true;
+        _speakerLabels[i] = spk.label;
+      }
       mesh.position.setValues(spk.position.x, spk.position.y, spk.position.z);
+      mesh.scale.setValues(spk.width, spk.height, spk.depth);
       mesh.lookAt(three.Vector3.zero());
 
       final mat = mesh.material as three.MeshPhongMaterial;
@@ -930,14 +1149,16 @@ class ThreeJsRenderer implements SceneRenderer {
     }
   }
 
-  /// Procedural speaker cabinet: solid box with face normals.
+  /// Procedural speaker cabinet: a unit box with face normals, which
+  /// each speaker mesh scales to its speaker's size.
   ///
-  /// The mesh faces -Z in local space so that [lookAt] orients
-  /// the front face toward the origin.
-  static three.BufferGeometry _buildSpeakerGeo(double w, double h, double d) {
-    final hw = w / 2;
-    final hh = h / 2;
-    final hd = d / 2;
+  /// Each speaker mesh calls lookAt(origin), which turns the mesh's +Z
+  /// axis toward the origin. The box is one colour, so no face is drawn
+  /// as the front.
+  static three.BufferGeometry _buildSpeakerGeo() {
+    const hw = 0.5;
+    const hh = 0.5;
+    const hd = 0.5;
 
     //        Front (-Z)          Back (+Z)
     //   3 ---- 2            7 ---- 6
@@ -954,15 +1175,16 @@ class ThreeJsRenderer implements SceneRenderer {
       [-hw, hh, hd], // 7 back-top-left
     ];
 
-    // 6 faces × 2 triangles each, CCW winding + precomputed
-    // normals (axis-aligned box).
+    // 6 faces × 2 triangles each, wound counter-clockwise seen from
+    // outside the box (so the outward faces are the front faces), with
+    // precomputed normals (axis-aligned box).
     final faceData = <(List<int>, List<double>)>[
-      ([0, 1, 2, 0, 2, 3], [0, 0, -1]), // front
-      ([5, 4, 7, 5, 7, 6], [0, 0, 1]), // back
-      ([4, 0, 3, 4, 3, 7], [-1, 0, 0]), // left
-      ([1, 5, 6, 1, 6, 2], [1, 0, 0]), // right
-      ([3, 2, 6, 3, 6, 7], [0, 1, 0]), // top
-      ([4, 5, 1, 4, 1, 0], [0, -1, 0]), // bottom
+      ([0, 2, 1, 0, 3, 2], [0, 0, -1]), // front
+      ([5, 7, 4, 5, 6, 7], [0, 0, 1]), // back
+      ([4, 3, 0, 4, 7, 3], [-1, 0, 0]), // left
+      ([1, 6, 5, 1, 2, 6], [1, 0, 0]), // right
+      ([3, 6, 2, 3, 7, 6], [0, 1, 0]), // top
+      ([4, 1, 5, 4, 0, 1], [0, -1, 0]), // bottom
     ];
 
     final positions = <double>[];
@@ -1287,8 +1509,11 @@ class ThreeJsRenderer implements SceneRenderer {
       _threeJs.dispose();
     }
     cameraRotationNotifier.dispose();
+    labelsNotifier.dispose();
     _objectMeshes.clear();
     _speakerMeshes.clear();
+    _speakerLabels.clear();
+    _sourceMeshes.clear();
     _initialized = false;
   }
 

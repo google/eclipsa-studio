@@ -30,6 +30,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+
 namespace adm2iamf {
 namespace adm {
 
@@ -173,7 +175,9 @@ struct Model {
   std::vector<AudioChannelFormat> channels;
   std::vector<ChnaEntry> chna;
 
-  // Lookups by ADM id (nullptr if absent).
+  // Lookups by ADM id (nullptr if absent). Each lookup scans a vector.
+  // The import looks up through a ModelIndex; these scans are the
+  // reference adm_model_test checks the index against.
   const AudioPackFormat* Pack(const std::string& id) const;
   const AudioChannelFormat* Channel(const std::string& id) const;
   const AudioObject* Object(const std::string& id) const;
@@ -183,6 +187,32 @@ struct Model {
 
   // chna track index (1-based) for the given audioTrackUID, or 0.
   uint16_t TrackIndexForUid(const std::string& uid) const;
+};
+
+// Hash lookups over a Model, built in one pass over it. Each lookup returns
+// what the Model method of the same name returns, the first entry that
+// matches, in constant time. The index points into the model's vectors, so
+// the model must outlive the index and must not change while it is in use.
+class ModelIndex {
+ public:
+  explicit ModelIndex(const Model& model);
+  // The index points into the model, so a temporary model would leave it
+  // dangling.
+  explicit ModelIndex(Model&&) = delete;
+
+  ModelIndex(const ModelIndex&) = delete;
+  ModelIndex& operator=(const ModelIndex&) = delete;
+
+  const AudioPackFormat* Pack(const std::string& id) const;
+  const AudioChannelFormat* Channel(const std::string& id) const;
+  uint16_t TrackIndexForChannel(const std::string& channel_format_id) const;
+  uint16_t TrackIndexForUid(const std::string& uid) const;
+
+ private:
+  absl::flat_hash_map<std::string, const AudioPackFormat*> packs_;
+  absl::flat_hash_map<std::string, const AudioChannelFormat*> channels_;
+  absl::flat_hash_map<std::string, uint16_t> track_by_channel_;
+  absl::flat_hash_map<std::string, uint16_t> track_by_uid_;
 };
 
 }  // namespace adm

@@ -29,8 +29,8 @@ import '../waveform/multi_channel_waveform.dart' show standardChannelLabel;
 /// Channel orders match OBR's authoritative layout map in
 /// the `oar` Bazel module
 /// (`obr_src/obr/renderer/loudspeaker_layouts.h`), and are pinned per
-/// layout against `engine/renderer/oar_output_channels.txt` in
-/// `test/renderer/oar_output_channels_test.dart` — passing a layout's
+/// layout against `engine/renderer/channel_layouts.txt` in
+/// `test/renderer/channel_layouts_test.dart` — passing a layout's
 /// own id as [layoutHint] must return that layout's labels (ES-592).
 List<String> iamfChannelLabels({
   required int channelCount,
@@ -48,16 +48,11 @@ List<String> iamfChannelLabels({
     // OBR: L30 R30 C LFE L110 R110 UL30 UR30.
     return const ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Ltf', 'Rtf'];
   }
-  if (hint.contains('7.1.5.4')) {
-    // The engine currently registers 7.1.5.4 elements as a 16-channel
-    // OAR element, so outCh comes back 16 against a 17-channel file;
-    // use the 17-layout vocabulary either way so lane names stay
-    // 7.1.5.4 speakers, truncated when the element renders 16 lanes.
-    return [for (var i = 0; i < channelCount; i++) standardChannelLabel(i, 17)];
-  }
   if (hint.contains('7.1.2') && channelCount == 10) {
     // OBR: L30 R30 C LFE L90 R90 L135 R135 UL45 UR45.
-    return const ['L', 'R', 'C', 'LFE', 'Ls', 'Rs', 'Lrs', 'Rrs', 'Ltf', 'Rtf'];
+    return const [
+      'L', 'R', 'C', 'LFE', 'Lss', 'Rss', 'Lrs', 'Rrs', 'Ltf', 'Rtf', //
+    ];
   }
 
   // Default: reuse the waveform widget's standard IAMF labels.

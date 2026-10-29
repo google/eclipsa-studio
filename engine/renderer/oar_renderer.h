@@ -23,6 +23,8 @@
 #include <mutex>
 #include <vector>
 
+#include "renderer/channel_order.h"
+
 // Forward-declare the OAR opaque type to avoid leaking the OAR header.
 typedef struct Oar oar_t;
 
@@ -86,9 +88,18 @@ class OarRenderer {
   bool commit_rendering_config();
 
   /// Feed per-element PCM (planar float) to the renderer.
-  /// @param stride  Planar stride (capacity_frames, not active frames).
-  void update_element_data(uint32_t element_id, const float* data,
-                           uint32_t channels, uint32_t frames, uint32_t stride);
+  /// @param stride       Planar stride (capacity_frames, not active
+  ///                     frames).
+  /// @param input_order  When non-null and its channel count equals
+  ///                     `channels`, OAR input channel c takes `data`
+  ///                     channel input_order->source[c]. Null, or a
+  ///                     table of another channel count, feeds the
+  ///                     channels as they are. See
+  ///                     renderer/channel_order.h.
+  void update_element_data(
+      uint32_t element_id, const float* data, uint32_t channels,
+      uint32_t frames, uint32_t stride,
+      const eclipsa_studio::ChannelOrder* input_order = nullptr);
 
   /// Push per-element IAMF mix gain metadata to OAR via
   /// oar_update_audio_element_metadata() with ck_metadata_gain. The gain
@@ -122,7 +133,7 @@ class OarRenderer {
                                     const float* az_deg, const float* el_deg,
                                     const float* dist, uint32_t frames);
 
-  /// Push group-level IAMF mix gain (output mix gain / master fader) via
+  /// Push group-level IAMF mix gain (the output mix gain) via
   /// oar_update_metadata() with ck_metadata_gain. Same linear-ramp
   /// semantics as set_element_mix_gain — start/end in dB, OAR
   /// interpolates within the block.
@@ -146,12 +157,13 @@ class OarRenderer {
   /// thread live, the render loop offline), after render().
   void snapshot_limiter_env();
 
-  /// Output delay the limiter adds, in samples (0 when uninitialized).
-  /// The limiter is the libiamf reference peak limiter liboar carries
-  /// upstream: 5 ms look-ahead (240 samples at 48 kHz), parabolic 1 ms
-  /// attack, 200 ms release, hard clip at the ceiling. Reads an atomic
-  /// cache updated at init/rebuild — safe from any thread, never
-  /// touches the OAR instance.
+  /// Output delay the limiter adds, in samples (0 when uninitialized, or
+  /// while set_limiter_enabled(false) holds). The limiter is the libiamf
+  /// reference peak limiter liboar carries upstream: 5 ms look-ahead (240
+  /// samples at 48 kHz), parabolic 1 ms attack, 200 ms release, hard clip
+  /// at the ceiling. Reads an atomic cache updated at init/rebuild and by
+  /// set_limiter_enabled() — safe from any thread, never touches the OAR
+  /// instance.
   uint32_t limiter_delay() const {
     return limiter_delay_.load(std::memory_order_relaxed);
   }
@@ -167,6 +179,26 @@ class OarRenderer {
   /// (plain field, written under control_mutex_).
   uint32_t layout() const { return layout_; }
 
+  /// The layout the current OAR instance renders, 0 when there is none.
+  /// Reads an atomic cache stored beside channel_count_ at init/rebuild
+  /// — safe from any thread. Unlike layout(), it does not change while
+  /// a layout switch is deferred (offline-exclusive mode), so the audio
+  /// thread can pair it with channel_count() and the rendered block.
+  uint32_t rendered_layout() const {
+    return rendered_layout_.load(std::memory_order_relaxed);
+  }
+
+  /// Number of OAR instances created so far, the current one included.
+  /// A new instance starts with an empty limiter delay line and empty
+  /// filter state, so the audio thread ramps its input up from silence
+  /// when this changes (AudioGraph, ES-987). create_renderer() increments
+  /// it before rebuild() clears reconfiguring_ with a release store, so
+  /// a reader that saw is_reconfiguring() false sees the new value.
+  /// Safe from any thread.
+  uint32_t instance_generation() const {
+    return instance_generation_.load(std::memory_order_relaxed);
+  }
+
   /// Current configured buffer size (samples per channel). Atomic —
   /// safe from any thread.
   uint32_t buffer_size() const {
@@ -175,7 +207,9 @@ class OarRenderer {
 
   /// Change target layout (destroys and recreates the renderer).
   /// Safe to call from control thread — audio thread skips rendering
-  /// while reconfiguration is in progress.
+  /// while reconfiguration is in progress. A call with the layout the
+  /// current instance already renders returns true without a rebuild
+  /// (ES-987).
   bool set_layout(uint32_t layout);
 
   /// Reinitialise for a new sample rate + buffer size (engine
@@ -263,6 +297,21 @@ class OarRenderer {
   /// the live instance.
   void set_no_audio_thread() { no_audio_thread_ = true; }
 
+  /// Turn the -1 dBFS limiter of this renderer's OAR instances on or off,
+  /// for offline measurement of the unlimited render (the measure CLI's
+  /// --no-limiter). Live monitoring never calls it. The setting applies
+  /// to the current instance and to every instance a later init() or
+  /// rebuild creates. Only an instance marked set_no_audio_thread()
+  /// accepts it, before or after init(): on any other instance, built
+  /// or not, it logs an error, changes nothing and returns false, so
+  /// the live renderer keeps its limiter. A disabled limiter passes each
+  /// block through without its look-ahead delay, so limiter_delay()
+  /// reads 0 while it is off. Turning it off sets limiter_env() to 1.0,
+  /// and snapshot_limiter_env() leaves it there while the limiter is
+  /// off, so a later pass reports no gain reduction; turning it back on
+  /// resets the limiter, its envelope and its delay line.
+  bool set_limiter_enabled(bool enabled);
+
   /// Called by the audio thread when it observes is_reconfiguring()==true.
   /// Signals rebuild() that the audio thread is no longer accessing OAR.
   void acknowledge_reconfiguring() {
@@ -323,6 +372,8 @@ class OarRenderer {
   }
 
  private:
+  friend class OarRendererTestPeer;
+
   /// Default output fade length. Long enough to kill the
   /// discontinuity, short enough to be imperceptible as a fade. With
   /// large buffers a single block may span the whole fade; the ramp
@@ -333,6 +384,7 @@ class OarRenderer {
   /// gain (device not running). Generous vs. kFadeSeconds plus one
   /// buffer period at the largest supported buffer size.
   static constexpr int kFadeWaitTimeoutMs = 50;
+
   /// RAII guard: sets reconfiguring_ on construction, clears on destruction.
   struct ReconfigGuard {
     std::atomic<bool>& flag;
@@ -341,6 +393,13 @@ class OarRenderer {
     }
     ~ReconfigGuard() { flag.store(false, std::memory_order_release); }
   };
+
+  // Test seam, set through OarRendererTestPeer: while true,
+  // create_renderer() returns null as if oar_create() had failed, which
+  // it does only when an allocation fails. The flag is process-wide: it
+  // applies to every OarRenderer, including the offline renderers that
+  // create theirs on worker threads.
+  static inline std::atomic<bool> fail_create_for_testing_{false};
 
   oar_t* renderer_ = nullptr;
 
@@ -354,6 +413,14 @@ class OarRenderer {
   // init/rebuild so channel_count() never dereferences renderer_.
   // Written under control_mutex_; read from any thread.
   std::atomic<uint32_t> channel_count_{0};
+  // oar_layout_t value of the current OAR instance, 0 when there is
+  // none. Stored at the same points as channel_count_, under
+  // control_mutex_; read from any thread (the audio thread picks the
+  // monitoring channel order by it, ES-960).
+  std::atomic<uint32_t> rendered_layout_{0};
+  // See instance_generation(). Incremented in create_renderer() under
+  // control_mutex_; read from any thread.
+  std::atomic<uint32_t> instance_generation_{0};
 
   // A renderer whose teardown had to be deferred: rebuild() hit the
   // ack timeout, so the audio thread may still be inside oar_render()
@@ -397,9 +464,13 @@ class OarRenderer {
   std::atomic<double> limiter_env_{1.0};  // Audio thread writes, Dart reads.
 
   // Limiter output delay of the current OAR instance, in samples.
-  // Written under control_mutex_ at init/rebuild/shutdown; read from
-  // any thread (limiter_delay()) without touching renderer_.
+  // Written under control_mutex_ at init/rebuild/shutdown and by
+  // set_limiter_enabled(); read from any thread (limiter_delay())
+  // without touching renderer_.
   std::atomic<uint32_t> limiter_delay_{0};
+  // See set_limiter_enabled(). Written under control_mutex_; read under
+  // it by create_renderer() and without it by snapshot_limiter_env().
+  std::atomic<bool> limiter_enabled_{true};
   std::atomic<bool> reconfiguring_{false};
   std::atomic<uint64_t> ack_counter_{0};
 

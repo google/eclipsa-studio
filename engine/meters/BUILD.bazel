@@ -71,6 +71,18 @@ cc_library(
 )
 
 cc_library(
+    name = "live_loudness_meter",
+    hdrs = ["live_loudness_meter.h"],
+    srcs = ["live_loudness_meter.cc"],
+    deps = [
+        ":loudness_meter",
+        ":meter_state",
+        "//:engine_log",
+        "//graph:audio_buffer",
+    ],
+)
+
+cc_library(
     name = "meters",
     deps = [
         ":bs1770_weights",
@@ -78,6 +90,7 @@ cc_library(
         ":peak_meter",
         ":rms_meter",
         ":loudness_meter",
+        ":live_loudness_meter",
         ":channel_stats",
     ],
 )

@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <thread>
 
 #include "dsp/gain.h"
 #include "graph/audio_buffer.h"
@@ -102,6 +104,31 @@ TEST_F(GainTest, ZeroInputRemainsZeroUnderAnyGain) {
   g.reset();
   g.process(buf_, kFrames);
   EXPECT_FLOAT_EQ(peak(buf_), 0.0f);
+}
+
+// The engine sets an element's gain on the control thread while the
+// audio thread runs process() on the same node (ES-837). Under
+// --config=tsan a race on the gain targets fails this test.
+TEST_F(GainTest, SetGainWhileProcessingOnAnotherThread) {
+  dsp::Gain g;
+  std::atomic<bool> stop{false};
+  std::atomic<uint32_t> blocks{0};
+  std::thread audio([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      fill_constant(buf_, 0.5f);
+      g.process(buf_, kFrames);
+      blocks.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+  for (int i = 0; blocks.load(std::memory_order_relaxed) < 500; ++i) {
+    g.set_gain_db((i % 2) ? -6.0f : 0.0f);
+  }
+  stop.store(true, std::memory_order_relaxed);
+  audio.join();
+
+  // Every target set was 0 or -6 dB and the gain starts at unity, so
+  // the output never exceeds the input.
+  EXPECT_LE(peak(buf_), 0.5f);
 }
 
 }  // namespace

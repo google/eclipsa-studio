@@ -23,12 +23,9 @@ wght=400, opsz=18, GRAD=0 (the font's default instance), and writes
 them as a Dart constant: one outline per glyph in font units, y up,
 plus the pen position each glyph sits at in the lockup.
 
-The pen positions are not the font's advances. They were measured
-from the brand's horizontal greyscale lockup artwork rendered with the
-symbol 324 px tall (cap height 190 px): the left edge of each glyph's
-ink, converted to font units with the symbol's left edge as origin.
-They are what fixes the lockup's spacing, and they are hard-coded here
-because the artwork is not in the repo.
+The pen positions are not the font's advances. They place each glyph
+in the lockup, in font units from the left edge of the symbol's box,
+and set the lockup's spacing; GLYPHS below holds them.
 
 Google Sans is licensed under the SIL Open Font License 1.1 with no
 Reserved Font Name; third_party/fonts/google_sans/ carries the licence
@@ -62,9 +59,8 @@ TARGET = REPO / "app/lib/widgets/eclipsa_audio_wordmark_data.dart"
 UPSTREAM = "google/fonts ofl/googlesans, commit 5412d702"
 INSTANCE = {"wght": 400, "opsz": 18, "GRAD": 0}
 
-# (character, pen x in font units from the symbol box's left edge),
-# measured from the brand's lockup artwork as described above. The
-# space between "Eclipsa" and "Audio" is in the positions.
+# (character, pen x in font units from the symbol box's left edge).
+# The space between "Eclipsa" and "Audio" is in the positions.
 GLYPHS = [
     ("E", 1817),
     ("c", 2313),
@@ -88,6 +84,8 @@ HEADER = """// Copyright 2025 The Google Sans Project Authors
 // (https://github.com/googlefonts/googlesans)
 // Copyright 2026 Google LLC (the Dart transcription)
 //
+// SPDX-License-Identifier: OFL-1.1
+//
 // This Font Software is licensed under the SIL Open Font License,
 // Version 1.1. The license text is in third_party/fonts/google_sans/
 // LICENSE and, with a FAQ, at https://openfontlicense.org. This file is
@@ -99,8 +97,8 @@ HEADER = """// Copyright 2025 The Google Sans Project Authors
 //
 // Regenerate with scripts/gen_eclipsa_audio_wordmark.py, which reads
 // the glyphs out of Google Sans ({upstream}), instanced at
-// {instance}. The pen positions were measured from the Eclipsa Audio
-// lockup artwork, as the script describes.
+// {instance}. The pen positions are set in the script, not taken
+// from the font's advances.
 
 /// One glyph of the Eclipsa Audio wordmark.
 class EclipsaAudioGlyph {{

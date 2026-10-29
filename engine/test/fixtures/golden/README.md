@@ -20,6 +20,8 @@ sides:
 | `multi_mix.textproto` | Base-Enhanced: two mix presentations over the same beds with different element subsets and distinct element/output mix gains (ES-285). |
 | `multi_mix_opus.textproto` | The multi-mix session re-encoded as Opus — pins the Opus codec config contract (ES-382). |
 | `bed714.textproto` | Base-Enhanced: one 7.1.4 bed, loudness declared on both a Stereo and a 7.1.4 layout — the loudness agreement test's multichannel cell (ES-514). |
+| `bed916.textproto` | Base-Enhanced: one 9.1.6 bed, a WAV in the app's 9.1.6 order (OBR's alt order, FLc first), so the channel labels are listed per WAV index in that order; `CliEncode.Golden916AltRoundTrip` checks that WAV channel 0 decodes as FLc (ES-940, ES-960). |
+| `scene3oa.textproto` | Base-Enhanced: one third-order ambisonics scene, written as an `ambisonics_mono_config` with 16 substreams, an identity `channel_mapping` and the labels `A_0` to `A_15`; `CliEncode.GoldenScene3oaRoundTrip` checks that the probe reports a mono-mode order-3 scene with 16 substreams and the identity mapping, and that each of the 16 WAV channels, at its own level, decodes on the same ACN channel (ES-940). |
 
 Do not edit by hand — the Dart golden test defines the source configs.
 After regenerating, re-run `bazel test //...` to re-prove the round

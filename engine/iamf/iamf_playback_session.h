@@ -18,6 +18,7 @@
 #define ECLIPSA_STUDIO_IAMF_IAMF_PLAYBACK_SESSION_H_
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -26,6 +27,7 @@
 #include <thread>
 #include <vector>
 
+#include "iamf/iamf_demuxer.h"
 #include "iamf/include/iamf_tools/iamf_stream_interface.h"
 #include "iamf/pcm_ring.h"
 #include "iamf/read_only_file_map.h"
@@ -63,9 +65,13 @@
 ///       primed before `IamfRingSource::read` is first called.
 ///   3. `IamfRingSource::attach(session, ae_index)` binds a per-slot
 ///       view; multiple ring sources read from the same session.
-///   4. `seek_to_frame(pos)` posts a request; the I/O thread calls
-///       upstream `Seek`, then publishes a discard floor on every ring
-///       so the audio thread skips stale samples on its next read.
+///   4. `seek_to_frame(pos)` posts a request. The I/O thread serves it
+///       from the rings when every ring still holds `pos` (discard
+///       floors up to `pos`, pump left running), as end of stream when
+///       `pos` is at or past a known end, and otherwise with upstream
+///       `Seek` followed by a discard floor at every ring's head. In each
+///       case the audio thread skips the discarded samples on its next
+///       read.
 ///   5. `close()` (or destruction) signals the I/O thread to stop and
 ///       joins it before tearing down the stream.
 class IamfPlaybackSession {
@@ -139,11 +145,6 @@ class IamfPlaybackSession {
   /// on success, false on stream error or closed session.
   bool wait_for_scan_complete();
 
-  /// Total frames written so far across all rings (informational).
-  uint64_t pump_cursor() const {
-    return pump_cursor_.load(std::memory_order_acquire);
-  }
-
   /// Request a global seek. Posts to the I/O thread; the actual
   /// upstream `Seek` happens asynchronously. Returns true if the
   /// request was queued (session open), false if not.
@@ -175,6 +176,12 @@ class IamfPlaybackSession {
     return seek_request_count_.load(std::memory_order_acquire);
   }
 
+  /// Number of applied seeks served from frames already in the rings,
+  /// without repositioning the stream (informational).
+  uint64_t seeks_served_from_rings() const {
+    return seeks_served_from_rings_.load(std::memory_order_relaxed);
+  }
+
   /// Last upstream-prefixed error message ("malformed:" / "io:" /
   /// "unsupported:" / "decode:" / "invalid_argument:") or empty.
   /// Thread-safe — guarded by an internal mutex.
@@ -201,7 +208,20 @@ class IamfPlaybackSession {
   }
 
  private:
+  // Opens the stream over `source`'s ranges and takes ownership of it on
+  // success. `t0` is when open() started, for the timing log.
+  bool open_mp4_source(std::unique_ptr<eclipsa_studio::IamfMp4Source> source,
+                       std::chrono::steady_clock::time_point t0);
   bool configure_from_open_stream();
+  // I/O thread. Serves a seek to file frame `target` from the rings when
+  // every ring still holds it: publishes discard floors up to it and
+  // leaves the pump where it is. Returns false (nothing changed) when the
+  // stream has to seek instead.
+  bool seek_within_rings(uint64_t target);
+  // I/O thread. Serves a seek at or past the end of a stream whose
+  // duration is known: empties the rings and marks them EOF. Returns false
+  // (nothing changed) otherwise.
+  bool seek_to_end(uint64_t target);
   bool map_file(const char* path);
   void unmap_file();
 
@@ -226,8 +246,14 @@ class IamfPlaybackSession {
   // audio thread. Atomic float so the audio thread can read without
   // a lock.
   std::vector<std::atomic<float>> ae_latest_mix_gain_;
-  // Stream-level cursor advanced by the I/O thread on each successful
-  // pump; informational.
+  // File frame the next pumped frame is credited to: the target of the
+  // last stream seek (0 at open) plus every frame pumped since. Written by
+  // the I/O thread only, after the ring writes, so with rings_aligned_ each
+  // written ring's head holds the frame before it. IamfStream::Seek lands on
+  // the start of the temporal unit containing its target, so after a
+  // non-zero stream seek this runs up to one temporal unit ahead of the
+  // frames actually pumped; the offset carries unchanged through seeks
+  // served from the rings.
   std::atomic<uint64_t> pump_cursor_{0};
 
   // I/O thread + control flags.
@@ -244,6 +270,7 @@ class IamfPlaybackSession {
   // discard-floor publication (also on a failed Seek, which marks the
   // rings EOF — "applied" means "this request's outcome is visible").
   std::atomic<uint64_t> seeks_applied_{0};
+  std::atomic<uint64_t> seeks_served_from_rings_{0};
   uint64_t seek_observed_count_ = 0;     // I/O thread only
   bool scan_completion_logged_ = false;  // I/O thread only
   // One-shot-per-seek latch for the "partial temporal unit" diagnostic
@@ -252,6 +279,13 @@ class IamfPlaybackSession {
   // empty ring (it can't write zero frames), starving that AE until a
   // fresh seek. Logged once per seek so a sustained run doesn't spam.
   bool partial_tu_logged_ = false;  // I/O thread only
+  // I/O thread only. True while every written ring has received every
+  // pumped frame since the last stream seek, so ring positions map to
+  // file frames through `pump_cursor_` (see seek_within_rings()).
+  bool rings_aligned_ = true;
+  // I/O thread only. True when the pump stopped because the stream ended
+  // (not because of an error), so the rings hold every frame to the end.
+  bool pump_at_end_ = false;
   // Scan-throttle override latch — true while a ring below low-water
   // has the pump running full-speed mid-scan. Logged on transitions
   // only. I/O thread only.
@@ -273,6 +307,9 @@ class IamfPlaybackSession {
   size_t mapped_len_ = 0;
   eclipsa_studio::ReadOnlyFileMap file_map_;
   std::vector<uint8_t> owned_bytes_;
+  // Set when an MP4's IAMF track is read in place; the stream reads its
+  // ranges, so it must outlive `stream_`.
+  std::unique_ptr<eclipsa_studio::IamfMp4Source> mp4_source_;
 };
 
 #endif  // ECLIPSA_STUDIO_IAMF_IAMF_PLAYBACK_SESSION_H_

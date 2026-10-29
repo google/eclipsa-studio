@@ -58,6 +58,7 @@ import 'widgets/window_titlebar.dart';
 import 'window_state.dart';
 import 'workspace/landing_ground.dart';
 import 'workspace/landing_screen.dart';
+import 'workspace/launch_args.dart';
 import 'workspace/workspace_close.dart';
 import 'workspace/workspace_mode.dart';
 import 'widgets/licenses_dialog.dart';
@@ -78,6 +79,27 @@ Future<void> main(List<String> args) async {
   final controller = await WindowController.fromCurrentEngine();
   final arguments = controller.arguments;
   final popoutArgs = parsePopoutArgs(arguments);
+
+  // Launch parameters, parsed before the log starts so that --help does
+  // not truncate the previous run's log. The video pop-out re-enters
+  // main() with its own arguments and takes none of these.
+  final launch = popoutArgs.isVideoPopout
+      ? const LaunchArgs()
+      : parseLaunchArgs(
+          args,
+          extraArgs: Platform.executableArguments,
+          environment: Platform.environment,
+        );
+  if (launch.help) {
+    // The main window is created hidden, so nothing shows before the
+    // exit.
+    try {
+      stdout.write(launchHelp);
+      await stdout.flush();
+    } finally {
+      hardExit(0);
+    }
+  }
 
   // Start file logging (JSONL in app support directory). The
   // resolved path is logged at INFO so it shows up in `flutter run`
@@ -210,55 +232,80 @@ Future<void> main(List<String> args) async {
     await windowManager.setPreventClose(true);
   }
 
-  // Parse CLI args: --session <path>, --iamf <path>
-  // Try both main() args and Platform.executableArguments.
-  String? autoLoadSession;
-  String? autoLoadIamf;
-  final allArgs = [...args, ...Platform.executableArguments];
-  for (var i = 0; i < allArgs.length - 1; i++) {
-    if (allArgs[i] == '--session') {
-      autoLoadSession = allArgs[i + 1];
-    } else if (allArgs[i] == '--iamf') {
-      autoLoadIamf = allArgs[i + 1];
-    }
+  // Launch parameters (see workspace/launch_args.dart): one file to
+  // open, from --open / --session / --playback (old name --iamf), the
+  // environment, or startup_session.txt. A named file, even a missing
+  // one, takes the place of the last project the bootstrap below would
+  // reopen.
+  for (final note in launch.notes) {
+    Log.i(LogCat.app, 'launch: $note');
   }
-  // Also check environment variable as fallback.
-  autoLoadIamf ??= Platform.environment['ECLIPSA_STUDIO_IAMF'];
-  if (autoLoadIamf != null) {
-    Log.i(LogCat.app, 'CLI --iamf: $autoLoadIamf');
+  if (launch.unknown.isNotEmpty) {
+    Log.w(
+      LogCat.app,
+      'launch: ignored unknown options ${launch.unknown.join(' ')} '
+      '(--help lists the options)',
+    );
   }
-  // Also check environment variable as fallback.
-  autoLoadSession ??= Platform.environment['ECLIPSA_STUDIO_SESSION'];
-  // Also check a "startup command" file in app support.
-  if (autoLoadSession == null) {
-    final startupFile = File(p.join(appSupport.path, 'startup_session.txt'));
-    if (startupFile.existsSync()) {
-      autoLoadSession = startupFile.readAsStringSync().trim();
+  final launchFile = resolveLaunchFile(
+    launch,
+    exists: (path) => File(path).existsSync(),
+    readHead: _readHead,
+    takeStartupSession: () {
+      final startupFile = File(p.join(appSupport.path, 'startup_session.txt'));
+      if (!startupFile.existsSync()) return null;
+      final path = startupFile.readAsStringSync().trim();
       startupFile.deleteSync(); // one-shot
-    }
+      return path;
+    },
+  );
+  final launchLabel = '${launchFile.source} ${launchFile.path}';
+  switch (launchFile.status) {
+    case LaunchFileStatus.none:
+      break;
+    case LaunchFileStatus.session:
+      Log.i(LogCat.app, 'launch: $launchLabel -> session');
+    case LaunchFileStatus.playback:
+      Log.i(LogCat.app, 'launch: $launchLabel -> playback');
+    case LaunchFileStatus.missing:
+      Log.w(LogCat.app, 'launch: $launchLabel does not exist; not opened');
+    case LaunchFileStatus.unclassified:
+      Log.w(
+        LogCat.app,
+        'launch: $launchLabel is neither a session nor a .iamf or MP4 '
+        'file; not opened',
+      );
   }
-  // --iamf opens directly into Playback mode; it takes precedence over any
-  // resolved session (CLI / env / startup file) so the two startup paths
-  // can't fight over the workspace mode.
-  if (autoLoadIamf != null) autoLoadSession = null;
-  if (autoLoadSession != null) {
-    Log.i(LogCat.session, 'CLI --session: $autoLoadSession');
-  }
+  final autoLoadSession = launchFile.status == LaunchFileStatus.session
+      ? launchFile.path
+      : null;
+  final autoLoadIamf = launchFile.status == LaunchFileStatus.playback
+      ? launchFile.path
+      : null;
 
   // Smoke-test hook: `--quit-after-load` (or ECLIPSA_STUDIO_QUIT_AFTER_LOAD=1)
-  // exits the app once the auto-loaded session is up — exit 0 on
-  // success, 1 on load failure, 2 when no session was given to load.
-  // The exit itself happens in AppShell after the auto-load completes.
-  final quitAfterLoad =
-      allArgs.contains('--quit-after-load') ||
-      Platform.environment['ECLIPSA_STUDIO_QUIT_AFTER_LOAD'] == '1';
+  // exits the app once the launch file is open: exit 0 on success, 1 on
+  // a load failure, 2 when no file was given or it does not exist. The
+  // exit itself happens after the session load (AppShell) or the
+  // Playback open (StartupRestore) completes.
+  final quitAfterLoad = launch.quitAfterLoad;
+  if (quitAfterLoad && launchFile.status == LaunchFileStatus.unclassified) {
+    Log.e(
+      LogCat.app,
+      '--quit-after-load: ${launchFile.path} is neither a session nor a '
+      '.iamf or MP4 file — exit 1',
+    );
+    hardExit(1);
+  }
 
   // Decide the startup workspace mode and (if any) session to
   // auto-load. Creator-bootstrap is triggered by either:
-  //   (1) --session / ECLIPSA_STUDIO_SESSION / startup_session.txt pointing
-  //       at an existing file, or
+  //   (1) a launch file that is a session (--open or --session,
+  //       ECLIPSA_STUDIO_OPEN or ECLIPSA_STUDIO_SESSION, or
+  //       startup_session.txt) and exists, or
   //   (2) kReopenLastProject (default off) with a non-empty recent-
-  //       sessions list whose most-recent entry still exists.
+  //       sessions list whose most-recent entry still exists, when no
+  //       launch file was named and --quit-after-load is off.
   // Otherwise workspaceMode stays `none` and the Consumer below
   // mounts the landing screen. The resolved session path (if any)
   // is threaded through autoLoadSessionProvider so AppShell's
@@ -266,6 +313,7 @@ Future<void> main(List<String> args) async {
   // `AppShell` does not re-check kReopenLastProject.
   final bootstrap = await _computeBootstrap(
     autoLoadSession: autoLoadSession,
+    allowReopenLastProject: mayReopenLastProject(launch, launchFile),
     prefs: prefs,
   );
   Log.i(
@@ -274,11 +322,13 @@ Future<void> main(List<String> args) async {
     '${bootstrap.sessionToLoad != null ? ' (loading ${bootstrap.sessionToLoad})' : ''}',
   );
 
-  if (quitAfterLoad && bootstrap.sessionToLoad == null) {
+  if (quitAfterLoad &&
+      bootstrap.sessionToLoad == null &&
+      autoLoadIamf == null) {
     Log.e(
       LogCat.app,
-      '--quit-after-load: no session resolved '
-      '(--session not given, or the path does not exist) — exit 2',
+      '--quit-after-load: no file resolved '
+      '(none given, or the path does not exist) — exit 2',
     );
     // hardExit, not exit(): on Windows exit() runs the plugin teardown
     // that wedges instead of exiting (ES-389).
@@ -356,12 +406,15 @@ typedef _BootstrapResult = ({WorkspaceMode mode, String? sessionToLoad});
 /// provider state. The session-load happens later in AppShell's init.
 Future<_BootstrapResult> _computeBootstrap({
   required String? autoLoadSession,
+  required bool allowReopenLastProject,
   required Map<String, dynamic> prefs,
 }) async {
   if (autoLoadSession != null && File(autoLoadSession).existsSync()) {
     return (mode: WorkspaceMode.creator, sessionToLoad: autoLoadSession);
   }
-  final reopen = prefs[AppPreferences.kReopenLastProject] as bool? ?? false;
+  final reopen =
+      allowReopenLastProject &&
+      (prefs[AppPreferences.kReopenLastProject] as bool? ?? false);
   if (reopen) {
     final recents = await RecentSessions.load();
     if (recents.isNotEmpty && File(recents.first).existsSync()) {
@@ -633,5 +686,20 @@ class _EclipsaStudioAppState extends ConsumerState<EclipsaStudioApp>
         ],
       ),
     );
+  }
+}
+
+/// The first [launchSniffBytes] bytes of [path], or null when the file
+/// cannot be read (missing, or outside what the sandbox lets the app
+/// read). [classifyLaunchFile] then falls back to the extension.
+List<int>? _readHead(String path) {
+  RandomAccessFile? raf;
+  try {
+    raf = File(path).openSync();
+    return raf.readSync(launchSniffBytes);
+  } on FileSystemException {
+    return null;
+  } finally {
+    raf?.closeSync();
   }
 }

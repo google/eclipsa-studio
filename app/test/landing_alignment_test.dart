@@ -14,6 +14,7 @@
 
 import 'package:eclipsa_studio/session/session_provider.dart';
 import 'package:eclipsa_studio/theme.dart';
+import 'package:eclipsa_studio/widgets/eclipsa_studio_lockup.dart';
 import 'package:eclipsa_studio/widgets/eclipsa_studio_wordmark.dart';
 import 'package:eclipsa_studio/workspace/landing_screen.dart';
 import 'package:flutter/material.dart';
@@ -195,7 +196,7 @@ void main() {
   });
 
   testWidgets('Recent blocks align when both lists are empty', (tester) async {
-    // Exercises the max(1, ...) clamp: one slot, two aligned empty states.
+    // Two empty states, each in the first of the five reserved rows.
     await pumpLanding(tester, sessions: const [], qcFiles: const []);
     expect(recentHeaders(), findsNWidgets(2));
     expect(
@@ -218,6 +219,47 @@ void main() {
     // The empty card shows its empty-state hint in the first slot.
     expect(find.text('No recent sessions'), findsOneWidget);
   });
+
+  // The column holding the lockup and the cards is centred in the
+  // window, so a card that grew with its Recent list moved the whole
+  // group, lockup included. Every count below must give the same
+  // geometry as the empty lists.
+  for (final mode in FontSizeMode.values) {
+    testWidgets('lockup and cards keep their place as the lists grow at '
+        '${mode.label}', (tester) async {
+      T.setFontMode(mode);
+      Future<(double, Rect)> measure(List<String> sessions) async {
+        // A fresh ProviderScope per count, so the overrides take effect.
+        await tester.pumpWidget(const SizedBox());
+        await pumpLanding(
+          tester,
+          sessions: sessions,
+          qcFiles: [for (final s in sessions) s.replaceAll('.esp', '.iamf')],
+        );
+        return (
+          tester.getRect(find.byType(EclipsaStudioLockup)).top,
+          tester.getRect(find.byType(IntrinsicHeight)),
+        );
+      }
+
+      final (lockupTop, cards) = await measure(const []);
+      for (final count in [1, 5, 7]) {
+        final (top, rect) = await measure([
+          for (var i = 0; i < count; i++) '/a/s$i.esp',
+        ]);
+        expect(
+          top,
+          equals(lockupTop),
+          reason: 'lockup moved with $count recents at ${mode.label}',
+        );
+        expect(
+          rect,
+          equals(cards),
+          reason: 'cards changed size or place with $count recents',
+        );
+      }
+    });
+  }
 
   testWidgets('Recent blocks align when a list overflows the 5-slot cap', (
     tester,

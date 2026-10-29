@@ -18,6 +18,8 @@
 //   src/common/models/audio_element_types.h
 //   src/common/models/loudspeaker_layouts.h
 
+import 'layout_916.dart';
+
 // ---------------------------------------------------------------------------
 // Loudspeaker layouts
 // ---------------------------------------------------------------------------
@@ -25,7 +27,8 @@
 /// Loudspeaker layout for channel-based audio elements.
 ///
 /// Based on ITU-R BS.2051-3 configurations. Channel counts match the
-/// plugin's loudspeaker_layouts.h.
+/// plugin's loudspeaker_layouts.h. A [k9_1_6] WAV is in the app's 9.1.6
+/// order, OBR's alt order; see `layout_916.dart`.
 enum LoudspeakerLayout {
   mono,
   stereo,
@@ -63,7 +66,7 @@ enum LoudspeakerLayout {
       case LoudspeakerLayout.k7_1_4:
         return '7.1.4';
       case LoudspeakerLayout.k9_1_6:
-        return '9.1.6';
+        return kLayout916;
       case LoudspeakerLayout.k7_1_5_4:
         return '7.1.5.4';
       case LoudspeakerLayout.k10_2_9_3:
@@ -186,22 +189,6 @@ enum BinauralMode {
 int ambisonicsChannelCount(int order) {
   final n = order.clamp(1, 4);
   return (n + 1) * (n + 1);
-}
-
-/// Display name for an ambisonics order value (1–4).
-String ambisonicsOrderLabel(int order) {
-  switch (order) {
-    case 1:
-      return '1OA (4ch)';
-    case 2:
-      return '2OA (9ch)';
-    case 3:
-      return '3OA (16ch)';
-    case 4:
-      return '4OA (25ch)';
-    default:
-      return '${order}OA';
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -360,10 +347,13 @@ List<ElementConfig> validConfigsForChannelCount(int channels) {
           ambisonicsOrder: 3,
           isDual: null,
         ),
+        // A 9.1.6 WAV in the app's order, OBR's alt order (L R C LFE Lw
+        // Rw Lss Rss Lrs Rrs Ltf Rtf Lts Rts Ltr Rtr; models/
+        // layout_916.dart).
         (
           label: 'Channel · 9.1.6',
           type: 'Channel',
-          layout: '9.1.6',
+          layout: kLayout916,
           ambisonicsOrder: null,
           isDual: null,
         ),
@@ -560,18 +550,12 @@ String? configMismatchCaveat(ElementConfig cfg, int wavChannels) {
   ).any((c) => c.label == cfg.label);
   if (routable) return null;
   if (cfg.type == 'Scene') {
-    return 'Routed source channels are used as ambisonic components '
-        '(ACN 0, ACN 1, …). This type is intended for ambisonic sources.';
+    return 'Routed source channels are used as ambisonic components in '
+        'ACN/SN3D (ACN 0, ACN 1, …). This type is intended for ambisonic '
+        'sources.';
   }
   return 'Wider than the ${wavChannels}ch source, so unrouted channels '
       'stay silent.';
-}
-
-/// Returns valid [LoudspeakerLayout]s whose channel count matches [channels].
-List<LoudspeakerLayout> layoutsForChannelCount(int channels) {
-  return LoudspeakerLayout.values
-      .where((l) => l.channelCount == channels)
-      .toList();
 }
 
 /// Returns valid ambisonics orders for [channels].
@@ -583,8 +567,3 @@ List<int> ambisonicsOrdersForChannelCount(int channels) {
     4,
   ].where((o) => ambisonicsChannelCount(o) == channels).toList();
 }
-
-/// Returns whether the Object type is valid for [channels].
-/// Object: 1ch = Mono, 2ch = Dual.
-bool objectTypeValidForChannelCount(int channels) =>
-    channels == 1 || channels == 2;

@@ -24,6 +24,7 @@ import 'package:vector_math/vector_math.dart' show Vector3;
 
 import '../meters/label_painter_cache.dart';
 import '../renderer/coordinate_utils.dart';
+import '../renderer/scene_label_overlay.dart' show SceneLabelOverlay;
 import '../renderer/speaker_layout.dart';
 import '../state.dart';
 import '../theme.dart';
@@ -2512,11 +2513,9 @@ class _PositionPreviewPainter extends CustomPainter {
   static final _orientationLabelCache = LabelPainterCache(
     () => TextStyle(color: T.textSecondary, fontSize: T.fontMeter),
   );
+  // The 3D scene's speaker labels share this style.
   static final _speakerLabelCache = LabelPainterCache(
-    () => TextStyle(
-      color: T.textSecondary.withValues(alpha: 0.7),
-      fontSize: T.fontMeter,
-    ),
+    SceneLabelOverlay.labelStyle,
   );
 
   /// Paints [text] centred on [at] from [cache].

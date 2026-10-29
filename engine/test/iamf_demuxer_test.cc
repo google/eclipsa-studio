@@ -26,22 +26,26 @@
 
 #include "iamf/iamf_demuxer.h"
 
-#include <gpac/filters.h>
-#include <gpac/tools.h>
-
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "iamf/iamf_demuxer.h"
 #include "iamf/iamf_playback_session.h"
+#include "iamf/include/iamf_tools/iamf_stream_factory.h"
+#include "iamf/include/iamf_tools/iamf_stream_interface.h"
+#include "iamf/include/iamf_tools/iamf_tools_api_types.h"
+#include "test/iamf_test_mux.h"
 
 namespace {
 
 constexpr char kTwoAeFixture[] = "tones_100ms_3OA_stereo_opus.iamf";
 constexpr char kStereoFixture[] = "noise_3s_stereo_opus.iamf";
+constexpr char kVideoFixture[] = "stts_zero_tail_h264.mp4";
 
 std::string FindFixture(const char* name) {
   const char* srcdir = std::getenv("TEST_SRCDIR");
@@ -65,38 +69,7 @@ std::vector<uint8_t> LoadFile(const std::string& path) {
   return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-// Mux a bare `.iamf` into an audio-only IAMF-in-ISOBMFF `.mp4` via a libgpac
-// filter session — the same Phase-1 path IamfMuxer uses, minus the video
-// track. Returns true on success.
-bool MuxIamfToMp4(const std::string& input_iamf,
-                  const std::string& output_mp4) {
-  // Bracket gpac use with gf_sys_init / gf_sys_close, the same as IamfMuxer
-  // and IamfDemuxer do. The demuxer's gf_sys_close would otherwise tear the
-  // filter registry out from under a later test's mux that had relied on
-  // gpac being implicitly initialised.
-  if (gf_sys_init(GF_MemTrackerNone, nullptr) != GF_OK) return false;
-  GF_Err err = GF_OK;
-  bool ok = false;
-  GF_FilterSession* session = gf_fs_new_defaults(GF_FilterSessionFlags(0));
-  if (session != nullptr) {
-    GF_Filter* src =
-        gf_fs_load_source(session, input_iamf.c_str(), nullptr, nullptr, &err);
-    GF_Filter* dst = nullptr;
-    if (err == GF_OK && src != nullptr) {
-      dst = gf_fs_load_destination(session, output_mp4.c_str(), nullptr,
-                                   nullptr, &err);
-    }
-    if (err == GF_OK && dst != nullptr) {
-      err = gf_fs_run(session);
-      if (err >= GF_OK) err = gf_fs_get_last_connect_error(session);
-      if (err >= GF_OK) err = gf_fs_get_last_process_error(session);
-      ok = err >= GF_OK;
-    }
-    gf_fs_del(session);
-  }
-  gf_sys_close();
-  return ok;
-}
+using iamf_test_mux::MuxIamfToMp4;
 
 std::string TempPath(const char* name) {
   const char* dir = std::getenv("TEST_TMPDIR");
@@ -209,43 +182,125 @@ TEST(IamfDemuxerTest, RoundTripPreservesDescriptors) {
   }
 }
 
-// The probe -> session demux handoff that lets QC open parse an
-// IAMF-in-MP4 once instead of twice (ES-215).
-TEST(IamfDemuxHandoffTest, TakeReturnsStashedBytesOnceForMatchingPath) {
-  const std::vector<uint8_t> bytes = {1, 2, 3, 4, 5};
-  eclipsa_studio::StashIamfDemux("/tmp/clip.mp4", bytes);
+// Reading an IamfMp4Source's ranges in order must give exactly the bytes
+// DemuxToBytes builds, without copying the samples out of the mapping.
+TEST(IamfMp4SourceTest, RangesConcatenateToTheDemuxedBytes) {
+  for (const char* fixture : {kStereoFixture, kTwoAeFixture}) {
+    SCOPED_TRACE(fixture);
+    const std::string mp4 = BuildMp4Fixture(fixture, "mp4_source.mp4");
+    if (mp4.empty()) GTEST_SKIP() << "fixture missing or mux failed";
 
-  std::vector<uint8_t> out;
-  ASSERT_TRUE(eclipsa_studio::TakeIamfDemux("/tmp/clip.mp4", &out));
-  EXPECT_EQ(out, bytes);
+    eclipsa_studio::IamfDemuxer demuxer;
+    std::vector<uint8_t> demuxed;
+    ASSERT_TRUE(demuxer.DemuxToBytes(mp4, &demuxed)) << demuxer.last_error();
 
-  // Single use: the slot is cleared once taken, so the engine session never
-  // races a second consumer onto the same stash.
-  std::vector<uint8_t> again;
-  EXPECT_FALSE(eclipsa_studio::TakeIamfDemux("/tmp/clip.mp4", &again));
-  EXPECT_TRUE(again.empty());
+    eclipsa_studio::IamfMp4Source source;
+    std::string err;
+    ASSERT_TRUE(source.open(mp4, &err)) << err;
+    // The descriptor OBUs plus at least one sample range.
+    ASSERT_GE(source.segments().size(), 2u);
+    std::vector<uint8_t> joined;
+    for (const auto& segment : source.segments()) {
+      joined.insert(joined.end(), segment.begin(), segment.end());
+    }
+    EXPECT_EQ(source.size_bytes(), joined.size());
+    EXPECT_EQ(joined, demuxed);
+
+    source.close();
+    EXPECT_TRUE(source.segments().empty());
+    EXPECT_EQ(source.size_bytes(), 0u);
+  }
 }
 
-TEST(IamfDemuxHandoffTest, TakeMissesOnPathMismatchAndLeavesStashIntact) {
-  const std::vector<uint8_t> bytes = {9, 8, 7};
-  eclipsa_studio::StashIamfDemux("/tmp/a.mp4", bytes);
+// An MP4 with a video track interleaves IAMF samples with video samples,
+// so the track is several runs of samples with video bytes between them.
+// Decoding the in-place ranges must match decoding the demuxed bytes
+// exactly, including read windows that cross from one run to the next.
+TEST(IamfMp4SourceTest, InterleavedTrackDecodesLikeDemuxedBytes) {
+  const std::string iamf = FindFixture(kStereoFixture);
+  const std::string video = FindFixture(kVideoFixture);
+  // Both are declared as test data, so a missing one is a build error.
+  ASSERT_FALSE(iamf.empty() || video.empty()) << "fixture missing";
+  const std::string mp4 = TempPath("mp4_source_av.mp4");
+  ASSERT_TRUE(MuxIamfToMp4(iamf, mp4, video));
 
-  std::vector<uint8_t> out;
-  EXPECT_FALSE(eclipsa_studio::TakeIamfDemux("/tmp/b.mp4", &out));
-  // A non-matching take must not consume the stash — the real consumer can
-  // still claim it.
-  ASSERT_TRUE(eclipsa_studio::TakeIamfDemux("/tmp/a.mp4", &out));
-  EXPECT_EQ(out, bytes);
+  eclipsa_studio::IamfDemuxer demuxer;
+  std::vector<uint8_t> demuxed;
+  ASSERT_TRUE(demuxer.DemuxToBytes(mp4, &demuxed)) << demuxer.last_error();
+  eclipsa_studio::IamfMp4Source source;
+  std::string err;
+  ASSERT_TRUE(source.open(mp4, &err)) << err;
+  // Descriptor OBUs plus more than one run of samples.
+  EXPECT_GT(source.segments().size(), 2u);
+  std::vector<uint8_t> joined;
+  for (const auto& segment : source.segments()) {
+    joined.insert(joined.end(), segment.begin(), segment.end());
+  }
+  ASSERT_EQ(joined, demuxed);
+
+  using iamf_tools::api::IamfByteRange;
+  using iamf_tools::api::IamfStreamFactory;
+  using iamf_tools::api::IamfStreamInterface;
+  std::vector<IamfByteRange> ranges;
+  for (const auto& segment : source.segments()) {
+    ranges.push_back({segment.data(), segment.size()});
+  }
+  std::unique_ptr<IamfStreamInterface> in_place;
+  std::unique_ptr<IamfStreamInterface> from_bytes;
+  ASSERT_TRUE(IamfStreamFactory::OpenFromSegments(ranges.data(), ranges.size(),
+                                                  {}, in_place)
+                  .ok());
+  ASSERT_TRUE(IamfStreamFactory::OpenFromBytes(demuxed.data(), demuxed.size(),
+                                               {}, from_bytes)
+                  .ok());
+  int tus = 0;
+  while (true) {
+    iamf_tools::api::TemporalUnitOutput expected;
+    iamf_tools::api::TemporalUnitOutput actual;
+    ASSERT_TRUE(from_bytes->NextTemporalUnit(expected).ok());
+    ASSERT_TRUE(in_place->NextTemporalUnit(actual).ok());
+    ASSERT_EQ(actual.frames_produced, expected.frames_produced);
+    if (expected.frames_produced == 0) break;
+    ASSERT_EQ(actual.samples_per_ae, expected.samples_per_ae) << "TU " << tus;
+    ++tus;
+  }
+  EXPECT_GT(tus, 0);
 }
 
-TEST(IamfDemuxHandoffTest, StashOverwritesAndTakeRejectsNullOut) {
-  EXPECT_FALSE(eclipsa_studio::TakeIamfDemux("/tmp/x.mp4", nullptr));
+TEST(IamfMp4SourceTest, RejectsMissingFileAndNonMp4) {
+  eclipsa_studio::IamfMp4Source source;
+  std::string err;
+  EXPECT_FALSE(source.open(TempPath("does_not_exist.mp4"), &err));
+  EXPECT_NE(err.find("io:"), std::string::npos) << err;
 
-  // A fresh stash for the same path replaces the previous bytes (the producer
-  // re-parses on every probe, so the latest content always wins).
-  eclipsa_studio::StashIamfDemux("/tmp/x.mp4", {1, 1});
-  eclipsa_studio::StashIamfDemux("/tmp/x.mp4", {2, 2, 2});
-  std::vector<uint8_t> out;
-  ASSERT_TRUE(eclipsa_studio::TakeIamfDemux("/tmp/x.mp4", &out));
-  EXPECT_EQ(out, (std::vector<uint8_t>{2, 2, 2}));
+  const std::string iamf = FindFixture(kStereoFixture);
+  if (iamf.empty()) GTEST_SKIP() << "fixture missing";
+  err.clear();
+  EXPECT_FALSE(source.open(iamf, &err));
+  EXPECT_FALSE(err.empty());
+  EXPECT_TRUE(source.segments().empty());
+
+  // An MP4 with no IAMF track fails without asking for the demux fallback,
+  // which applies only when sample data is stored in another file.
+  const std::string video = FindFixture(kVideoFixture);
+  ASSERT_FALSE(video.empty()) << "fixture missing";
+  bool sample_data_external = true;
+  err.clear();
+  EXPECT_FALSE(source.open(video, &err, &sample_data_external));
+  EXPECT_NE(err.find("unsupported:"), std::string::npos) << err;
+  EXPECT_FALSE(sample_data_external);
+}
+
+TEST(IamfDemuxerTest, IndexTrackRejectsNullOutput) {
+  eclipsa_studio::IamfDemuxer demuxer;
+  EXPECT_FALSE(demuxer.IndexTrack("whatever.mp4", nullptr));
+  EXPECT_NE(demuxer.last_error().find("invalid_argument:"), std::string::npos);
+}
+
+// DemuxToBytes appends; a failed call leaves what was already there.
+TEST(IamfDemuxerTest, FailedDemuxLeavesOutputUnchanged) {
+  eclipsa_studio::IamfDemuxer demuxer;
+  std::vector<uint8_t> bytes = {7, 7, 7};
+  EXPECT_FALSE(demuxer.DemuxToBytes(TempPath("does_not_exist.mp4"), &bytes));
+  EXPECT_EQ(bytes, (std::vector<uint8_t>{7, 7, 7}));
 }

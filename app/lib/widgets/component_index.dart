@@ -31,24 +31,26 @@ const Map<String, ComponentInfo> kComponentIndex = {
         'The app\'s text button, one drawing in every theme: a box at radiusSm in two sizes (36 px regular with a fontHeading label, 28 px compact with fontSmall) and four roles. Standard is a borderStrong rim in textPrimary; affirmative is accentFill under accentInk, one per dialog footer; destructive is the rim with an errorRed label; quiet has no rim and a textSecondary label, for the cancel beside an affirmative. Hover and press tint the face in the ink, focus takes the rim, disabled dims the ink to 40%. Built on ChromePressable, not Material, so the desktop visual density does not resize it. The landing card\'s entry buttons, every dialog footer and alert action, and the inline actions in settings, the mix view and the renderer view are this widget.',
     usedIn: {
       'lib/export/iamf_export_dialog.dart': 7,
-      'lib/import/adm_import_flow.dart': 6,
+      'lib/import/adm_import_flow.dart': 7,
       'lib/views/mix_view.dart': 4,
       'lib/widgets/ok_dialog.dart': 3,
       'lib/widgets/routing_matrix_dialog.dart': 3,
       'lib/widgets/settings_dialog.dart': 3,
       'lib/workspace/workspace_close.dart': 3,
-      'lib/loudness/loudness_report_dialog.dart': 2,
       'lib/views/element_card.dart': 2,
       'lib/widgets/element_format_dialog.dart': 2,
       'lib/widgets/safety_notice_dialog.dart': 2,
       'lib/import/adm_probe_inspector.dart': 1,
+      'lib/loudness/loudness_report_dialog.dart': 1,
+      'lib/loudness/loudness_report_widgets.dart': 1,
+      'lib/loudness/qc_loudness_report_dialog.dart': 1,
       'lib/views/renderer_view.dart': 1,
       'lib/views/routing_matrix_view.dart': 1,
       'lib/widgets/dialog_shell.dart': 1,
       'lib/widgets/viz_panel.dart': 1,
       'lib/workspace/landing_screen.dart': 1,
     },
-    useCount: 43,
+    useCount: 45,
   ),
   'ConsoleToggle': ComponentInfo(
     name: 'ConsoleToggle',
@@ -69,23 +71,57 @@ const Map<String, ComponentInfo> kComponentIndex = {
     usedIn: {
       'lib/widgets/settings_dialog.dart': 4,
       'lib/loudness/loudness_report_dialog.dart': 1,
+      'lib/loudness/qc_loudness_report_dialog.dart': 1,
     },
-    useCount: 5,
+    useCount: 6,
+  ),
+  'OptionGrid': ComponentInfo(
+    name: 'OptionGrid',
+    declaredIn: 'lib/widgets/option_grid.dart',
+    summary:
+        'A closed set of choices as a grid of 24 px buttons that fills its width, one selected: rows of equal-width buttons, the column count from the width and the widest label at the current font size, so every label fits on one line. Each button is a ConsoleChip: the selected one a flat accentFill with no rim under an accentInk label, the others the theme\'s button face. An unavailable option dims its face to 40% and takes no input; its label stays readable. The Renderer view\'s output targets are one.',
+    usedIn: {'lib/views/renderer_view.dart': 1},
+    useCount: 1,
+  ),
+  'ConsoleChip': ComponentInfo(
+    name: 'ConsoleChip',
+    declaredIn: 'lib/widgets/console_chip.dart',
+    summary:
+        'A 24 px chip, selected or not, with any content: the drawing of each OptionGrid button, and the Mix view\'s mix presentation tabs, layout chips and add buttons. Selected marks a chosen thing (the active monitoring target, the active mix presentation): a flat accentFill with no rim under a w600 accentInk label, the affirmative AppButton\'s colours, in every theme. Plain marks a choice that can be clicked, or without onTap a label such as a tagged layout, in the theme\'s button face: Dark\'s raised face, Light\'s lifted RaisedFace, Classic\'s recessedWell, High Contrast\'s borderStrong outline. With onTap it is a ChromePressable with hover, press and focus drawings and a semanticLabel; without, a label at rest announced by its content. A disabled chip dims its face to 40% and keeps its label readable.',
+    usedIn: {'lib/views/mix_view.dart': 3, 'lib/widgets/option_grid.dart': 1},
+    useCount: 4,
+  ),
+  'StatusTag': ComponentInfo(
+    name: 'StatusTag',
+    declaredIn: 'lib/widgets/status_tag.dart',
+    summary:
+        'A small tag that names a state or a kind, one geometry for all: a fontCaption w600 label with 0.5 tracking, 5 by 2 px of padding at radiusSm, after an optional 11 px icon, the label\'s case kept. The ink is the caller\'s colour and the fill that colour at 12%, or textTertiary on bgControls when no colour is given; an outlined tag draws a 1 px rim at 60% and no fill. The loudness bar\'s LIVE, MOMENTARY, SHORT-TERM and TRUE PEAK, the Visualizers panel\'s EXPERIMENTAL, the Playback inspector\'s SELECTED, the Loudness Report\'s IAMF and MON, and the Most common, Coming soon and YouTube tags are this widget.',
+    usedIn: {
+      'lib/views/renderer_view.dart': 2,
+      'lib/export/iamf_export_dialog.dart': 1,
+      'lib/loudness/loudness_report_widgets.dart': 1,
+      'lib/views/inspector_view.dart': 1,
+      'lib/widgets/element_format_dialog.dart': 1,
+      'lib/widgets/viz_panel.dart': 1,
+      'lib/widgets/youtube_support_badge.dart': 1,
+    },
+    useCount: 8,
   ),
   'ConsoleSelector': ComponentInfo(
     name: 'ConsoleSelector',
     declaredIn: 'lib/widgets/console_widgets.dart',
     summary:
-        'Dropdown select for a list too long for a segmented row. Which control it draws is the theme\'s choice (ControlStyle): filled is a 32 px borderless controlBg fill at radiusSm (Dark and Light); well is a 24 px well sunk into the panel with a chromeRimDark line along its top inside edge (Classic); outlined is a 24 px controlBg box with a borderStrong border at radiusSm (High Contrast). Each has a controlFg label and caret. The top bar\'s mix presentation selector shares the same chrome through SelectorChrome.',
+        'Dropdown select for a list too long for a segmented row. Which control it draws is the theme\'s choice (ControlStyle): filled is a 24 px controlBg fill at radiusSm inside a 1 px border rim (Dark and Light); well is a 24 px well sunk into the panel with a chromeRimDark line along its top inside edge (Classic); outlined is a 24 px controlBg box with a borderStrong border at radiusSm (High Contrast). Each has a controlFg label and caret. The top bar\'s mix presentation switcher is a ConsoleSelector, 180 px wide in every theme.',
     usedIn: {
       'lib/export/iamf_export_dialog.dart': 3,
       'lib/views/mix_view.dart': 3,
       'lib/widgets/settings_dialog.dart': 3,
+      'lib/widgets/topbar.dart': 2,
       'lib/import/adm_import_flow.dart': 1,
       'lib/widgets/profile_selector.dart': 1,
       'lib/widgets/routing_matrix_dialog.dart': 1,
     },
-    useCount: 12,
+    useCount: 14,
   ),
   'ConsoleLed': ComponentInfo(
     name: 'ConsoleLed',
@@ -100,8 +136,8 @@ const Map<String, ComponentInfo> kComponentIndex = {
     declaredIn: 'lib/widgets/gain_knob.dart',
     summary:
         'Every knob in the app, and the only one placed by hand. Which instrument it draws is the theme\'s choice (KnobStyle): Dark\'s brushed disc, Light\'s Knob_a, and in knob_line_painters.dart Classic\'s bar knob (a cap in the dish with a bar across it) and High Contrast\'s outlined ring. Every knob turns through the same 270-degree sweep and shares one drag and double-tap, KnobGestures in knob_a.dart. The drawings read bgDeep, bgControls/bgHover, borderStrong, purple and the text ramp at once, so a flat swatch cannot show whether a theme keeps the knob legible.',
-    usedIn: {'lib/views/elements_view.dart': 1},
-    useCount: 1,
+    usedIn: {'lib/views/elements_view.dart': 1, 'lib/views/mix_view.dart': 1},
+    useCount: 2,
   ),
   'KnobA': ComponentInfo(
     name: 'KnobA',
@@ -131,7 +167,7 @@ const Map<String, ComponentInfo> kComponentIndex = {
     name: 'TransportClock',
     declaredIn: 'lib/widgets/transport_clock.dart',
     summary:
-        'The transport\'s position / duration readout in the top bar, in the monospace face with tabular figures, at fontBodyL in a 30 px box in every style. Four drawings by ChromeStyle: Dark\'s bare textValue text with a half-opacity slash; Light\'s 1 px chromeInk outline with chromeInk text; Classic\'s well (recessed) and High Contrast\'s 2 px chromeRimDark outline (outlined), both in textValue. The top bar binds it to the transport and the time-or-samples toggle.',
+        'The transport\'s position / duration readout in the top bar, in the monospace face with tabular figures, at fontBodyL in a 30 px box in every style. Four drawings by ChromeStyle: Dark\'s bare textValue text with a half-opacity slash; Light\'s 1 px chromeInk outline with chromeInk text; Classic\'s well (recessed) and High Contrast\'s 2 px chromeRimDark outline (outlined), both in textValue. The top bar binds it to the transport and the time-or-samples toggle, and reserves the width of the longest value the display mode shows (9:59:59.999, or ten sample digits), so the controls beside it keep their place.',
     usedIn: {'lib/widgets/topbar.dart': 1},
     useCount: 1,
   ),
@@ -155,7 +191,7 @@ const Map<String, ComponentInfo> kComponentIndex = {
     name: 'TransportScrubBar',
     declaredIn: 'lib/widgets/transport_scrub_bar.dart',
     summary:
-        'Position bar with a draggable playhead. Its fill defaults to the accent gradient and callers can override it.',
+        'Position bar with a draggable playhead. Its fill defaults to the accent gradient and callers can override it. While a Playback file\'s duration scan runs it draws an ANALYZING caption in fontCaption textGhost against its right edge in place of the track, and ignores gestures.',
     usedIn: {'lib/widgets/topbar.dart': 1},
     useCount: 1,
   ),
@@ -191,7 +227,7 @@ const Map<String, ComponentInfo> kComponentIndex = {
     name: 'Topbar',
     declaredIn: 'lib/widgets/topbar.dart',
     summary:
-        'Workspace tabs (TopbarTab), mix presentation select (TopbarSelector), transport (TransportControls) and time readout (TransportClock).',
+        'Workspace tabs (TopbarTab), mix presentation select (MixPresentationLabel and ConsoleSelector), scrub bar (TransportScrubBar), transport (TransportControls) and time readout (TransportClock).',
     usedIn: {'lib/widgets/app_shell.dart': 1},
     useCount: 1,
   ),
@@ -203,13 +239,13 @@ const Map<String, ComponentInfo> kComponentIndex = {
     usedIn: {'lib/widgets/topbar.dart': 1},
     useCount: 1,
   ),
-  'TopbarSelector': ComponentInfo(
-    name: 'TopbarSelector',
-    declaredIn: 'lib/widgets/topbar_selector.dart',
+  'MixPresentationLabel': ComponentInfo(
+    name: 'MixPresentationLabel',
+    declaredIn: 'lib/widgets/mix_presentation_label.dart',
     summary:
-        'The top bar\'s mix presentation switcher, with MixPresentationLabel beside it. Draws its closed control through SelectorChrome, the same chrome as ConsoleSelector, so it follows the theme\'s ControlStyle, 180 px wide in every theme. Not a ConsoleSelector because its menu carries a check mark on the active item and drops below the button.',
-    usedIn: {'lib/widgets/topbar.dart': 2},
-    useCount: 2,
+        'The label beside the top bar\'s mix presentation switcher. Dark (beveled) and Light (raised) draw MIX PRESENTATION at fontSmall in chromeInk, tracked -0.42 and +0.42; Classic (recessed) and High Contrast (outlined) draw Mix Presentation in the form label style, T.styleLabel, in chromeInk. The weight is regular in every theme.',
+    usedIn: {'lib/widgets/topbar.dart': 1},
+    useCount: 1,
   ),
   'EclipsaStudioMark': ComponentInfo(
     name: 'EclipsaStudioMark',
@@ -301,13 +337,14 @@ const Map<String, ComponentInfo> kComponentIndex = {
     name: 'SoloMuteButton',
     declaredIn: 'lib/widgets/solo_mute_button.dart',
     summary:
-        'The S / M monitoring toggle on the elements view track panel, the mix view channel strip and the renderer view playback cards. Four drawings by ChromeStyle: Dark\'s bgControls face in a borderStrong rim, filled and rimmed with the active colour at 30% and 60% when engaged; Light\'s plain bgControls face with a chromeTabOn label when off and, when on, a border rim over bgElevated with the active colour filling it one pixel inside under an accentFg label; Classic\'s recessedWell, the transport buttons\' well, lit with the active colour at 30% when on; High Contrast\'s 2 px borderStrong outline when off and a solid fill in the active colour with an accentFg label when on. Solo is meterYellow and mute is meterRed in every style. 20 px at fontCaption in every theme, against the 24 px and Roboto 16 the frame draws.',
+        'The S / M monitoring toggle on the elements view track panel, the mix view channel strip, the renderer view playback cards and the panel that opens over an output meter label in the Monitoring panel. Four drawings by ChromeStyle: Dark\'s bgControls face in a borderStrong rim, filled and rimmed with the active colour at 30% and 60% when engaged; Light\'s plain bgControls face with a chromeTabOn label when off and, when on, a border rim over bgElevated with the active colour filling it one pixel inside under an accentFg label; Classic\'s recessedWell, the transport buttons\' well, lit with the active colour at 30% when on; High Contrast\'s 2 px borderStrong outline when off and a solid fill in the active colour with an accentFg label when on. Solo is meterYellow and mute is meterRed in every style. 20 px at fontCaption in every theme, against the 24 px and Roboto 16 the frame draws.',
     usedIn: {
       'lib/views/elements_view.dart': 2,
       'lib/views/mix_view.dart': 2,
+      'lib/views/output_meter.dart': 2,
       'lib/views/renderer_view.dart': 2,
     },
-    useCount: 6,
+    useCount: 8,
   ),
   'StatusbarStrip': ComponentInfo(
     name: 'StatusbarStrip',

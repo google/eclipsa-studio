@@ -26,6 +26,7 @@ import '../theme.dart';
 import '../util/time_format.dart';
 import '../video/video_provider.dart';
 import '../widgets/eyebrow_label.dart';
+import '../widgets/status_tag.dart';
 
 /// Playback-mode Inspector tab. Shows a deep descriptor-OBU dump of
 /// the currently-open IAMF file: profile / codec configs / audio
@@ -85,7 +86,8 @@ class _EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Text(
-        'No file loaded. Return to landing and open an IAMF for QC.',
+        'No file loaded. Return to the landing screen and open an IAMF or MP4 '
+        'file for Playback.',
         style: TextStyle(color: T.textTertiary, fontSize: T.fontBody),
       ),
     );
@@ -961,7 +963,11 @@ class _MixPresentationCard extends StatelessWidget {
                   'Currently selected for monitoring, not a property '
                   'of the file. Change it in the mix selector in the '
                   'top bar.',
-              child: _Pill(label: 'SELECTED', color: T.purple),
+              child: StatusTag(
+                'SELECTED',
+                color: T.purpleLight,
+                outlined: true,
+              ),
             )
           : null,
       child: Column(
@@ -1511,33 +1517,6 @@ class _DetailsList extends StatelessWidget {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _Pill extends StatelessWidget {
-  const _Pill({required this.label, required this.color});
-  final String label;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(T.radiusSm),
-        border: Border.all(color: color.withValues(alpha: 0.6)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          color: color,
-          fontSize: T.fontMeter,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.5,
-        ),
       ),
     );
   }

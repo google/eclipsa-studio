@@ -653,12 +653,7 @@ class _SectionHeader extends StatelessWidget {
       label,
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
-      style: TextStyle(
-        fontSize: T.fontBody,
-        color: T.textMuted,
-        fontWeight: FontWeight.w600,
-        letterSpacing: 0.5,
-      ),
+      style: T.styleSectionLabel,
     );
   }
 }
@@ -883,18 +878,24 @@ class _ExposedTargetRow extends StatelessWidget {
   Map<int, String> labels,
   List<String> hwNames,
 ) {
-  final speakers = t.layout.speakerLabels;
+  // The compact map takes the short labels (the familiar name alone at
+  // 9.1.6); the tooltip has room for the full ones (ES-960).
+  final speakers = t.layout.meterLabels;
+  final fullSpeakers = t.layout.speakerLabels;
   var exceeds = false;
   var unrouted = 0;
   final compact = <String>[];
   final full = <String>[];
   for (var i = 0; i < t.routing.length; i++) {
     final speaker = i < speakers.length ? speakers[i] : 'Ch${i + 1}';
+    final fullSpeaker = i < fullSpeakers.length
+        ? fullSpeakers[i]
+        : 'Ch${i + 1}';
     final mask = t.routing[i];
     if (mask == 0) {
       unrouted++;
       compact.add('$speaker:–');
-      full.add('$speaker → muted');
+      full.add('$fullSpeaker → muted');
       continue;
     }
     final outsShort = <String>[];
@@ -914,7 +915,7 @@ class _ExposedTargetRow extends StatelessWidget {
       }
     }
     compact.add('$speaker:${outsShort.join(',')}');
-    full.add('$speaker → ${outsFull.join(', ')}');
+    full.add('$fullSpeaker → ${outsFull.join(', ')}');
   }
   return (
     map: compact.join(' '),

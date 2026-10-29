@@ -43,6 +43,7 @@ import '../widgets/app_dialog.dart';
 import '../widgets/console_widgets.dart' show ConsoleSelector, raisedField;
 import '../widgets/dialog_shell.dart';
 import '../widgets/profile_selector.dart';
+import '../widgets/status_tag.dart';
 import '../workspace/workspace_actions.dart' show openIamfForQc;
 import 'element_clip_stats.dart';
 import 'element_overload_rows.dart';
@@ -3162,27 +3163,6 @@ class _TargetCard extends StatelessWidget {
   }
 }
 
-class _ComingSoonBadge extends StatelessWidget {
-  const _ComingSoonBadge();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: T.decoControl(),
-      child: Text(
-        'Coming soon',
-        style: TextStyle(
-          color: T.textSecondary,
-          fontSize: T.fontCaption,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-        ),
-      ),
-    );
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Optional YouTube upload step (MP4 only)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3229,10 +3209,7 @@ class _UploadStep extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    // Not const: reads T.* and must rebuild on a
-                    // theme/font switch, and a const instance is never
-                    // rebuilt by its parent.
-                    _ComingSoonBadge(),
+                    const StatusTag('Coming soon'),
                   ],
                 ),
                 const SizedBox(height: 2),

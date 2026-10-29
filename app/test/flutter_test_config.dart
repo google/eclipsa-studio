@@ -13,17 +13,20 @@
 // limitations under the License.
 
 // Runs before every test file. Golden comparisons allow a difference of up
-// to 0.1% of the image's pixels: the meter goldens, recorded on macOS 26,
-// differ from the same painters on the macOS 15 image of the GitHub-hosted
-// runners by 1 to 9 pixels of text anti-aliasing (0.02% at most). A real
-// change to a painter moves far more than that.
+// to 0.1% of the image's pixels. The goldens are recorded on macOS 26. On
+// the macOS 15 image of the GitHub-hosted runners, 16 of the 28 meter
+// goldens (the medium and large font modes of the multichannel and 9.1.6
+// meters) differ by 1 to 9 pixels of text anti-aliasing, 0.02% at most;
+// the other meter goldens match exactly. A real change to a painter moves
+// far more than that.
 
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The share of pixels a golden may differ by and still pass.
+/// The percentage of an image's pixels a golden may differ by and still
+/// pass.
 const double kGoldenTolerancePercent = 0.1;
 
 Future<void> testExecutable(FutureOr<void> Function() testMain) async {
@@ -46,10 +49,18 @@ class _TolerantGoldenComparator extends LocalFileComparator {
       imageBytes,
       await getGoldenBytes(golden),
     );
-    if (result.passed || result.diffPercent <= kGoldenTolerancePercent) {
+    // ComparisonResult.diffPercent is differing pixels / total pixels (0 to
+    // 1); kGoldenTolerancePercent is in percent.
+    if (result.passed || result.diffPercent * 100 <= kGoldenTolerancePercent) {
+      result.dispose();
       return true;
     }
-    final error = await generateFailureOutput(result, golden, basedir);
+    final String error;
+    try {
+      error = await generateFailureOutput(result, golden, basedir);
+    } finally {
+      result.dispose();
+    }
     throw FlutterError(error);
   }
 }

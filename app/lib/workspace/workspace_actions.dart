@@ -24,7 +24,7 @@ import '../export/iamf_profile_rules.dart'
 import '../logging/log.dart';
 import '../meters/meter_provider.dart' show eclipsaStudioEngineProvider;
 import '../playback/iamf_probe.dart';
-import '../playback/iamf_probe_full.dart' show probeIamfFull;
+import '../playback/iamf_probe_full.dart' show IamfFullProbe;
 import '../playback/playback_session.dart';
 import '../session/recent_qc_files.dart';
 import '../session/session_provider.dart';
@@ -94,7 +94,9 @@ Future<void> startNewCreatorSession(BuildContext context, WidgetRef ref) async {
 
 /// Start a fresh Creator session seeded with [wavPath] as its first
 /// element — the landing card's plain-WAV drop path (an ADM WAV routes
-/// through startImportAdmFlow instead).
+/// through startImportAdmFlow instead), and the Import ADM dialog's
+/// Open as Plain WAV for a WAV without ADM metadata (ES-1008). The log
+/// lines say "WAV drop" for both.
 ///
 /// Everything user-visible resolves *before* the workspace switch,
 /// while the landing screen (and its context) is still mounted and the
@@ -235,19 +237,24 @@ Future<void> openCreatorSession(
 /// than the engine opened (ES-233). We drop the second invocation.
 bool _qcOpenInFlight = false;
 
-/// Drives the "open .iamf" flow: probe on a background isolate with a
-/// progress dialog, then open the engine-side streaming session and
-/// flip workspace mode to Playback. Used by both the landing card and
-/// the File menu. Re-entrant calls while an open is in progress are
-/// ignored (see [_qcOpenInFlight]).
-Future<void> openIamfForQc(
+/// Drives the Playback open of a `.iamf` file or an MP4 with an IAMF
+/// track: probe on a background isolate with a progress dialog, then
+/// open the engine-side streaming session and flip workspace mode to
+/// Playback. Used by the landing card, the File menu, the export's
+/// "open in Playback" and the launch parameters. Re-entrant calls while
+/// an open is in progress are ignored (see [_qcOpenInFlight]).
+///
+/// Returns whether the file opened. [showErrors] false logs a failure
+/// without its dialog (the unattended `--quit-after-load` open).
+Future<bool> openIamfForQc(
   BuildContext context,
   WidgetRef ref, {
   String? path,
+  bool showErrors = true,
 }) async {
   if (_qcOpenInFlight) {
     Log.i(LogCat.app, 'IAMF open: ignored — an open is already in progress');
-    return;
+    return false;
   }
   _qcOpenInFlight = true;
   try {
@@ -256,17 +263,19 @@ Future<void> openIamfForQc(
       ref,
       target: WorkspaceMode.playback,
     )) {
-      return;
+      return false;
     }
 
     String resolvedPath;
     if (path == null) {
       final result = await FilePicker.pickFiles(
-        dialogTitle: 'Open IAMF or MP4 for QC',
+        dialogTitle: 'Open IAMF or MP4 for Playback',
         type: FileType.custom,
         // .mp4 carries IAMF audio + picture (the format YouTube ingests and
-        // our own export produces); the engine demuxes the `iamf` track on
-        // open. Bare .iamf stays audio-only.
+        // our own export produces); the engine reads the `iamf` track's
+        // samples in place, and demuxes the track into memory only when
+        // its sample data is stored in another file. Bare .iamf stays
+        // audio-only.
         allowedExtensions: const ['iamf', 'mp4'],
         allowMultiple: false,
         // Starts in the last QC file's folder — that list already exists,
@@ -275,24 +284,33 @@ Future<void> openIamfForQc(
         initialDirectory: await RecentQcFiles.lastDirectory(),
       );
       final picked = result?.files.single.path;
-      if (picked == null) return;
+      if (picked == null) return false;
       resolvedPath = picked;
     } else {
       resolvedPath = path;
     }
 
-    if (!context.mounted) return;
-    await _runIamfOpen(context, ref, resolvedPath);
+    if (!context.mounted) return false;
+    return await _runIamfOpen(
+      context,
+      ref,
+      resolvedPath,
+      showErrors: showErrors,
+    );
   } finally {
     _qcOpenInFlight = false;
   }
 }
 
-Future<void> _runIamfOpen(
+/// Returns whether the file opened. With [showErrors] false a failure
+/// is logged without its dialog, so an unattended startup open
+/// (`--quit-after-load`) cannot wait on one.
+Future<bool> _runIamfOpen(
   BuildContext context,
   WidgetRef ref,
-  String path,
-) async {
+  String path, {
+  required bool showErrors,
+}) async {
   final navigator = Navigator.of(context, rootNavigator: true);
   final messenger = ScaffoldMessenger.maybeOf(context);
   // Capture the dialog's own context so dismissal removes exactly the
@@ -314,9 +332,15 @@ Future<void> _runIamfOpen(
   final phaseTimer = Stopwatch()..start();
   Log.i(LogCat.app, 'IAMF open: start path="$path"');
 
+  // The C-struct probe collapses each presentation to its first
+  // sub-mix; the full descriptor dump taken on the same isolate is merged
+  // below so the session sees every sub-mix (element sets, gains, output
+  // gains, param modes). If the full probe fails, the session keeps the
+  // first sub-mix of each presentation (ES-282).
   IamfProbeReport report;
+  IamfFullProbe fullProbe;
   try {
-    report = await probeIamf(path);
+    (report, fullProbe) = await probeIamfWithFull(path);
   } finally {
     // If the probe finished before the dialog's route ever built,
     // analysingCtx is still null — let the pushed route build first
@@ -336,22 +360,18 @@ Future<void> _runIamfOpen(
     'IAMF open: probe done in ${probeMs}ms '
     '(ok=${report.ok}, '
     'ae=${report.audioElements.length}, '
-    'mix=${report.mixPresentations.length})',
+    'mix=${report.mixPresentations.length}, '
+    'full=${fullProbe.ok})',
   );
 
   if (!report.ok) {
     Log.w(LogCat.app, 'IAMF probe failed for $path: ${report.errorMessage}');
-    if (context.mounted) {
+    if (showErrors && context.mounted) {
       await _showProbeErrorDialog(context, path, report.errorMessage);
     }
-    return;
+    return false;
   }
 
-  // The C-struct probe collapses each presentation to its first
-  // sub-mix; pull the full descriptor dump and merge so the session
-  // sees every sub-mix (element sets, gains, output gains, param
-  // modes). Enrichment degrades gracefully on failure (ES-282).
-  final fullProbe = await probeIamfFull(path);
   if (!fullProbe.ok) {
     Log.w(
       LogCat.app,
@@ -362,8 +382,7 @@ Future<void> _runIamfOpen(
   report = enrichReportWithFullProbe(report, fullProbe);
   Log.i(
     LogCat.app,
-    'IAMF open: full probe merged in '
-    '${phaseTimer.elapsedMilliseconds - probeMs}ms '
+    'IAMF open: full probe merged '
     '(subMixes=${[for (final mp in report.mixPresentations) mp.subMixes.length]})',
   );
 
@@ -374,7 +393,7 @@ Future<void> _runIamfOpen(
   final renderable = report.audioElements.where((ae) => ae.renderable).length;
   if (renderable == 0) {
     Log.w(LogCat.app, 'IAMF has no renderable AEs ($path); declining to open');
-    if (context.mounted) {
+    if (showErrors && context.mounted) {
       final reasons = report.audioElements
           .map((ae) => ae.skipReason.label)
           .where((r) => r.isNotEmpty)
@@ -387,20 +406,20 @@ Future<void> _runIamfOpen(
         '${reasons.isEmpty ? '' : ': $reasons'}.',
       );
     }
-    return;
+    return false;
   }
 
   final engine = ref.read(eclipsaStudioEngineProvider);
   if (engine == null) {
     Log.w(LogCat.app, 'IAMF open: engine not initialised');
-    if (context.mounted) {
+    if (showErrors && context.mounted) {
       await _showProbeErrorDialog(
         context,
         path,
         'Audio engine is not initialised yet.',
       );
     }
-    return;
+    return false;
   }
   final engineStart = phaseTimer.elapsedMilliseconds;
   final open = engine.playbackOpen(path);
@@ -410,10 +429,10 @@ Future<void> _runIamfOpen(
       LogCat.app,
       'engine.playbackOpen failed for $path: ${open.errorMessage}',
     );
-    if (context.mounted) {
+    if (showErrors && context.mounted) {
       await _showProbeErrorDialog(context, path, open.errorMessage);
     }
-    return;
+    return false;
   }
   Log.i(
     LogCat.app,
@@ -493,6 +512,7 @@ Future<void> _runIamfOpen(
       ),
     );
   }
+  return true;
 }
 
 /// Map raw engine probe errors to friendlier copy where we recognize

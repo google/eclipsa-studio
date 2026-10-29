@@ -14,7 +14,10 @@
 
 #include "adm_import/adm/common_definitions.h"
 
+#include <chrono>
+#include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "adm_import/adm/adm_model.h"
@@ -151,6 +154,37 @@ TEST(CommonDefinitions, ReportsUnmappedCommonDefChannels) {
   // unmapped channel is simply not synthesized.
   EXPECT_NE(model.Pack("AP_00010003"), nullptr);
   EXPECT_EQ(model.Channel("AC_00010066"), nullptr);
+}
+
+// An object with kTracks track UIDs. Each UID used to scan the chna rows
+// for its channel, so the resolve was quadratic in the track count (ES-849).
+TEST(CommonDefinitions, ManyTrackUidsResolveInLinearTime) {
+  constexpr int kTracks = 60000;
+  Model model;
+  AudioObject bed;
+  bed.id = "AO_BED";
+  bed.pack_format_id_refs = {"AP_00010001"};  // common-def mono pack
+  for (int i = 0; i < kTracks; ++i) {
+    const std::string uid = "ATU_" + std::to_string(i);
+    bed.track_uid_refs.push_back(uid);
+    ChnaEntry e;
+    e.track_index = static_cast<uint16_t>(i + 1);
+    e.uid = uid;
+    e.track_ref = "AT_00010003_01";  // AC_00010003, M+000
+    e.pack_ref = "AP_00010001";
+    model.chna.push_back(std::move(e));
+  }
+  model.objects.push_back(std::move(bed));
+
+  const auto start = std::chrono::steady_clock::now();
+  auto unresolved = ResolveCommonDefinitions(model);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(unresolved.empty());
+  const AudioPackFormat* pack = model.Pack("AP_00010001");
+  ASSERT_NE(pack, nullptr);
+  EXPECT_EQ(pack->channel_format_id_refs.size(), size_t{kTracks});
+  EXPECT_EQ(model.channels.size(), 1u);
+  EXPECT_LT(elapsed, std::chrono::seconds(5));
 }
 
 }  // namespace

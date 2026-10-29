@@ -12,21 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 
 package(default_visibility = ["//visibility:public"])
 
-# The transcription of OAR's own layout table that both //test:
-# oar_output_channels_test and app/test/renderer/oar_output_channels_test
-# .dart pin against. Exported so the C++ test can carry it as data.
-exports_files(["oar_output_channels.txt"])
+# The key to every channel name and order over the IAMF and OAR layer,
+# transcribed from OAR's own layout table; //test:channel_layouts_test
+# and app/test/renderer/channel_layouts_test.dart pin against it.
+# Exported so the C++ test can carry it as data.
+exports_files(["channel_layouts.txt"])
 
 cc_library(
     name = "oar_renderer",
     hdrs = ["oar_renderer.h"],
     srcs = ["oar_renderer.cc"],
     deps = [
+        ":channel_order",
         "//:engine_log",
+        "@oar//:oar",
+    ],
+)
+
+# Times the live OAR path per block and, in an asan or tsan build, counts
+# its heap allocations. See the header comment of the source.
+cc_binary(
+    name = "oar_render_bench",
+    srcs = ["oar_render_bench.cc"],
+    deps = [
+        ":oar_renderer",
         "@oar//:oar",
     ],
 )
@@ -38,4 +51,11 @@ cc_library(
     deps = [
         "@oar//:oar",
     ],
+)
+
+# The channel order the live monitoring path sends to the device for a
+# layout OLR renders in another order (9.1.6, ES-960). Header only.
+cc_library(
+    name = "channel_order",
+    hdrs = ["channel_order.h"],
 )

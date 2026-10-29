@@ -26,8 +26,13 @@
 
 import 'package:eclipsa_studio/state.dart';
 import 'package:eclipsa_studio/theme.dart';
+import 'package:eclipsa_studio/widgets/ae_type_badge.dart';
+import 'package:eclipsa_studio/widgets/console_chip.dart';
 import 'package:eclipsa_studio/widgets/eyebrow_label.dart';
+import 'package:eclipsa_studio/widgets/mix_presentation_label.dart';
+import 'package:eclipsa_studio/widgets/mix_status_badge.dart';
 import 'package:eclipsa_studio/widgets/remove_x_button.dart';
+import 'package:eclipsa_studio/widgets/status_tag.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -37,13 +42,26 @@ void _noop() {}
 /// The widgets under test, each a canonical const instance, and the
 /// Text each one draws. Adding a self-tracking widget here pins it.
 const List<Widget> _subjects = [
+  ElementDetailRow(
+    glyph: SizedBox.square(dimension: ElementDetailRow.glyphSize),
+    label: '0.0 dB',
+  ),
+  ConsoleChip(child: Text('Chip')),
   EyebrowLabel('Section'),
+  MixPresentationLabel(),
+  MixStatusBadge(),
   RemoveXButton(onTap: _noop),
+  StatusTag('Tag'),
 ];
 
 const Map<String, String> _textOf = {
+  'ElementDetailRow': '0.0 dB',
+  'ConsoleChip': 'Chip',
   'EyebrowLabel': 'SECTION',
+  'MixPresentationLabel': 'MIX PRESENTATION',
+  'MixStatusBadge': 'Not in mix presentation',
   'RemoveXButton': '✕',
+  'StatusTag': 'Tag',
 };
 
 void main() {
@@ -63,8 +81,14 @@ void main() {
     await tester.pump();
   }
 
-  TextStyle styleOf(WidgetTester tester, String text) =>
-      tester.widget<Text>(find.text(text)).style!;
+  // The style the text draws with: its own over the default text style
+  // its parent gives it (a ConsoleChip's label sets none of its own).
+  TextStyle styleOf(WidgetTester tester, String text) {
+    final finder = find.text(text);
+    return DefaultTextStyle.of(
+      tester.element(finder),
+    ).style.merge(tester.widget<Text>(finder).style);
+  }
 
   tearDown(() {
     T.setMode(T.defaultMode);

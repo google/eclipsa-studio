@@ -20,8 +20,7 @@ font is not bundled.
   `d0a87d835a944b8b40d0e82a5651bb59ab97b936a2aeed5946eb57e7b2a3a90a`.
 - Outlines transcribed unmodified, at integer font units, from the
   default instance of the variable font. The glyphs' positions in the
-  lockup come from the Eclipsa Audio lockup artwork, not from the
-  font's advances; the script records them.
+  lockup are set in the script, not taken from the font's advances.
 - No Reserved Font Name: the `LICENSE` copyright line names "The Google
   Sans Project Authors" with no `with Reserved Font Name` clause.
   `TRADEMARKS.md` upstream states that "Google" and "Google Sans" are

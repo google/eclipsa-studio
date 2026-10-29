@@ -125,6 +125,13 @@ void main() {
     expect(rect.bottom, height);
   });
 
+  testWidgets('the readout is centred in the status strip', (tester) async {
+    await pump(tester);
+    final strip = tester.getRect(find.byType(StatusbarStrip));
+    final text = tester.getRect(find.text(readout));
+    expect(text.center.dx, closeTo(strip.center.dx, 1));
+  });
+
   testWidgets('a readout change redraws the text alone', (tester) async {
     final value = ValueNotifier<String>('00:00.000');
     addTearDown(value.dispose);

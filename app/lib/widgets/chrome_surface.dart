@@ -647,11 +647,16 @@ class ChromePressable extends StatefulWidget {
     this.tooltip,
     this.semanticLabel,
     this.autofocus = false,
+    this.mouseCursor = SystemMouseCursors.click,
   });
 
   /// Null renders the control disabled: no cursor, no states, and the
   /// semantics report it as a disabled button.
   final VoidCallback? onTap;
+
+  /// The cursor over an enabled control: a click, or a grab where the
+  /// control can also be dragged.
+  final MouseCursor mouseCursor;
 
   final Widget Function(BuildContext context, PressableState state) builder;
 
@@ -696,9 +701,7 @@ class _ChromePressableState extends State<ChromePressable> {
     Widget result = FocusableActionDetector(
       enabled: enabled,
       autofocus: widget.autofocus,
-      mouseCursor: enabled
-          ? SystemMouseCursors.click
-          : SystemMouseCursors.basic,
+      mouseCursor: enabled ? widget.mouseCursor : SystemMouseCursors.basic,
       onShowHoverHighlight: (v) {
         if (!mounted) return;
         setState(() => _hover = v);

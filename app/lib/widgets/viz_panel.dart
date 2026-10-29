@@ -21,6 +21,7 @@ import '../state.dart';
 import '../theme.dart';
 import 'app_button.dart';
 import 'eyebrow_label.dart';
+import 'status_tag.dart';
 
 /// Collapsible panel listing all registered channel-viz modules with
 /// per-module toggles, param sliders, and a debug-HUD toggle.
@@ -180,10 +181,9 @@ class _Header extends ConsumerWidget {
                   ),
                   if (expanded) ...[
                     const SizedBox(width: 8),
-                    // Not const: reads T.* (see _PanelDivider). FittedBox
-                    // keeps the pill from overflowing the header at the
-                    // Large font size.
-                    Flexible(
+                    // FittedBox keeps the tag from overflowing the header
+                    // at the Large font size.
+                    const Flexible(
                       child: FittedBox(
                         fit: BoxFit.scaleDown,
                         child: _ExperimentalTag(),
@@ -206,33 +206,21 @@ class _Header extends ConsumerWidget {
   }
 }
 
-/// "EXPERIMENTAL" pill shown next to the title while the panel is
-/// expanded — the visualizer feature ships as a preview in 0.20.
-/// Styled after MixStatusBadge, the app's status-pill pattern.
-class _ExperimentalTag extends StatelessWidget {
+/// "EXPERIMENTAL" tag shown next to the title while the panel is
+/// expanded — the visualizer feature ships as a preview in 0.20. A
+/// [StatusTag] in `meterYellow`; it watches the theme because it is
+/// built `const`.
+class _ExperimentalTag extends ConsumerWidget {
   const _ExperimentalTag();
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(themeModeProvider);
     return Tooltip(
       message:
           'Visualizers are experimental. '
           'Behavior and performance may change.',
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-        decoration: BoxDecoration(
-          color: T.meterYellow.withValues(alpha: 0.10),
-          borderRadius: BorderRadius.circular(T.radiusSm),
-        ),
-        child: Text(
-          'EXPERIMENTAL',
-          style: TextStyle(
-            fontSize: T.fontCaption,
-            color: T.meterYellow,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
+      child: StatusTag('EXPERIMENTAL', color: T.meterYellow),
     );
   }
 }

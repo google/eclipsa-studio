@@ -28,11 +28,14 @@
 
 #include "iamf/iamf_playback_session.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "graph/audio_buffer.h"
@@ -331,6 +334,148 @@ TEST(IamfPlaybackSessionTest, SeekClearsEofPoisoning) {
   ASSERT_TRUE(session.wait_for_buffered(0, 512, kBufferTimeoutMs));
   const uint32_t got = source.read(out.buf, 512);
   EXPECT_GT(got, 0u);
+}
+
+// Blocks until the I/O thread has applied every posted seek.
+bool WaitForSeeksApplied(const IamfPlaybackSession& session) {
+  for (int i = 0; i < 2000; ++i) {
+    if (session.seeks_applied() == session.seeks_requested()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return false;
+}
+
+// Reads exactly `frames` frames from `source` into `out`, waiting for the
+// I/O thread as needed. Returns the frames read.
+uint32_t ReadExactly(IamfPlaybackSession& session, IamfRingSource& source,
+                     uint32_t frames, std::vector<float>* out) {
+  ScratchBuffer scratch(source.channels());
+  uint32_t total = 0;
+  while (total < frames) {
+    const uint32_t want = std::min(frames - total, kMaxFrames);
+    if (!session.wait_for_buffered(source.ae_index(), want, kBufferTimeoutMs)) {
+      break;
+    }
+    const uint32_t got = source.read(scratch.buf, want);
+    for (uint32_t c = 0; c < source.channels(); ++c) {
+      const float* ch = scratch.buf.channel(c);
+      out->insert(out->end(), ch, ch + got);
+    }
+    total += got;
+    if (got == 0) break;
+  }
+  return total;
+}
+
+// A seek to a frame the rings still hold is served from them (ES-920): the
+// stream is not repositioned, and the frames read after it are the ones a
+// straight read reaches at that position.
+TEST(IamfPlaybackSessionTest, SeekWithinRingsKeepsBufferedAudio) {
+  const auto bytes = LoadFixture(kTwoAeFixture);
+  ASSERT_FALSE(bytes.empty());
+
+  // Reference: read 600 frames, then the 256 at [600, 856).
+  IamfPlaybackSession reference;
+  ASSERT_TRUE(reference.open_from_memory(bytes.data(), bytes.size()));
+  IamfRingSource ref_source;
+  ASSERT_TRUE(ref_source.attach(&reference, 0));
+  std::vector<float> skipped;
+  ASSERT_EQ(ReadExactly(reference, ref_source, 600, &skipped), 600u);
+  std::vector<float> expected;
+  ASSERT_EQ(ReadExactly(reference, ref_source, 256, &expected), 256u);
+
+  IamfPlaybackSession session;
+  ASSERT_TRUE(session.open_from_memory(bytes.data(), bytes.size()));
+  IamfRingSource source;
+  ASSERT_TRUE(source.attach(&session, 0));
+  std::vector<float> first;
+  ASSERT_EQ(ReadExactly(session, source, 300, &first), 300u);
+  ASSERT_TRUE(session.wait_for_buffered(0, 1024, kBufferTimeoutMs));
+
+  // Forward within the buffered frames, then to the consumer's own
+  // position: both from the rings.
+  ASSERT_TRUE(source.seek(600));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  EXPECT_EQ(session.seeks_served_from_rings(), 1u);
+  EXPECT_TRUE(session.last_error().empty()) << session.last_error();
+  ASSERT_TRUE(source.seek(600));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  EXPECT_EQ(session.seeks_served_from_rings(), 2u);
+
+  std::vector<float> actual;
+  ASSERT_EQ(ReadExactly(session, source, 256, &actual), 256u);
+  EXPECT_EQ(actual, expected);
+
+  // Back past what the consumer has read: the rings no longer hold it, so
+  // the stream seeks.
+  ASSERT_TRUE(source.seek(0));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  EXPECT_EQ(session.seeks_served_from_rings(), 2u);
+  std::vector<float> restart;
+  ASSERT_EQ(ReadExactly(session, source, 300, &restart), 300u);
+  EXPECT_EQ(restart, first);
+}
+
+// After the pump reaches the end of the stream, a seek back into the frames
+// the rings still hold is served from them and leaves the rings at EOF, so
+// exactly the frames up to the end are readable and the prime check does
+// not wait for a refill that never comes.
+TEST(IamfPlaybackSessionTest, SeekWithinRingsAfterEndKeepsEof) {
+  const auto bytes = LoadFixture(kTwoAeFixture);
+  ASSERT_FALSE(bytes.empty());
+
+  IamfPlaybackSession session;
+  ASSERT_TRUE(session.open_from_memory(bytes.data(), bytes.size()));
+  ASSERT_TRUE(session.wait_for_scan_complete()) << session.last_error();
+  const uint64_t total = session.total_frames();
+  ASSERT_GT(total, 2000u);
+  // The 100 ms fixture fits the ring, so the pump reaches the end.
+  for (int i = 0; i < 2000 && !session.ring(0)->eof(); ++i) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(session.ring(0)->eof());
+
+  IamfRingSource source;
+  ASSERT_TRUE(source.attach(&session, 0));
+  ASSERT_TRUE(source.seek(total - 1000));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  EXPECT_EQ(session.seeks_served_from_rings(), 1u);
+  EXPECT_TRUE(session.last_error().empty()) << session.last_error();
+  for (uint32_t i = 0; i < session.num_audio_elements(); ++i) {
+    EXPECT_TRUE(session.ring(i)->eof()) << "AE " << i;
+    EXPECT_EQ(session.buffered_frames(i), 1000u) << "AE " << i;
+  }
+}
+
+// A seek to the end of a stream with a known duration empties the rings
+// and marks them at end of stream, without an error (ES-921).
+TEST(IamfPlaybackSessionTest, SeekToEndIsEndOfStreamNotAnError) {
+  const auto bytes = LoadFixture(kTwoAeFixture);
+  ASSERT_FALSE(bytes.empty());
+
+  IamfPlaybackSession session;
+  ASSERT_TRUE(session.open_from_memory(bytes.data(), bytes.size()));
+  ASSERT_TRUE(session.wait_for_scan_complete()) << session.last_error();
+  const uint64_t total = session.total_frames();
+  ASSERT_GT(total, 0u);
+
+  ASSERT_TRUE(session.seek_to_frame(total));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  EXPECT_TRUE(session.last_error().empty()) << session.last_error();
+  // Handled as end of stream, not replayed from the rings.
+  EXPECT_EQ(session.seeks_served_from_rings(), 0u);
+  for (uint32_t i = 0; i < session.num_audio_elements(); ++i) {
+    EXPECT_EQ(session.buffered_frames(i), 0u) << "AE " << i;
+    EXPECT_TRUE(session.ring(i)->eof()) << "AE " << i;
+  }
+
+  // A later seek back restarts the pump.
+  IamfRingSource source;
+  ASSERT_TRUE(source.attach(&session, 0));
+  ASSERT_TRUE(source.seek(0));
+  ASSERT_TRUE(WaitForSeeksApplied(session));
+  std::vector<float> frames;
+  EXPECT_EQ(ReadExactly(session, source, 256, &frames), 256u);
 }
 
 TEST(IamfPlaybackSessionTest, LatestMixGainTracksPump) {

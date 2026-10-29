@@ -58,14 +58,23 @@ git_override(
 
 # iamf-tools is not on BCR. Pinned to the public AOMediaCodec/iamf-tools
 # commit the Eclipsa Studio fork is based on, with the fork's
-# engine-facing changes applied as a patch: the `probe` and `probe_json`
-# libraries, the stream API (iamf/api/stream and the
-# iamf/include/iamf_tools/iamf_stream_* headers), public visibility on
-# the targets the engine links, and IAMF_TOOLS_DISABLE_BINAURAL_RENDERING
-# on renderer_factory so iamf-tools' copy of OBR does not collide with
-# @obr at link time. The fork's tests, test data and docs stay out of the
-# patch. engine/iamf/sync-iamf-tools.sh regenerates the patch from the
-# fork and updates IAMF_TOOLS_COMMIT; commit both together.
+# engine-facing changes applied as a patch: the stream API
+# (iamf/api/stream and the iamf/include/iamf_tools/iamf_stream_*
+# headers), public visibility on the targets the engine links,
+# IAMF_TOOLS_DISABLE_BINAURAL_RENDERING on renderer_factory so
+# iamf-tools' copy of OBR does not collide with @obr at link time,
+# probe_main's --verify and textproto output, and in-place reads of an
+# IA sequence held in memory: SpanBasedReadBitBuffer reads one
+# caller-owned byte span and SegmentedReadBitBuffer reads consecutive
+# byte ranges as one bitstream (iamf/common), Probe reads its input
+# span in place and ProbeSegments probes such ranges
+# (iamf/cli/probe.h), and IamfStream::OpenFromSegments and
+# IamfStreamFactory::OpenFromSegments open a stream over them. The
+# fork's tests, test data and docs stay out of the patch.
+# engine/iamf/sync-iamf-tools.sh regenerates the patch from the fork and
+# sets IAMF_TOOLS_COMMIT to the fork's merge base with upstream, or
+# leaves it unchanged with --keep-pin; commit the patch, with this file
+# when IAMF_TOOLS_COMMIT moved.
 IAMF_TOOLS_COMMIT = "a4f98a5dbec39c4f0493c47f0ec0708ca536f8b6"
 
 git_override(
@@ -79,18 +88,24 @@ git_override(
 # OAR (Open Audio Renderer), fetched from the public AOMediaCodec/oar with
 # the Eclipsa Studio fork's changes applied as patches: the
 # oar_get_limiter_env() API, the layout-anchored cartesian-to-polar
-# position conversion and its public helpers, the OLR azimuth wrapping
-# and EAR dangling-pointer fixes, the fork's tests, and the Bazel 8.5.1
-# wiring for the nested obr module (Bazel 8 reserves a top-level
-# `external` package, so obr's pffft build file moves to `third_party/`).
-# The limiter itself is upstream's. engine/renderer/sync-oar.sh
-# regenerates both patches from the fork and updates OAR_COMMIT; commit
-# them together.
+# position conversion and its public helpers, the threading contract in
+# oar.h, the OLR azimuth wrapping and EAR dangling-pointer fixes, OLR's
+# interpolated-gain loop without a per-sample bounds check, gain passes
+# skipped when no gain metadata is queued, and the fork's tests and docs.
+# The limiter, the render path that does not allocate, OLR's position
+# timeline, OBR's separate head-locked and world-locked encoders, and
+# OBR's head rotation, head-tracking flag and limiter flag, set without
+# the render mutex, are upstream's. obr has no fork changes, so
+# obr.patch carries only its header.
+# engine/renderer/sync-oar.sh regenerates both patches from the fork and
+# sets OAR_COMMIT to the fork's merge base with upstream, or leaves it
+# unchanged with --keep-pin; commit the patches, with this file when
+# OAR_COMMIT moved.
 #
 # Both overrides below take this one commit: obr is a subdirectory of the
 # oar tree, so a split pin would build oar against a different revision of
 # its own nested renderer. Bump the constants, not the call sites.
-OAR_COMMIT = "3fea539e1bb49238c9a931468c7ddbc8ada232eb"
+OAR_COMMIT = "a7a5cc890ee088e71ff6dc13628e6e7fe74a1481"
 
 OAR_REMOTE = "https://github.com/AOMediaCodec/oar.git"
 

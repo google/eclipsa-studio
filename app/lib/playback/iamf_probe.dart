@@ -15,14 +15,12 @@
 import 'dart:ffi';
 
 import 'package:ffi/ffi.dart' as ffi_pkg;
-import 'package:flutter/foundation.dart' show compute;
+import 'package:flutter/foundation.dart' show compute, visibleForTesting;
 
 import '../ffi/engine_bindings.dart';
+import '../ffi/engine_strings.dart';
 import '../ffi_bridge.dart' show EclipsaStudioEngine;
 import 'iamf_probe_full.dart' as full_probe;
-
-/// Kind of audio element in an IAMF file.
-enum IamfAeType { channelBased, sceneBased, objectBased, unknown }
 
 /// Why an AE is not renderable, as judged by the engine
 /// (`EclipsaStudioAeSkipReason` in engine/iamf/iamf_probe_ffi.h).
@@ -57,7 +55,6 @@ enum IamfAeSkipReason {
 class IamfAe {
   const IamfAe({
     required this.id,
-    required this.type,
     required this.layoutLabel,
     required this.ambisonicsOrder,
     required this.numChannels,
@@ -66,7 +63,6 @@ class IamfAe {
   });
 
   final int id;
-  final IamfAeType type;
   final String? layoutLabel;
   final int ambisonicsOrder;
   final int numChannels;
@@ -126,18 +122,23 @@ class IamfSubMixInfo {
   final List<IamfSubMixLayout> layouts;
 }
 
-/// One loudness layout of a sub-mix.
+/// One loudness layout of a sub-mix, with the loudness_info the file
+/// stores for it. [digitalPeakDbfs] is null only when the full probe
+/// was unavailable; [truePeakDbtp] is also null when the file's
+/// `info_type` omits true peak.
 class IamfSubMixLayout {
   const IamfSubMixLayout({
     required this.layoutType,
     this.soundSystem,
     this.integratedLoudnessLufs,
+    this.digitalPeakDbfs,
     this.truePeakDbtp,
   });
 
   final String layoutType;
   final String? soundSystem;
   final double? integratedLoudnessLufs;
+  final double? digitalPeakDbfs;
   final double? truePeakDbtp;
 }
 
@@ -178,7 +179,7 @@ class IamfMixPresentation {
   final List<IamfSubMixInfo> subMixes;
 }
 
-/// Summary of an IAMF file returned by [probeIamf].
+/// Summary of an IAMF file returned by [probeIamfWithFull].
 class IamfProbeReport {
   const IamfProbeReport({
     required this.ok,
@@ -294,6 +295,7 @@ IamfSubMixInfo _subMixFrom(full_probe.IamfSubMix sm) => IamfSubMixInfo(
         layoutType: l.layoutType,
         soundSystem: l.soundSystem,
         integratedLoudnessLufs: l.loudness.integratedLoudness,
+        digitalPeakDbfs: l.loudness.digitalPeak,
         truePeakDbtp: l.loudness.truePeak,
       ),
   ],
@@ -317,15 +319,27 @@ IamfSubMixInfo _synthesizedSubMix(IamfMixPresentation mp) => IamfSubMixInfo(
 // Public entry point
 // ---------------------------------------------------------------------------
 
-/// Parse descriptor OBUs (plus temporal-unit scan for duration) from
-/// the IAMF file at [path]. Runs the FFI call on a background isolate
-/// via `compute()` so the UI stays responsive on large files (plan
-/// decision 14).
-Future<IamfProbeReport> probeIamf(String path) =>
-    compute(_probeIamfInIsolate, path);
+/// Parses the descriptor OBUs of the IAMF file at [path] twice, into the
+/// C-struct report and the full descriptor dump
+/// ([full_probe.probeIamfFullSync]), on one background isolate so the UI
+/// stays responsive. The full probe is skipped when the first one fails.
+Future<(IamfProbeReport, full_probe.IamfFullProbe)> probeIamfWithFull(
+  String path,
+) => compute(_probeIamfWithFullInIsolate, path);
 
-// `compute()` entry point — must be a top-level / static function that
-// takes and returns transferable values.
+(IamfProbeReport, full_probe.IamfFullProbe) _probeIamfWithFullInIsolate(
+  String path,
+) {
+  final report = _probeIamfInIsolate(path);
+  return (
+    report,
+    report.ok
+        ? full_probe.probeIamfFullSync(path)
+        : full_probe.IamfFullProbe.error('skipped: probe failed'),
+  );
+}
+
+// Runs the first probe on the isolate that [probeIamfWithFull] starts.
 IamfProbeReport _probeIamfInIsolate(String path) {
   // The probe isolate has no shared Dart state with main, so we open
   // the dylib fresh here. EclipsaStudioEngine.dylibPath resolves the same
@@ -347,17 +361,22 @@ IamfProbeReport _probeIamfInIsolate(String path) {
     return const IamfProbeReport.error('probe allocation failed');
   }
   try {
-    return _readResult(resultPtr.ref);
+    return readProbeResult(resultPtr.ref);
   } finally {
     freeFn(resultPtr);
   }
 }
 
-IamfProbeReport _readResult(NativeIamfProbeResult native) {
+/// Copies [native], an `eclipsa_studio_iamf_probe` result, into Dart. Does
+/// not free it.
+@visibleForTesting
+IamfProbeReport readProbeResult(NativeIamfProbeResult native) {
   if (native.status != 0) {
+    // A file-open error holds the path cut to 256 bytes, which can end
+    // inside a character.
     final msg = native.errorMessage == nullptr
         ? 'probe failed (status ${native.status})'
-        : native.errorMessage.toDartString();
+        : decodeEngineString(native.errorMessage);
     return IamfProbeReport.error(msg);
   }
 
@@ -370,7 +389,6 @@ IamfProbeReport _readResult(NativeIamfProbeResult native) {
     aes.add(
       IamfAe(
         id: n.audioElementId,
-        type: _mapType(n.type),
         layoutLabel: label,
         ambisonicsOrder: n.ambisonicsOrder,
         numChannels: n.numChannels != 0
@@ -398,8 +416,9 @@ IamfProbeReport _readResult(NativeIamfProbeResult native) {
     mps.add(
       IamfMixPresentation(
         id: n.mixPresentationId,
-        name: n.name == nullptr ? null : n.name.toDartString(),
-        language: n.language == nullptr ? null : n.language.toDartString(),
+        // Copied from the file's annotations, so not necessarily UTF-8.
+        name: n.name == nullptr ? null : decodeEngineString(n.name),
+        language: n.language == nullptr ? null : decodeEngineString(n.language),
         loudnessLufs: n.loudnessLufs.isNaN ? null : n.loudnessLufs,
         truePeakDbtp: n.truePeakDbtp.isNaN ? null : n.truePeakDbtp,
         elements: els,
@@ -422,13 +441,6 @@ IamfProbeReport _readResult(NativeIamfProbeResult native) {
     mixPresentations: mps,
   );
 }
-
-IamfAeType _mapType(int t) => switch (t) {
-  0 => IamfAeType.channelBased,
-  1 => IamfAeType.sceneBased,
-  2 => IamfAeType.objectBased,
-  _ => IamfAeType.unknown,
-};
 
 IamfAeSkipReason _mapSkipReason(int r) => switch (r) {
   0 => IamfAeSkipReason.none,

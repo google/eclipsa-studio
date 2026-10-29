@@ -18,6 +18,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../logging/log.dart';
 import '../loudness/loudness_measure_runner.dart';
+import '../loudness/qc_loudness_report_provider.dart';
 import '../meters/meter_provider.dart'
     show eclipsaStudioEngineProvider, engineLoadProvider;
 import '../playback/playback_session.dart';
@@ -49,6 +50,9 @@ class WorkspaceModeNotifier extends Notifier<WorkspaceMode> {
     if (engine == null) return;
     switch (state) {
       case WorkspaceMode.playback:
+        // A QC Loudness Report pass measures this file; neither it nor
+        // its report applies after the switch.
+        ref.read(qcLoudnessMeasureProvider.notifier).discard();
         // Pause first so any in-flight process() call finishes before
         // close_iamf releases the session backing the ring sources.
         try {

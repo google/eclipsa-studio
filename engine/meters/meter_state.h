@@ -163,15 +163,24 @@ struct EclipsaStudioMeterData {
   float stats_corr[kStatsCorrPairs] = {};
 };
 
-/// Master bus loudness data.
+/// Master bus loudness data. LiveLoudnessMeter's meter thread writes it,
+/// and the control thread clears it when the meter is reset or
+/// reconfigured; both do so under the meter's mutex. RelaxedAtomic
+/// because Dart (and tests on the control thread) read it while the meter
+/// thread writes it.
 struct EclipsaStudioLoudnessData {
-  float lufs_momentary = -120.0f;   ///< Momentary loudness (400 ms window)
-  float lufs_short_term = -120.0f;  ///< Short-term loudness (3 s window)
-  float lufs_integrated = -120.0f;  ///< Integrated loudness (programme)
-  float true_peak = -100.0f;        ///< True peak across all channels (dBTP)
+  /// Momentary loudness (400 ms window).
+  RelaxedAtomic<float> lufs_momentary{-120.0f};
+  /// Short-term loudness (3 s window).
+  RelaxedAtomic<float> lufs_short_term{-120.0f};
+  /// Integrated loudness (programme).
+  RelaxedAtomic<float> lufs_integrated{-120.0f};
+  /// True peak across all channels (dBTP).
+  RelaxedAtomic<float> true_peak{-100.0f};
 };
 
-/// Shared meter state — written by the audio thread, read by Dart via FFI.
+/// Shared meter state — written by the audio thread (except element_count
+/// and the loudness block, see below), read by Dart via FFI.
 ///
 /// The compiler inserts 4 bytes of padding between element_count (uint32_t)
 /// and frame_counter (uint64_t); the Dart FFI struct does the same.
@@ -180,8 +189,10 @@ struct EclipsaStudioLoudnessData {
 /// the audio thread and read concurrently (by Dart, and by tests on the
 /// control thread), so they are RelaxedAtomic — same codegen as a plain
 /// aligned store on 64-bit platforms, but a defined data race for
-/// TSan/UBSan and any future platform. The bulk meter arrays and
-/// loudness block stay plain: they're single-writer advisory data
+/// TSan/UBSan and any future platform. The loudness block is written by
+/// the live loudness meter's thread instead, and is RelaxedAtomic too
+/// (see EclipsaStudioLoudnessData).
+/// The bulk meter arrays stay plain: they're single-writer advisory data
 /// repainted every frame, and wrapping whole float arrays would be
 /// invasive for no observable benefit.
 ///
@@ -193,7 +204,14 @@ struct EclipsaStudioLoudnessData {
 /// style double-read of frame_counter around the copy is the upgrade
 /// path if that ever stops being true.
 struct EclipsaStudioMeterState {
-  uint32_t element_count = 0;             ///< Active element count
+  /// Active element count. Written only by the control thread, by every
+  /// AudioGraph call that changes the element list (add, remove, IAMF
+  /// open and close, shutdown). eclipsa_studio_element_add does not
+  /// pause the audio thread, so a write from process() would race
+  /// add_element(). RelaxedAtomic like the other scalars in this
+  /// struct; the Dart tick loop reads it on the main isolate, the same
+  /// thread whose FFI calls write it.
+  RelaxedAtomic<uint32_t> element_count;
   RelaxedAtomic<uint64_t> frame_counter;  ///< Incremented per process() call
   EclipsaStudioMeterData elements[kEclipsaStudioMaxElements] =
       {};                                   ///< Per-element readings

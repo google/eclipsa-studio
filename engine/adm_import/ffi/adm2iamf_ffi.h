@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-// Flat C ABI over the ADM->bed converter, built as `libadm2iamf.dylib` and
-// loaded by the Flutter UI via dart:ffi (Phase 7). Mirrors the shape of
-// eclipsa-studio's `eclipsa_studio_engine` C ABI so it ports into ES later:
+// Flat C ABI over the ADM->bed converter. The symbols are linked into the
+// `eclipsa_studio_engine` library, and the Flutter app looks them up by name
+// (app/lib/ffi/engine_bindings.dart). The ABI follows the conventions of the
+// `eclipsa_studio_engine` C ABI:
 //   * rich/variable data (the probed scene, per-render stats) crosses as a
 //     heap-allocated JSON string the caller frees with `adm2iamf_string_free`;
 //   * fixed scalars cross in the `Adm2iamfRenderConfig` struct, mirrored
@@ -52,8 +53,7 @@ void adm2iamf_string_free(char* s);
 // ── Render path ──────────────────────────────────────────────────────────────
 //
 // Renders are channel-bed only, to the fixed 7.1.4 layout (12 channels),
-// written as 24-bit PCM at 48 kHz; the retired binaural/ambisonic backends
-// are parked in adm-lab (ES-569).
+// written as 24-bit PCM at 48 kHz.
 
 // Job state returned by `adm2iamf_render_state`.
 enum {
@@ -98,8 +98,13 @@ int adm2iamf_render_state(int job);
 // `adm2iamf_string_free`.
 char* adm2iamf_render_result_json(int job);
 
-// Request cancellation of a running job; the render stops at its next block and
-// becomes kAdm2iamfRenderCancelled. No-op for unknown/terminal jobs.
+// Request cancellation of a running job; returns at once. The channel render
+// polls the request after each 65536-frame chunk and, once it sees it, stops
+// when any in-flight read of the next chunk has finished. The resample pass
+// (run when the master is not at 48 kHz) polls after each block of up to 4096
+// output frames. The job then becomes kAdm2iamfRenderCancelled. A request after
+// the last poll does not stop the WAV write, and the job finishes as done.
+// No-op for unknown/terminal jobs.
 void adm2iamf_render_cancel(int job);
 
 // Cancel every job and block until all worker threads have finished, then clear

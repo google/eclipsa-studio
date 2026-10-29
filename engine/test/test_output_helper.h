@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "graph/audio_graph.h"
+#include "gtest/gtest.h"
 #include "renderer/oar_renderer.h"
 
 namespace test_output {
@@ -81,14 +82,21 @@ inline bool set_layout_identity(AudioGraph& g, uint32_t layout,
 
 /// Run `blocks` process() callbacks, discarding the output (warm-up,
 /// or skipping past a known-discontinuous boundary such as a seek).
+/// Before each block it waits for the WAV elements' disk-thread rings
+/// to serve it (AudioGraph::wait_for_wav_streams), as the time between
+/// device callbacks would allow.
 inline void run_blocks(AudioGraph& g, int blocks, uint32_t frames,
                        uint32_t channels) {
   std::vector<float> out(static_cast<size_t>(frames) * channels, 0.0f);
-  for (int b = 0; b < blocks; ++b) g.process(out.data(), frames, channels);
+  for (int b = 0; b < blocks; ++b) {
+    EXPECT_TRUE(g.wait_for_wav_streams(frames));
+    g.process(out.data(), frames, channels);
+  }
 }
 
 /// Collect `blocks` blocks of device channel `ch` from the rendered
-/// interleaved output.
+/// interleaved output. Waits for the WAV rings before each block, like
+/// run_blocks().
 inline std::vector<float> collect_channel(AudioGraph& g, int blocks,
                                           uint32_t frames, uint32_t channels,
                                           uint32_t ch) {
@@ -96,6 +104,7 @@ inline std::vector<float> collect_channel(AudioGraph& g, int blocks,
   std::vector<float> sig;
   sig.reserve(static_cast<size_t>(blocks) * frames);
   for (int b = 0; b < blocks; ++b) {
+    EXPECT_TRUE(g.wait_for_wav_streams(frames));
     g.process(out.data(), frames, channels);
     for (uint32_t f = 0; f < frames; ++f) {
       sig.push_back(out[f * channels + ch]);

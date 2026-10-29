@@ -73,6 +73,35 @@ TEST(PcmRingTest, WriteReadRoundTrip) {
   EXPECT_EQ(ring.buffered_frames(), 0u);
 }
 
+// write_planar() stores each channel's plane at its interleaved place,
+// across the end of the buffer, and stops at the free space.
+TEST(PcmRingTest, WritePlanarRoundTripAcrossTheWrap) {
+  PcmRing ring;
+  ring.configure(2, 16);
+  // Channel 0 carries 100 + f, channel 1 carries 200 + f.
+  PlanarOut src(2, 32);
+  for (uint32_t f = 0; f < 32; ++f) {
+    src.buf.channel(0)[f] = 100.0f + f;
+    src.buf.channel(1)[f] = 200.0f + f;
+  }
+  PlanarOut out(2, 32);
+  // Move the indices to 12 so the next write of 10 wraps after 4 frames.
+  ASSERT_EQ(ring.write_planar(src.buf, 12), 12u);
+  ASSERT_EQ(ring.read_planar(out.buf, 12), 12u);
+
+  ASSERT_EQ(ring.write_planar(src.buf, 10), 10u);
+  ASSERT_EQ(ring.read_planar(out.buf, 10), 10u);
+  for (uint32_t f = 0; f < 10; ++f) {
+    EXPECT_FLOAT_EQ(out.buf.channel(0)[f], 100.0f + f);
+    EXPECT_FLOAT_EQ(out.buf.channel(1)[f], 200.0f + f);
+  }
+
+  // 16 frames of space: a 20-frame write stores 16.
+  EXPECT_EQ(ring.write_planar(src.buf, 20), 16u);
+  EXPECT_EQ(ring.write_planar(src.buf, 1), 0u);
+  EXPECT_EQ(ring.buffered_frames(), 16u);
+}
+
 // Regression for the ES-427 flake: a published discard floor must zero
 // buffered_frames() immediately. Before the fix it kept reporting the
 // condemned pre-seek backlog, so wait-for-buffered barriers returned

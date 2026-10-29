@@ -104,6 +104,13 @@ class IamfExporter {
                                const std::string& input_wav_dir,
                                const std::string& output_dir);
 
+  // `EncodePushFromWavDir` writing `output_iamf_path` instead of
+  // `output_dir/<file_name_prefix>.iamf`; the config's file_name_prefix
+  // is not used. Same return codes as EncodePush.
+  int32_t EncodePushFromWavDirToFile(const std::string& config_textproto,
+                                     const std::string& input_wav_dir,
+                                     const std::string& output_iamf_path);
+
   // Current progress in [0.0, 1.0]. Returns 0 before the first encode.
   float Progress() const { return progress_.load(std::memory_order_relaxed); }
 
@@ -114,7 +121,8 @@ class IamfExporter {
   // ElementStream::clipped_samples()); `out_peak_linear` is max |x|
   // (dBFS = 20*log10). Returns false for an out-of-range index or
   // before any run reached its streams. Valid after EncodePush /
-  // EncodePushFromWavDir returns, until the next ResetForNewRequest().
+  // EncodePushFromWavDir(ToFile) returns, until the next
+  // ResetForNewRequest().
   // Thread-safe, but a mid-run read observes the previous (or cleared)
   // snapshot — the intended use is after the run returns. Either out
   // pointer may be null.
@@ -137,14 +145,14 @@ class IamfExporter {
   }
 
   // Best-effort cancel. Stays armed until the next ResetForNewRequest()
-  // (or EncodePushFromWavDir, which arms its own request).
+  // (or EncodePushFromWavDir(ToFile), which arms its own request).
   void Cancel() { cancel_.store(true, std::memory_order_relaxed); }
 
  private:
-  // Encode body shared by both public entry points, which parse the
+  // Encode body shared by the public entry points, which parse the
   // textproto exactly once before delegating here. Progress is reset
-  // by both; the cancel flag only by ResetForNewRequest() /
-  // EncodePushFromWavDir — EncodePush deliberately leaves it armed so
+  // by all of them; the cancel flag only by ResetForNewRequest() /
+  // EncodePushFromWavDir(ToFile) — EncodePush deliberately leaves it armed so
   // a begin→run-window cancel aborts the run (do NOT "clean this up"
   // by resetting cancel_ at EncodePush entry).
   int32_t EncodePushParsed(

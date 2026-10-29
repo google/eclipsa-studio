@@ -26,11 +26,9 @@ MixMeasureTraces tracesWithGr(List<double> gr) {
   return MixMeasureTraces(
     momentaryLufs: Float32List(0),
     shortTermLufs: Float32List(0),
-    shortTermPeakDbfs: Float32List(0),
     shortTermPsrDb: Float32List(0),
     limiterGrDb: Float32List.fromList(gr),
     loudnessRangeLu: null,
-    lraStable: false,
   );
 }
 
