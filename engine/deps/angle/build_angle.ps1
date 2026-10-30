@@ -217,7 +217,7 @@ try {
     if ($LASTEXITCODE -ne 0) { Die "gclient runhooks failed (exit=$LASTEXITCODE)" }
 
     # Skip copying optional WinDbg debugger DLLs (dbghelp.dll) that we do not use.
-    (Get-Content "build\vs_toolchain.py" -Raw).Replace("_CopyDebugger(", "# _CopyDebugger(") | Set-Content "build\vs_toolchain.py" -NoNewline
+    (Get-Content "build\vs_toolchain.py" -Raw).Replace("('dbghelp.dll', False)", "('dbghelp.dll', True)") | Set-Content "build\vs_toolchain.py" -NoNewline
 
     # --- Configure + build ---------------------------------------------------
     # $gnArgs is set at the top of the script, with the reason for each.
