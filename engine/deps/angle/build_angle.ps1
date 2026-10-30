@@ -216,12 +216,8 @@ try {
     & cmd /c "gclient runhooks"
     if ($LASTEXITCODE -ne 0) { Die "gclient runhooks failed (exit=$LASTEXITCODE)" }
 
-    $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Name "10.0.*" -ErrorAction SilentlyContinue | Sort-Object { [version]$_ } | Select-Object -Last 1
-    if ($sdk -and $sdk -ne "10.0.26100.0") {
-        foreach ($f in "build\vs_toolchain.py", "build\toolchain\win\setup_toolchain.py", "build\config\win\BUILD.gn") {
-            (Get-Content $f -Raw).Replace("10.0.26100.0", $sdk).Replace("NTDDI_WIN11_GE", "0x0A000010") | Set-Content $f -NoNewline
-        }
-    }
+    # Skip copying optional WinDbg debugger DLLs (dbghelp.dll) that we do not use.
+    (Get-Content "build\vs_toolchain.py" -Raw).Replace("_CopyDebugger(", "# _CopyDebugger(") | Set-Content "build\vs_toolchain.py" -NoNewline
 
     # --- Configure + build ---------------------------------------------------
     # $gnArgs is set at the top of the script, with the reason for each.
