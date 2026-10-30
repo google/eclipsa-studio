@@ -166,25 +166,36 @@ Write-Host "Warming up gsutil ..."
 
 # --- Fetch / sync ANGLE ------------------------------------------------------
 $Src = Join-Path $Work "angle"
-if (-not (Test-Path (Join-Path $Src ".git"))) {
-    Write-Host "Fetching ANGLE (multi-GB, first run only) ..."
-    New-Item -ItemType Directory -Force $Src | Out-Null
-    Push-Location $Src
-    try {
-        # --nohooks: the sync below runs the hooks, after the bundled gsutil
-        # has been installed once (see there).
-        & cmd /c "fetch --nohooks angle"
-        if ($LASTEXITCODE -ne 0) { Die "fetch angle failed (exit=$LASTEXITCODE)" }
-    } finally { Pop-Location }
-}
+New-Item -ItemType Directory -Force $Src | Out-Null
+Set-Content -Path (Join-Path $Src ".gclient") -Encoding ascii -Value @"
+solutions = [{
+  "name": ".",
+  "url": "https://chromium.googlesource.com/angle/angle.git@$AngleCommit",
+  "deps_file": "DEPS",
+  "managed": False,
+  "custom_vars": {
+    "checkout_angle_dawn_deps": False,
+    "checkout_angle_cl_deps": False,
+  },
+  "custom_deps": {
+    "third_party/SwiftShader": None,
+    "third_party/VK-GL-CTS/src": None,
+    "third_party/catapult": None,
+  },
+}]
+"@
 
 Push-Location $Src
 try {
-    Write-Host "Checking out $AngleCommit ..."
-    & git fetch origin $AngleCommit
-    if ($LASTEXITCODE -ne 0) { Die "git fetch of pinned commit failed" }
-    & git checkout --quiet $AngleCommit
-    if ($LASTEXITCODE -ne 0) { Die "git checkout failed" }
+    # --nohooks: the sync below runs the hooks, after the bundled gsutil
+    # has been installed once (see there).
+    # --force --reset: a sync interrupted by a failed hook or a runner
+    # timeout leaves dependency checkouts with local changes (third_party\dawn
+    # after the first 0.26.0 bootstrap), which a plain sync refuses with
+    # "You have uncommitted changes". Nothing under work\ is ever edited, so
+    # resetting the dependencies to their pinned revisions loses nothing.
+    & cmd /c "gclient sync --no-history --nohooks -D --force --reset"
+    if ($LASTEXITCODE -ne 0) { Die "gclient sync failed (exit=$LASTEXITCODE)" }
     # The DEPS hooks run download_from_google_storage from ANGLE's own
     # third_party\depot_tools, not the one bootstrapped above, so its gsutil
     # is the one the parallel hooks would race to install. Install it first.
@@ -193,13 +204,8 @@ try {
         Write-Host "Warming up the bundled gsutil ..."
         & python $bundledGsutil -- version 2>&1 | Out-Null
     }
-    # --force --reset: a sync interrupted by a failed hook or a runner
-    # timeout leaves dependency checkouts with local changes (third_party\dawn
-    # after the first 0.26.0 bootstrap), which a plain sync refuses with
-    # "You have uncommitted changes". Nothing under work\ is ever edited, so
-    # resetting the dependencies to their pinned revisions loses nothing.
-    & cmd /c "gclient sync -D --force --reset"
-    if ($LASTEXITCODE -ne 0) { Die "gclient sync failed (exit=$LASTEXITCODE)" }
+    & cmd /c "gclient runhooks"
+    if ($LASTEXITCODE -ne 0) { Die "gclient runhooks failed (exit=$LASTEXITCODE)" }
 
     # --- Configure + build ---------------------------------------------------
     # $gnArgs is set at the top of the script, with the reason for each.
