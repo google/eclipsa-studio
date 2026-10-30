@@ -124,6 +124,18 @@ HERE="__GPAC_DIR__"
 # Adjust here if the link reports unresolved externals on first run.
 SYS_LIBS="-Wl,-Bstatic -lz -Wl,-Bdynamic -lws2_32 -lwinmm -liphlpapi -lole32 -loleaut32 -luser32 -lgdi32 -ladvapi32 -lshell32 -lopengl32"
 
+need_pkgs=()
+command -v git  >/dev/null 2>&1 || need_pkgs+=(git)
+command -v make >/dev/null 2>&1 || need_pkgs+=(make)
+command -v diff >/dev/null 2>&1 || need_pkgs+=(diffutils)
+command -v gcc  >/dev/null 2>&1 || need_pkgs+=(mingw-w64-x86_64-gcc)
+[ -f /mingw64/lib/libz.a ]      || need_pkgs+=(mingw-w64-x86_64-zlib)
+if [ ${#need_pkgs[@]} -gt 0 ]; then
+  echo "Installing MSYS2 build tools: ${need_pkgs[*]} ..."
+  pacman -Sy --noconfirm --disable-download-timeout >/dev/null
+  pacman -S --needed --noconfirm --disable-download-timeout "${need_pkgs[@]}"
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

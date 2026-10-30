@@ -132,6 +132,10 @@ HERE="__FF_DIR__"
 # (mirrors build_ffmpeg.sh's brew install of nasm/meson/ninja/pkg-config). Only
 # touches pacman when something is missing, so a warm runner pays nothing.
 need_pkgs=()
+command -v git   >/dev/null 2>&1 || need_pkgs+=(git)
+command -v make  >/dev/null 2>&1 || need_pkgs+=(make)
+command -v diff  >/dev/null 2>&1 || need_pkgs+=(diffutils)
+command -v gcc   >/dev/null 2>&1 || need_pkgs+=(mingw-w64-x86_64-gcc)
 command -v nasm  >/dev/null 2>&1 || need_pkgs+=(mingw-w64-x86_64-nasm)
 command -v meson >/dev/null 2>&1 || need_pkgs+=(mingw-w64-x86_64-meson)
 command -v ninja >/dev/null 2>&1 || need_pkgs+=(mingw-w64-x86_64-ninja)
