@@ -144,6 +144,15 @@ if (-not (Test-Path (Join-Path $DepotTools "gclient.bat"))) {
 $env:PATH = "$DepotTools;$env:PATH"
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = "0"
 
+# Locate Visual Studio and dumpbin via vswhere (same approach as build_gpac.ps1).
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path $vswhere)) { Die "vswhere.exe not found -- is Visual Studio installed?" }
+$vsArgs = @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64")
+$dumpbinExe = & $vswhere @vsArgs -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+if (-not $dumpbinExe) { Die "dumpbin.exe not found -- is the VS C++ toolset installed?" }
+$vsPath = & $vswhere @vsArgs -property installationPath | Select-Object -First 1
+if ($vsPath -and -not $env:vs2022_install) { $env:vs2022_install = $vsPath }
+
 # Long paths. libc++'s test tree inside ANGLE's DEPS exceeds MAX_PATH (260)
 # under the runner's work directory, and git fails the checkout with
 # "Filename too long". core.longpaths makes git use the \\?\ prefix for its
@@ -207,6 +216,13 @@ try {
     & cmd /c "gclient runhooks"
     if ($LASTEXITCODE -ne 0) { Die "gclient runhooks failed (exit=$LASTEXITCODE)" }
 
+    $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Name "10.0.*" -ErrorAction SilentlyContinue | Sort-Object { [version]$_ } | Select-Object -Last 1
+    if ($sdk -and $sdk -ne "10.0.26100.0") {
+        foreach ($f in "build\vs_toolchain.py", "build\toolchain\win\setup_toolchain.py", "build\config\win\BUILD.gn") {
+            (Get-Content $f -Raw).Replace("10.0.26100.0", $sdk).Replace("NTDDI_WIN11_GE", "0x0A000010") | Set-Content $f -NoNewline
+        }
+    }
+
     # --- Configure + build ---------------------------------------------------
     # $gnArgs is set at the top of the script, with the reason for each.
     Write-Host "gn gen out/Release ($gnArgs) ..."
@@ -231,14 +247,6 @@ foreach ($dll in "libEGL.dll", "libGLESv2.dll") {
     if (-not (Test-Path $built)) { Die "build product not found: $built" }
     Copy-Item $built (Join-Path $Bin $dll) -Force
 }
-
-# Locate dumpbin via vswhere (same approach as build_gpac.ps1).
-$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (-not (Test-Path $vswhere)) { Die "vswhere.exe not found -- is Visual Studio installed?" }
-$dumpbinExe = & $vswhere -latest -products * `
-    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-    -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
-if (-not $dumpbinExe) { Die "dumpbin.exe not found -- is the VS C++ toolset installed?" }
 
 # Fail closed: the build must import only release runtimes. A debug-CRT
 # import here means the gn args regressed and the package gate would
