@@ -82,9 +82,10 @@ ENGINE_DEPS = [
     ("Abseil (abseil-cpp)", "Apache License 2.0",
      "abseil-cpp+", ["LICENSE"]),
     ("Protocol Buffers", "BSD 3-Clause", "protobuf+", ["LICENSE"]),
-    # Reaches the engine link (libz.a) through protobuf's io:gzip_stream,
-    # which the iamf-tools proto libraries depend on; no engine code calls
-    # the gzip streams. Not a dependency of engine/MODULE.bazel itself.
+    # Reaches the engine link (libz.a) on macOS/Linux through protobuf's
+    # io:gzip_stream, which the iamf-tools proto libraries depend on, and
+    # is statically linked into libgpac.dll on Windows. Not a direct
+    # dependency of engine/MODULE.bazel itself.
     ("zlib", "zlib License", "zlib+", ["LICENSE"]),
     ("Eigen", "MPL 2.0 (with BSD-licensed parts)",
      "eigen+", ["COPYING.README", "COPYING.MPL2", "COPYING.BSD"]),
@@ -128,10 +129,12 @@ VENDORED_DEPS = [
     # .dylibs, so we carry the full FFmpeg LGPL text + section-6 relink
     # provision and the dav1d BSD text here.
     ("FFmpeg (libav*, video backend)",
-     "LGPL-2.1-or-later (FFmpeg) + BSD-2-Clause (dav1d)",
+     "LGPL-2.1-or-later (FFmpeg) + BSD-2-Clause (dav1d) + "
+     "MIT / BSD-3-Clause (winpthreads, Windows)",
      ["third_party/ffmpeg/NOTICE",
       "third_party/ffmpeg/LICENSE.LGPL-2.1.txt",
-      "third_party/ffmpeg/LICENSE.dav1d.txt"],
+      "third_party/ffmpeg/LICENSE.dav1d.txt",
+      "third_party/ffmpeg/LICENSE.winpthreads.txt"],
      set()),
     # The ASIO SDK host subset is compiled into the Windows engine DLL
     # only (ES-101). The SDK is fetched from Steinberg at build time and
@@ -220,6 +223,13 @@ def bazel_output_base() -> Path:
 
 def read_license(base: Path, repo_dir: str, rel: str) -> str:
     path = base / "external" / repo_dir / rel
+    if not path.is_file():
+        # Platform select() branches (e.g. @protobuf's config_msvc on
+        # Windows skipping @zlib) may leave an external repo unfetched
+        # after `bazel build`; fetch it on demand.
+        subprocess.run(
+            ["bazel", "fetch", f"@@{repo_dir}//..."],
+            cwd=REPO / "engine", capture_output=True)
     if not path.is_file():
         sys.exit(f"error: license file missing: {path}\n"
                  "Run a bazel build first so external repos are fetched.")

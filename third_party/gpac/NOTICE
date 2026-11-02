@@ -28,7 +28,9 @@ that commit; engine/deps/gpac/patches/README.md says what each changes).
 The exact build configuration is recorded in
 engine/deps/gpac/build_gpac.sh (macOS) and engine/deps/gpac/build_gpac.ps1
 (Windows) — both a "--static-bin --use-curl=no" build, carrying no
-FFmpeg / curl / OpenSSL dependency.
+FFmpeg / curl / OpenSSL dependency. On macOS, libgpac.dylib links the
+system /usr/lib/libz.1.dylib; on Windows, libgpac.dll statically links
+zlib (libz.a, attributed under the separate "zlib" entry).
 
 The full text of the GNU Lesser General Public License, version 2.1,
 follows.

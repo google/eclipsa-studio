@@ -31,7 +31,17 @@ dav1d
   Copyright:  © VideoLAN and dav1d authors
   License:    BSD 2-Clause (see LICENSE.dav1d.txt)
 
-  Linked into libavcodec as the AV1 decoder and shipped as libdav1d.dylib.
+  Linked into libavcodec as the AV1 decoder and shipped as libdav1d.dylib
+  (macOS) / libdav1d.dll (Windows).
+
+winpthreads (Windows)
+---------------------
+  Project:    mingw-w64 winpthreads — https://www.mingw-w64.org
+  Copyright:  © 2011 mingw-w64 project; parts © 2010 Lockless Inc.
+  License:    MIT + BSD 3-Clause (see LICENSE.winpthreads.txt)
+
+  On Windows, the MinGW-w64 GCC runtime used to build the FFmpeg and dav1d
+  DLLs links libwinpthread-1.dll, which ships alongside them.
 
 Modifying / replacing the bundled libraries (LGPL v2.1 section 6)
 ----------------------------------------------------------------
@@ -49,4 +59,5 @@ engine/deps/ffmpeg/build_ffmpeg.ps1 (Windows).
 
 The full text of the GNU Lesser General Public License, version 2.1, follows
 in LICENSE.LGPL-2.1.txt; the dav1d BSD 2-Clause license is in
-LICENSE.dav1d.txt.
+LICENSE.dav1d.txt; and the winpthreads MIT / BSD 3-Clause license is in
+LICENSE.winpthreads.txt.
