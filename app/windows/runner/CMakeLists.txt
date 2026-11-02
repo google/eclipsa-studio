@@ -29,6 +29,8 @@ project(runner LANGUAGES CXX)
 # (linking flutter_wrapper_plugin wholesale would, and collide).
 set(FLUTTER_CPP_WRAPPER_DIR
   "${CMAKE_CURRENT_SOURCE_DIR}/../flutter/ephemeral/cpp_client_wrapper")
+set_source_files_properties(
+  "${FLUTTER_CPP_WRAPPER_DIR}/plugin_registrar.cc" PROPERTIES GENERATED TRUE)
 
 add_executable(${BINARY_NAME} WIN32
   "flutter_window.cpp"
