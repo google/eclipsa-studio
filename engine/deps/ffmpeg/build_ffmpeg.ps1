@@ -187,12 +187,18 @@ echo "Configuring ffmpeg (LGPL, decode-only, d3d11va/dxva2) ..."
     --disable-static --enable-shared \
     --disable-programs --disable-doc \
     --disable-avdevice --disable-avfilter \
-    --disable-encoders --disable-muxers \
+    --disable-everything \
     --disable-network \
     --disable-autodetect \
     --disable-zlib \
     --enable-libdav1d \
     --enable-d3d11va --enable-dxva2 \
+    --enable-protocol=file \
+    --enable-demuxer=mov,matroska,avi,mxf,ivf,mpegts \
+    --enable-decoder=h264,hevc,prores,dnxhd,vp8,vp9,libdav1d,av1,mpeg2video,mpeg4,mjpeg,v210,rawvideo \
+    --enable-hwaccel=h264_d3d11va,h264_d3d11va2,h264_dxva2,hevc_d3d11va,hevc_d3d11va2,hevc_dxva2,vp9_d3d11va,vp9_d3d11va2,vp9_dxva2,av1_d3d11va,av1_d3d11va2,av1_dxva2 \
+    --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpegvideo,dnxhd,mjpeg \
+    --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,av1_frame_split,vp9_superframe,vp9_superframe_split \
     --extra-cflags="-I${prefix}/include" \
     --extra-ldflags="-L${prefix}/lib -static-libgcc"
 )
