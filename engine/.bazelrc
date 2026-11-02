@@ -59,6 +59,9 @@ build:windows --copt=/utf-8
 # path-probing fixture loaders. Needs Developer Mode (or admin) for
 # symlink creation.
 build:windows --enable_runfiles
+# Keep paths under Windows MAX_PATH (260 chars).
+build:windows --features=shorten_virtual_includes
+build:windows --features=-compiler_param_file
 
 # AddressSanitizer (Clang/GCC only — MSVC's ASan story is different).
 build:asan --copt=-fsanitize=address

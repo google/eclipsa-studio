@@ -159,6 +159,7 @@ done
 
 echo "Configuring (static-bin, no curl/ffmpeg) ..."
 ( cd "$work/gpac" && ./configure --static-bin --use-curl=no \
+    --extra-cflags="-include stdint.h" \
     --disable-qjs --disable-compositor --disable-resample \
     --disable-scenegraph --disable-smgr --disable-bifs --disable-bifs-enc \
     --disable-laser --disable-evg --disable-svg --disable-swf --disable-qtvr \
