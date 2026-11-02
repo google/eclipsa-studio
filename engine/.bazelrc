@@ -1,5 +1,6 @@
 # Bazel 9 compatibility: cc_library moved to rules_cc
 build --incompatible_autoload_externally=+cc_library,+cc_binary,+cc_test,+cc_shared_library,+cc_import,+objc_library,+objc_import
+common --incompatible_enable_proto_toolchain_resolution
 
 # Pick host-OS specific config (build:linux / build:macos / build:windows)
 # automatically. Toolchain flag syntax differs between Clang/GCC and MSVC,
