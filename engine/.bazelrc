@@ -10,6 +10,10 @@ build --enable_platform_specific_config
 # names the runner-local test.log path, which nobody can reach.
 test --test_output=errors
 
+# Ignore host Android SDK/NDK paths.
+common --repo_env=ANDROID_HOME=
+common --repo_env=ANDROID_NDK_HOME=
+
 # ─── Clang / GCC (macOS, Linux) ──────────────────────────────────────────
 # C++20 everywhere — required by iamf-tools (std::to_array, etc.)
 build:macos --cxxopt=-std=c++20
