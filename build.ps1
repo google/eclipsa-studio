@@ -69,6 +69,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Drop Cygwin from PATH.
+$env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notlike '*\Cygwin*\bin*' }) -join ';'
+
 # -- Global codec flags ---------------------------------------------------
 
 $script:BazelCodecCopts = @()
