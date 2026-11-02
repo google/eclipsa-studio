@@ -70,11 +70,15 @@ echo "Configuring (static-bin, no curl/ffmpeg) …"
 ( cd "$work/gpac" && ./configure --static-bin --use-curl=no \
     --use-png=no --use-jpeg=no --use-freetype=no --use-nghttp2=no \
     --use-mad=no \
+    --disable-qjs --disable-compositor --disable-resample \
+    --disable-scenegraph --disable-smgr --disable-bifs --disable-bifs-enc \
+    --disable-laser --disable-evg --disable-svg --disable-swf --disable-qtvr \
+    --disable-streaming --disable-3d \
     --extra-cflags="-mmacosx-version-min=${MIN_MACOS}" \
     --prefix="$work/install" )
 
 echo "Building …"
-make -C "$work/gpac" -j"$(sysctl -n hw.ncpu)"
+make -C "$work/gpac" -j"$(sysctl -n hw.ncpu)" lib
 make -C "$work/gpac" install-lib  # installs the public headers
 
 # --static-bin emits only libgpac_static.a; wrap it into a self-contained

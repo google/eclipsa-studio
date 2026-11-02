@@ -158,10 +158,15 @@ for patch in "$HERE"/patches/*.patch; do
 done
 
 echo "Configuring (static-bin, no curl/ffmpeg) ..."
-( cd "$work/gpac" && ./configure --static-bin --use-curl=no --prefix="$work/install" )
+( cd "$work/gpac" && ./configure --static-bin --use-curl=no \
+    --disable-qjs --disable-compositor --disable-resample \
+    --disable-scenegraph --disable-smgr --disable-bifs --disable-bifs-enc \
+    --disable-laser --disable-evg --disable-svg --disable-swf --disable-qtvr \
+    --disable-streaming --disable-3d \
+    --prefix="$work/install" )
 
 echo "Building ..."
-make -C "$work/gpac" -j"$(nproc)"
+make -C "$work/gpac" -j"$(nproc)" lib
 make -C "$work/gpac" install-lib   # installs the public headers
 
 mkdir -p "$HERE/lib" "$HERE/include"

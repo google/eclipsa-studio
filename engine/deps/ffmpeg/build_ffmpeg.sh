@@ -105,12 +105,18 @@ echo "Configuring ffmpeg (LGPL, decode-only) …"
     --install-name-dir='@rpath' \
     --disable-programs --disable-doc \
     --disable-avdevice --disable-avfilter \
-    --disable-encoders --disable-muxers \
+    --disable-everything \
     --disable-network \
     --disable-autodetect \
     --enable-zlib \
     --enable-libdav1d \
     --enable-videotoolbox \
+    --enable-protocol=file \
+    --enable-demuxer=mov,matroska,avi,mxf,ivf,mpegts \
+    --enable-decoder=h264,hevc,prores,dnxhd,vp8,vp9,libdav1d,av1,mpeg2video,mpeg4,mjpeg,v210,rawvideo \
+    --enable-hwaccel=h264_videotoolbox,hevc_videotoolbox,prores_videotoolbox,vp9_videotoolbox \
+    --enable-parser=h264,hevc,vp8,vp9,av1,mpeg4video,mpegvideo,dnxhd,mjpeg \
+    --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb,av1_frame_split,vp9_superframe,vp9_superframe_split \
     --extra-cflags="-mmacosx-version-min=${MIN_MACOS} -I${prefix}/include" \
     --extra-ldflags="-mmacosx-version-min=${MIN_MACOS} -L${prefix}/lib"
 )
