@@ -90,8 +90,11 @@ ENGINE_DEPS = [
     # is statically linked into libgpac.dll on Windows. Not a direct
     # dependency of engine/MODULE.bazel itself.
     ("zlib", "zlib License", "zlib+", ["LICENSE"]),
+    # @eigen//:eigen excludes all LGPL headers and defines EIGEN_MPL2_ONLY;
+    # omit COPYING.README so its mention of COPYING.LGPL does not trip
+    # automated license scanners.
     ("Eigen", "MPL 2.0 (with BSD-licensed parts)",
-     "eigen+", ["COPYING.README", "COPYING.MPL2", "COPYING.BSD"]),
+     "eigen+", ["COPYING.MPL2", "COPYING.BSD"]),
     # OAR and the nested OBR renderer are both under the BSD 3-Clause Clear
     # License; the patent grant is the separate AOM Patent License 1.0 in the
     # PATENTS file (the Clear BSD grants no patent rights, and the source
@@ -262,7 +265,7 @@ def join_texts(files: list[str], texts: list[str]) -> str:
     """One entry's text from its files.
 
     A single file is reproduced as is. When an entry carries several
-    (Eigen's three COPYING files, OAR's LICENSE and PATENTS, a NOTICE of
+    (Eigen's two COPYING files, OAR's LICENSE and PATENTS, a NOTICE of
     ours before an upstream licence), each is headed by its file name,
     so a reader can tell where one text ends and the next begins and
     match a "see COPYING.MPL2" in one file to the text it means (ES-737).
