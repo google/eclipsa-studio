@@ -224,6 +224,9 @@ function Generate-VersionDart {
     # stay reachable.
     $ver = $null
     $describe = (cmd /c "git -C `"$RepoRoot`" describe --tags --match=v* --dirty 2>nul" | Out-String).Trim()
+    if (-not $describe) {
+        $describe = (cmd /c "git -C `"$RepoRoot`" describe --tags --match=v* 2>nul" | Out-String).Trim()
+    }
 
     if ($describe) {
         $nearest = (cmd /c "git -C `"$RepoRoot`" describe --tags --abbrev=0 --match=v* 2>nul" | Out-String).Trim()
