@@ -75,13 +75,16 @@ ENGINE_DEPS = [
      ["third_party/fdk_aac/NOTICE"]),
     (CODEC_DEP_NAMES["flac"], "BSD 3-Clause (Xiph)",
      "flac+", ["COPYING.Xiph"]),
+    ("libogg", "BSD 3-Clause (Xiph)",
+     "ogg+", ["COPYING"]),
     (CODEC_DEP_NAMES["opus"], "BSD 3-Clause",
      "opus+", ["COPYING"]),
     ("loudness_ebur128", "Apache License 2.0",
      "loudness_ebur128+", ["LICENSE"]),
     ("Abseil (abseil-cpp)", "Apache License 2.0",
      "abseil-cpp+", ["LICENSE"]),
-    ("Protocol Buffers", "BSD 3-Clause", "protobuf+", ["LICENSE"]),
+    ("Protocol Buffers", "BSD 3-Clause + MIT (utf8_range)",
+     "protobuf+", ["LICENSE", "third_party/utf8_range/LICENSE"]),
     # Reaches the engine link (libz.a) on macOS/Linux through protobuf's
     # io:gzip_stream, which the iamf-tools proto libraries depend on, and
     # is statically linked into libgpac.dll on Windows. Not a direct
