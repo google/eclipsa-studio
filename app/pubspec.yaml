@@ -48,8 +48,8 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^1.0.9
-  flutter_riverpod: ^3.3.1
+  cupertino_icons: ^2.0.0
+  flutter_riverpod: ^3.4.3
   ffi: ^2.2.0
   window_manager: ^0.5.1
   screen_retriever: ^0.2.0
@@ -58,22 +58,22 @@ dependencies:
   # sets canCreateDirectories on the macOS NSOpenPanel, so the folder dialog
   # offers a New Folder button (ES-123).
   file_selector: ^1.1.0
-  desktop_drop: ^0.7.0
+  desktop_drop: ^0.8.4
   path: ^1.9.0
-  path_provider: ^2.1.5
-  desktop_multi_window: ^0.3.0
-  macos_secure_bookmarks: ^0.2.1
+  path_provider: ^2.1.6
+  desktop_multi_window: ^0.3.1
+  macos_secure_bookmarks: ^0.3.0
   three_js: ^0.3.0
   three_js_geometry: ^0.3.0
   three_js_controls: ^0.3.0
-  vector_math: ^2.1.4
+  vector_math: ^2.4.4
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   # Directly imported by app_preferences_test.dart (fake path provider);
   # declared so the test doesn't lean on a transitive dependency.
-  path_provider_platform_interface: ^2.1.2
+  path_provider_platform_interface: ^2.1.3
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
