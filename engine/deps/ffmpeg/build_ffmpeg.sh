@@ -36,7 +36,9 @@ set -euo pipefail
 
 # ── Pin points ───────────────────────────────────────────────────────────
 FFMPEG_TAG="n8.0"      # FFmpeg 8.0 release tag
+FFMPEG_COMMIT="140fd653aed8cad774f991ba083e2d01e86420c7"
 DAV1D_TAG="1.5.1"      # dav1d 1.5.1 release tag
+DAV1D_COMMIT="42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa"
 
 # Match the engine's deployment target (--macos_minimum_os in
 # engine/.bazelrc) so the dylibs link without a version-mismatch warning.
@@ -72,9 +74,11 @@ prefix="$work/install"
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
 
 # ── dav1d (BSD-2-Clause) — fast AV1 decoder ──────────────────────────────
-echo "Cloning dav1d ${DAV1D_TAG} …"
+echo "Cloning dav1d ${DAV1D_TAG} @ ${DAV1D_COMMIT} …"
 git clone --quiet --depth 1 --branch "$DAV1D_TAG" \
   https://code.videolan.org/videolan/dav1d.git "$work/dav1d"
+[[ "$(git -C "$work/dav1d" rev-parse HEAD)" == "$DAV1D_COMMIT" ]] \
+  || { echo "ERROR: dav1d commit mismatch" >&2; exit 1; }
 echo "Building dav1d …"
 meson setup "$work/dav1d/build" "$work/dav1d" \
   --prefix="$prefix" --libdir=lib --buildtype=release \
@@ -91,9 +95,11 @@ dav1d_real="$(find "$prefix/lib" -maxdepth 1 -name 'libdav1d.*.dylib' \
 install_name_tool -id "@rpath/libdav1d.dylib" "$dav1d_real"
 
 # ── FFmpeg (LGPL-2.1) — decode only ──────────────────────────────────────
-echo "Cloning ffmpeg ${FFMPEG_TAG} …"
+echo "Cloning ffmpeg ${FFMPEG_TAG} @ ${FFMPEG_COMMIT} …"
 git clone --quiet --depth 1 --branch "$FFMPEG_TAG" \
   https://github.com/FFmpeg/FFmpeg.git "$work/ffmpeg"
+[[ "$(git -C "$work/ffmpeg" rev-parse HEAD)" == "$FFMPEG_COMMIT" ]] \
+  || { echo "ERROR: ffmpeg commit mismatch" >&2; exit 1; }
 echo "Configuring ffmpeg (LGPL, decode-only) …"
 # GPL / nonfree are OFF by default (no --disable-gpl option exists), so simply
 # not enabling them yields an LGPL-2.1 build. configure output is kept (not
