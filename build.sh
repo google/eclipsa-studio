@@ -1191,7 +1191,7 @@ and commit the result."
     info "Building Flutter release (v$BUILD_NAME build $BUILD_NUMBER)…"
     generate_releases_json
     flutter clean
-    flutter pub get
+    flutter pub get --enforce-lockfile
     if $NO_SIGN; then
       flutter_build_release \
         --build-name="$BUILD_NAME" \

@@ -1025,7 +1025,7 @@ switch ($Command) {
         $releaseDir = Join-Path $FlutterDir "build\windows\x64\runner\Release"
         Push-Location $FlutterDir
         try {
-            & flutter pub get
+            & flutter pub get --enforce-lockfile
             if ($LASTEXITCODE -ne 0) { Die "flutter pub get failed" }
             # Wipe the Release dir first: flutter build never deletes
             # outputs of since-removed plugins, so an incremental dir

@@ -54,8 +54,10 @@
 $ErrorActionPreference = "Stop"
 
 # ── Pin points (keep in lockstep with build_ffmpeg.sh and third_party/ffmpeg/NOTICE) ──
-$FfmpegTag = "n8.0"    # FFmpeg 8.0 release tag
-$Dav1dTag  = "1.5.1"   # dav1d 1.5.1 release tag
+$FfmpegTag    = "n8.0"    # FFmpeg 8.0 release tag
+$FfmpegCommit = "140fd653aed8cad774f991ba083e2d01e86420c7"
+$Dav1dTag     = "1.5.1"   # dav1d 1.5.1 release tag
+$Dav1dCommit  = "42b2b24fb8819f1ed3643aa9cf2a62f03868e3aa"
 
 # The av* libraries we generate MSVC import libs for (avutil first). dav1d is
 # shipped as a runtime DLL only -- avcodec imports it, the engine never links
@@ -125,7 +127,9 @@ $bashScript = @'
 set -euo pipefail
 
 FFMPEG_TAG="__FFMPEG_TAG__"
+FFMPEG_COMMIT="__FFMPEG_COMMIT__"
 DAV1D_TAG="__DAV1D_TAG__"
+DAV1D_COMMIT="__DAV1D_COMMIT__"
 HERE="__FF_DIR__"
 
 # Ensure the MSYS2/mingw-w64 build tools are present, installing them on demand
@@ -159,9 +163,11 @@ prefix="$work/install"
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
 
 # ── dav1d (BSD-2-Clause) — fast AV1 decoder ──────────────────────────────
-echo "Cloning dav1d ${DAV1D_TAG} ..."
+echo "Cloning dav1d ${DAV1D_TAG} @ ${DAV1D_COMMIT} ..."
 git clone --quiet --depth 1 --branch "$DAV1D_TAG" \
   https://code.videolan.org/videolan/dav1d.git "$work/dav1d"
+[[ "$(git -C "$work/dav1d" rev-parse HEAD)" == "$DAV1D_COMMIT" ]] \
+  || { echo "ERROR: dav1d commit mismatch" >&2; exit 1; }
 echo "Building dav1d ..."
 meson setup "$work/dav1d/build" "$work/dav1d" \
   --prefix="$prefix" --libdir=lib --buildtype=release \
@@ -170,9 +176,11 @@ meson setup "$work/dav1d/build" "$work/dav1d" \
 ninja -C "$work/dav1d/build" install >/dev/null
 
 # ── FFmpeg (LGPL-2.1) — decode only, D3D11VA/DXVA2 HW ────────────────────
-echo "Cloning ffmpeg ${FFMPEG_TAG} ..."
+echo "Cloning ffmpeg ${FFMPEG_TAG} @ ${FFMPEG_COMMIT} ..."
 git clone --quiet --depth 1 --branch "$FFMPEG_TAG" \
   https://github.com/FFmpeg/FFmpeg.git "$work/ffmpeg"
+[[ "$(git -C "$work/ffmpeg" rev-parse HEAD)" == "$FFMPEG_COMMIT" ]] \
+  || { echo "ERROR: ffmpeg commit mismatch" >&2; exit 1; }
 echo "Configuring ffmpeg (LGPL, decode-only, d3d11va/dxva2) ..."
 # GPL / nonfree are OFF by default. --target-os=mingw32 + --arch=x86_64 target
 # native Windows DLLs. --enable-w32threads + -static-libgcc drop libgcc_s, but
@@ -247,7 +255,9 @@ ls -1 "$HERE/lib"/*.dll
 
 $bashScript = $bashScript.
     Replace('__FFMPEG_TAG__', $FfmpegTag).
+    Replace('__FFMPEG_COMMIT__', $FfmpegCommit).
     Replace('__DAV1D_TAG__', $Dav1dTag).
+    Replace('__DAV1D_COMMIT__', $Dav1dCommit).
     Replace('__FF_DIR__', $HereMsys)
 
 # Hand the script to MSYS2's MINGW64 login shell (sets up /mingw64 on PATH).
