@@ -18,6 +18,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns:
@@ -27,6 +29,8 @@ updates:
     directory: "/engine"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     groups:
       bazel:
         patterns:
@@ -36,6 +40,8 @@ updates:
     directory: "/app"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     groups:
       pub:
         patterns:
