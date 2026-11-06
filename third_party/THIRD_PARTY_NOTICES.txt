@@ -1630,6 +1630,7 @@ IAMF audio bitstream together with the session video into a single
 IAMF-in-ISOBMFF .mp4 file (engine/iamf/iamf_muxer.cc).
 
   Project:    GPAC — https://gpac.io  (https://github.com/gpac/gpac)
+  Mirror:     https://third-party-mirror.googlesource.com/gpac
   Version:    commit 9edee648038ff542530b7a9f0392801ae88ea915 (26.08-DEV)
               plus the patches in engine/deps/gpac/patches/
   Copyright:  © Telecom Paris and the GPAC authors
@@ -2183,6 +2184,7 @@ part of FFmpeg or dav1d is statically linked into Eclipsa Studio.
 FFmpeg
 ------
   Project:    FFmpeg — https://ffmpeg.org  (https://github.com/FFmpeg/FFmpeg)
+  Mirror:     https://fuchsia.googlesource.com/third_party/ffmpeg/+/refs/tags/n8.0
   Version:    release n8.0
   Copyright:  © the FFmpeg developers
   License:    GNU Lesser General Public License, version 2.1 or later
