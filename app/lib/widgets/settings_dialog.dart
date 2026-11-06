@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -519,7 +520,7 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
         ),
         // The picker enables ASIO when it lists an ASIO device, so the
         // Steinberg usage guidelines require the logo here (§1f).
-        if (listsAsioDevice(devices)) ...[
+        if (Platform.isWindows && listsAsioDevice(devices)) ...[
           const SizedBox(height: T.gapSm),
           const AsioTrademarkNotice(),
         ],

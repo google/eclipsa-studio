@@ -306,6 +306,8 @@ def collect(excluded: set[str] = frozenset()) -> list[dict]:
     })
 
     for name, label, files, fws in VENDORED_DEPS:
+        if name in excluded:
+            continue
         text = join_texts(files, [read_repo_file(f) for f in files])
         # `kind` is what the in-app licenses window groups by: an entry
         # that ships .framework bundles is listed under Bundled
@@ -364,6 +366,8 @@ def main() -> None:
     ap.add_argument("--no-opus", action="store_true",
                     help="omit Opus notice (when built with "
                          "IAMF_TOOLS_DISABLE_OPUS_{DECODER,ENCODER})")
+    ap.add_argument("--no-asio-for-mac", action="store_true",
+                    help="omit Steinberg ASIO notice (for macOS builds)")
     args = ap.parse_args()
 
     if args.verify_bundle:
@@ -374,6 +378,8 @@ def main() -> None:
         dep_name for codec, dep_name in CODEC_DEP_NAMES.items()
         if getattr(args, f"no_{codec}")
     }
+    if args.no_asio_for_mac:
+        excluded.add("Steinberg ASIO SDK (Windows host interface)")
     components = collect(excluded)
     txt, js = render_txt(components), render_json(components)
 
