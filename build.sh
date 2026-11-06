@@ -1173,16 +1173,16 @@ case "${1:-}" in
     # ── Third-party notices (ES-57) ────────────────────────────────────────
     # Committed outputs must match the pinned engine deps. Runs after
     # build_engine so the bazel external repos are fetched.
-    if [[ -n "$NOTICES_CODEC_FLAGS" ]]; then
-      info "Regenerating third-party notices ($NOTICES_CODEC_FLAGS)…"
-      python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" $NOTICES_CODEC_FLAGS
-    else
+    if [[ -z "$NOTICES_CODEC_FLAGS" ]]; then
       info "Checking third-party notices…"
       python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" --check \
         || die "Third-party notices are stale — regenerate with
   python3 scripts/collect_third_party_notices.py
 and commit the result."
     fi
+    info "Regenerating third-party notices (--no-asio-for-mac$NOTICES_CODEC_FLAGS)…"
+    python3 "$REPO_ROOT/scripts/collect_third_party_notices.py" \
+      --no-asio-for-mac $NOTICES_CODEC_FLAGS
 
     # ── Build Flutter ─────────────────────────────────────────────────────
     # --build-name / --build-number override pubspec.yaml and stamp the
@@ -1219,6 +1219,10 @@ and commit the result."
     # sign sweep below picks it up automatically.
     info "Embedding engine dylib in app bundle…"
     embed_engine_libs "$APP_PATH/Contents/Frameworks"
+
+    # Strip Windows-only Steinberg ASIO logo asset from the macOS bundle.
+    rm -rf "$APP_PATH/Contents/Frameworks/App.framework/Versions/A/Resources/flutter_assets/assets/asio"
+    rm -rf "$APP_PATH/Contents/Frameworks/App.framework/Resources/flutter_assets/assets/asio"
 
     # ── Path hygiene (ES-374) ──────────────────────────────────────────────
     check_path_leaks "$APP_PATH/Contents/Frameworks"
