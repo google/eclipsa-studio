@@ -136,7 +136,7 @@ jobs:
             engine/deps/gpac/include
             engine/deps/ffmpeg/lib
             engine/deps/ffmpeg/include
-          key: native-${{ runner.os }}-${{ hashFiles('engine/deps/gpac/build_gpac.sh', 'engine/deps/gpac/patches/*.patch', 'engine/deps/ffmpeg/build_ffmpeg.sh', 'engine/deps/ffmpeg/requirements.txt') }}
+          key: native-${{ runner.os }}-${{ hashFiles('engine/deps/versions.env', 'engine/deps/gpac/build_gpac.sh', 'engine/deps/gpac/patches/*.patch', 'engine/deps/ffmpeg/build_ffmpeg.sh', 'engine/deps/ffmpeg/requirements.txt') }}
 
       - name: Stamp version.dart
         run: ./build.sh gen-version

@@ -395,7 +395,7 @@ function Ensure-Gpac {
     $recipe = Join-Path $GpacDir "build_gpac.ps1"
     # Recipe plus every patch it applies, so a patch-only change rebuilds:
     # one hash over the per-file hashes, in name order.
-    $inputs = @($recipe) + @(Get-ChildItem (Join-Path $GpacDir "patches") `
+    $inputs = @($recipe, (Join-Path $EngineSrc "deps\versions.env")) + @(Get-ChildItem (Join-Path $GpacDir "patches") `
         -Filter *.patch -ErrorAction SilentlyContinue | Sort-Object Name |
         ForEach-Object { $_.FullName })
     $joined = ($inputs | ForEach-Object {
@@ -436,7 +436,11 @@ function Ensure-Ffmpeg {
     $recipe  = Join-Path $FfmpegDir "build_ffmpeg.ps1"
     $impLibs = @("avutil.lib", "avcodec.lib", "avformat.lib",
                  "swscale.lib", "swresample.lib")
-    $wantId  = (Get-FileHash -Algorithm SHA256 $recipe).Hash
+    $joined  = (@($recipe, (Join-Path $EngineSrc "deps\versions.env")) | ForEach-Object {
+        (Get-FileHash -Algorithm SHA256 $_).Hash }) -join ""
+    $wantId  = (Get-FileHash -Algorithm SHA256 -InputStream (
+        [System.IO.MemoryStream]::new(
+            [System.Text.Encoding]::ASCII.GetBytes($joined)))).Hash
     $haveLibs = $impLibs | ForEach-Object { Test-Path (Join-Path $libDir $_) }
     $haveHdrs = (Test-Path $inc) -and
         ($null -ne (Get-ChildItem $inc -Filter *.h -ErrorAction SilentlyContinue |

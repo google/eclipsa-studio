@@ -13,3 +13,4 @@ engine/deps/gpac/patches/*.patch  -text
 # every line from a patch the sync scripts regenerate.
 engine/deps/oar/*.patch         -text
 engine/deps/iamf_tools/*.patch  -text
+engine/deps/versions.env        text eol=lf
