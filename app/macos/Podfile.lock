@@ -13,22 +13,27 @@ PODS:
 DEPENDENCIES:
   - desktop_multi_window (from `Flutter/ephemeral/.symlinks/plugins/desktop_multi_window/macos`)
   - flutter_angle (from `Flutter/ephemeral/.symlinks/plugins/flutter_angle/darwin`)
+  - FlutterAngle (from `https://github.com/Knightro63/FlutterAngle.git`, commit `e6001d7426102f284f7fa771743bcd501921d7c8`)
   - FlutterMacOS (from `Flutter/ephemeral`)
   - macos_secure_bookmarks (from `Flutter/ephemeral/.symlinks/plugins/macos_secure_bookmarks/macos`)
-
-SPEC REPOS:
-  trunk:
-    - FlutterAngle
 
 EXTERNAL SOURCES:
   desktop_multi_window:
     :path: Flutter/ephemeral/.symlinks/plugins/desktop_multi_window/macos
   flutter_angle:
     :path: Flutter/ephemeral/.symlinks/plugins/flutter_angle/darwin
+  FlutterAngle:
+    :commit: e6001d7426102f284f7fa771743bcd501921d7c8
+    :git: https://github.com/Knightro63/FlutterAngle.git
   FlutterMacOS:
     :path: Flutter/ephemeral
   macos_secure_bookmarks:
     :path: Flutter/ephemeral/.symlinks/plugins/macos_secure_bookmarks/macos
+
+CHECKOUT OPTIONS:
+  FlutterAngle:
+    :commit: e6001d7426102f284f7fa771743bcd501921d7c8
+    :git: https://github.com/Knightro63/FlutterAngle.git
 
 SPEC CHECKSUMS:
   desktop_multi_window: 93667594ccc4b88d91a97972fd3b1b89667fa80a
@@ -37,6 +42,6 @@ SPEC CHECKSUMS:
   FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   macos_secure_bookmarks: e096d8ec49de2d25ea47e1061b85e5f2f1520fef
 
-PODFILE CHECKSUM: 40e2b9faa891431497598c34bc6e03fa7d65ec30
+PODFILE CHECKSUM: abdcdf8d283d2d2d21626ef2c1b2f0a3c858af80
 
 COCOAPODS: 1.16.2
