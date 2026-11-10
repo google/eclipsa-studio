@@ -744,6 +744,7 @@ flutter_build_release() {
       -quiet \
       CODE_SIGN_STYLE=Automatic \
       CODE_SIGN_IDENTITY="-" \
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
       DEVELOPMENT_TEAM="" \
       PROVISIONING_PROFILE_SPECIFIER="" \
       build
