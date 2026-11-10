@@ -1,0 +1,15 @@
+[[IgnoredVulns]]
+id = "OSV-2024-659"
+reason = "OSV-2024-659: [oss-fuzz#70392](https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=70392) was fixed [upstream](https://github.com/gpac/gpac/commit/2209355e00dc6de9f6ab97b97a242da9c523e509)."
+
+[[IgnoredVulns]]
+id = "OSV-2024-664"
+reason = "OSV-2024-664: [oss-fuzz#70342](https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=70342) was fixed [upstream](https://github.com/gpac/gpac/commit/03ca9ca984a649bbb13289f2b7445a4651c39704)."
+
+[[IgnoredVulns]]
+id = "OSV-2024-695"
+reason = "OSV-2024-695: [oss-fuzz#70549](https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=70549) was fixed [upstream](https://github.com/gpac/gpac/commit/85a04010fc360a22bd332502460445cc2cd75f4e)."
+
+[[IgnoredVulns]]
+id = "OSV-2024-719"
+reason = "OSV-2024-719: [oss-fuzz#70890](https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=70890) was fixed [upstream](https://github.com/gpac/gpac/commit/ca6a0a36e52baae6f7159860b232c54241305b17)."
