@@ -49,3 +49,15 @@ updates:
       pub:
         patterns:
           - "*"
+
+  - package-ecosystem: "bundler"
+    directory: "/app/macos"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      bundler:
+        patterns:
+          - "*"

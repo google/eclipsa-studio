@@ -707,6 +707,17 @@ $(strings -a "$f" | grep -E '/Users/|_bazel_|execroot/' | head -5)"
   echo "No local build paths in shipped dylibs."
 }
 
+ensure_cocoapods() {
+  local bundle_dir="$FLUTTER_DIR/macos/.bundle/vendor"
+  bundle config --file "$FLUTTER_DIR/macos/.bundle/config" set deployment 'true'
+  bundle config --file "$FLUTTER_DIR/macos/.bundle/config" set path "$bundle_dir"
+  bundle config --file "$FLUTTER_DIR/macos/.bundle/config" set bin "$bundle_dir/bin"
+  BUNDLE_GEMFILE="$FLUTTER_DIR/macos/Gemfile" bundle install --quiet
+  if [[ ":$PATH:" != *":$bundle_dir/bin:"* ]]; then
+    export PATH="$bundle_dir/bin:$PATH"
+  fi
+}
+
 # Build the release .app. The Xcode project pins Release signing to the
 # Developer ID identity (Manual style, the team set in project.pbxproj),
 # which only exists on machines provisioned for distribution. On any other
@@ -1191,6 +1202,7 @@ and commit the result."
     info "Building Flutter release (v$BUILD_NAME build $BUILD_NUMBER)…"
     generate_releases_json
     flutter clean
+    ensure_cocoapods
     flutter pub get --enforce-lockfile
     if $NO_SIGN; then
       flutter_build_release \
