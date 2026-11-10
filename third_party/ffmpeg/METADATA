@@ -10,7 +10,7 @@ third_party {
     type: GIT
     value: "https://code.videolan.org/videolan/dav1d.git"
   }
-  version: "n8.0 (FFmpeg) + 1.5.1 (dav1d)"
+  version: "n8.0.3 (FFmpeg) + 1.5.1 (dav1d)"
   license_type: RESTRICTED
-  last_upgrade_date { year: 2026 month: 7 day: 1 }
+  last_upgrade_date { year: 2026 month: 11 day: 10 }
 }

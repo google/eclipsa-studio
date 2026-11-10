@@ -12,8 +12,8 @@ part of FFmpeg or dav1d is statically linked into Eclipsa Studio.
 FFmpeg
 ------
   Project:    FFmpeg — https://ffmpeg.org  (https://github.com/FFmpeg/FFmpeg)
-  Mirror:     https://fuchsia.googlesource.com/third_party/ffmpeg/+/refs/tags/n8.0
-  Version:    release n8.0
+  Mirror:     https://fuchsia.googlesource.com/third_party/ffmpeg/+/refs/tags/n8.0.3
+  Version:    release n8.0.3
   Copyright:  © the FFmpeg developers
   License:    GNU Lesser General Public License, version 2.1 or later
               (LGPL-2.1-or-later)
