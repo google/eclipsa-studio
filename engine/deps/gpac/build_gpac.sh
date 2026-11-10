@@ -30,23 +30,18 @@
 # macOS only for now; the Windows .dll is built separately (see README.md).
 set -euo pipefail
 
-# Pin point — the commit this muxer is verified against (master when
-# last bumped). Includes gpac/gpac#3669 (IAMF samples flushed as SAP 1),
-# which stops the muxer emitting an empty stss box in the IAMF track —
-# forbidden by IAMF-in-ISOBMFF §6.2.5 and flagged by ComplianceWarden.
-GPAC_COMMIT="9edee648038ff542530b7a9f0392801ae88ea915"  # GPAC 26.08-DEV, 2026-09-17
-
 # Match the engine's deployment target so the dylib links without a
 # version-mismatch warning (--macos_minimum_os in engine/.bazelrc).
 MIN_MACOS="12.0"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$here/../versions.env"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-echo "Cloning gpac @ ${GPAC_COMMIT} …"
-git clone https://github.com/gpac/gpac.git "$work/gpac"
-git -C "$work/gpac" checkout --quiet "$GPAC_COMMIT"
+echo "Cloning gpac @ ${ECLIPSA_STUDIO_GPAC_COMMIT} …"
+git clone "$ECLIPSA_STUDIO_GPAC_REPO" "$work/gpac"
+git -C "$work/gpac" checkout --quiet "$ECLIPSA_STUDIO_GPAC_COMMIT"
 
 # Local fixes on top of the pin, one .patch per fix (see patches/README.md
 # for what each one changes and its upstream status). Applied with

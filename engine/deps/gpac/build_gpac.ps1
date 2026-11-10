@@ -46,13 +46,6 @@
 
 $ErrorActionPreference = "Stop"
 
-# Pin point -- the commit this muxer was developed and verified against.
-# Keep in lockstep with build_gpac.sh and third_party/gpac/NOTICE.
-# Includes gpac/gpac#3669 (IAMF samples flushed as SAP 1), which stops
-# the muxer emitting an empty stss box in the IAMF track -- forbidden by
-# IAMF-in-ISOBMFF 6.2.5 and flagged by ComplianceWarden.
-$GpacCommit = "9edee648038ff542530b7a9f0392801ae88ea915"  # GPAC 26.08-DEV, 2026-09-17
-
 $Here = $PSScriptRoot
 
 function Die($msg) {
@@ -109,13 +102,13 @@ $HereMsys = "/$drive$rest"
 # --- Build GPAC + link the DLL under MSYS2 --------------------------------
 # Everything unix-y happens in one bash invocation; PowerShell handles only
 # the MSVC import-lib + verification afterwards. The heredoc is single-quoted
-# (no PowerShell interpolation); __GPAC_DIR__ and __GPAC_COMMIT__ are
-# substituted below.
+# (no PowerShell interpolation); __GPAC_DIR__ is substituted below and
+# versions.env is sourced from the parent directory.
 $bashScript = @'
 set -euo pipefail
 
-GPAC_COMMIT="__GPAC_COMMIT__"
 HERE="__GPAC_DIR__"
+source "$HERE/../versions.env"
 
 # System libraries GPAC's ISOBMFF/filter core needs on Windows. Mirrors the
 # framework list in build_gpac.sh. zlib is force-statically linked (there is
@@ -139,11 +132,11 @@ fi
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-echo "Cloning gpac @ ${GPAC_COMMIT} ..."
+echo "Cloning gpac @ ${ECLIPSA_STUDIO_GPAC_COMMIT} ..."
 # LF checkout: MSYS2 git defaults to core.autocrlf=true, which writes CRLF
 # and stops the LF patches in patches/ from applying.
-git clone -c core.autocrlf=false https://github.com/gpac/gpac.git "$work/gpac"
-git -C "$work/gpac" checkout --quiet "$GPAC_COMMIT"
+git clone -c core.autocrlf=false "$ECLIPSA_STUDIO_GPAC_REPO" "$work/gpac"
+git -C "$work/gpac" checkout --quiet "$ECLIPSA_STUDIO_GPAC_COMMIT"
 
 # Local fixes on top of the pin, one .patch per fix (see patches/README.md).
 # `git apply` fails the build if a patch no longer fits the pinned source.
@@ -204,7 +197,7 @@ sed -i 's/^#define snprintf _snprintf$/#if !defined(_MSC_VER) || _MSC_VER < 1900
 echo "MinGW link done."
 '@
 
-$bashScript = $bashScript.Replace('__GPAC_COMMIT__', $GpacCommit).Replace('__GPAC_DIR__', $HereMsys)
+$bashScript = $bashScript.Replace('__GPAC_DIR__', $HereMsys)
 
 # Hand the script to MSYS2's MINGW64 login shell (sets up /mingw64 on PATH).
 $env:MSYSTEM = "MINGW64"
