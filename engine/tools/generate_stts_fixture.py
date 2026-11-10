@@ -17,10 +17,8 @@
 The fixture reproduces the sample table VLC 4.0's stream output writes
 (ES-742): the `stts` box ends with an entry of two samples at duration 0.
 The ISOBMFF spec allows a zero duration on the last sample only, and
-GPAC rewrites such an entry on read. GPAC at the pinned commit then
-checks the box size against the rewritten entry count and rejects the
-file; engine/deps/gpac/patches/0001-*.patch fixes that, and
-engine/test/iamf_muxer_test.cc keeps the fix covered with this file.
+GPAC rewrites such an entry on read; engine/test/iamf_muxer_test.cc
+covers reading and muxing this file.
 
 Steps: encode 12 frames of ffmpeg's testsrc at 64x64 as H.264 in an MP4
 with the `moov` box after `mdat` (ffmpeg's default, so growing `moov`

@@ -1631,8 +1631,7 @@ IAMF-in-ISOBMFF .mp4 file (engine/iamf/iamf_muxer.cc).
 
   Project:    GPAC — https://gpac.io  (https://github.com/gpac/gpac)
   Mirror:     https://third-party-mirror.googlesource.com/gpac
-  Version:    commit 9edee648038ff542530b7a9f0392801ae88ea915 (26.08-DEV)
-              plus the patches in engine/deps/gpac/patches/
+  Version:    commit 1b47f9e82a7cad2de292f5ce1e9517fa8c1fc5e2 (abi-16.29)
   Copyright:  © Telecom Paris and the GPAC authors
   License:    GNU Lesser General Public License, version 2.1 or later
               (LGPL-2.1-or-later)
@@ -1647,9 +1646,7 @@ use a modified version with Eclipsa Studio: replace the bundled libgpac
 libgpac.dll beside the application executable on Windows) with your own
 build of an interface-compatible libgpac and the application will load it.
 The corresponding source for the bundled build is GPAC at the commit
-listed above, available from https://github.com/gpac/gpac, with the
-patches in engine/deps/gpac/patches/ applied (each is a git diff against
-that commit; engine/deps/gpac/patches/README.md says what each changes).
+listed above, available from https://github.com/gpac/gpac.
 The exact build configuration is recorded in
 engine/deps/gpac/build_gpac.sh (macOS) and engine/deps/gpac/build_gpac.ps1
 (Windows) — both a "--static-bin --use-curl=no" build, carrying no

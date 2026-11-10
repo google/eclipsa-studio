@@ -15,9 +15,7 @@
 // Tests for IamfMuxer::ProbeVideo and for the mux against a container
 // whose stts box ends with a zero-duration entry (ES-742). The fixture
 // stts_zero_tail_h264.mp4 (engine/tools/generate_stts_fixture.py) has
-// the sample table VLC 4.0 writes; GPAC at the pinned commit rejected it
-// until engine/deps/gpac/patches/0001-*.patch, so a failure here means
-// libgpac was built without the patch.
+// the sample table VLC 4.0 writes.
 
 #include "iamf/iamf_muxer.h"
 

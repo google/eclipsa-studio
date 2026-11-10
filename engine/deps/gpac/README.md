@@ -39,19 +39,12 @@ Each clones GPAC at the pinned commit, builds it clean, and drops the
 library + `include/gpac/*.h` here. macOS produces `lib/libgpac.dylib`;
 Windows produces `lib/libgpac.dll` **and** `lib/gpac.lib` (the MSVC import
 library the engine links against — a Unix `.dylib`/`.so` needs no separate
-import lib). Bazel's `cc_import` in `BUILD.bazel` picks them up. Pinned to
-GPAC commit `9edee648038ff542530b7a9f0392801ae88ea915` (26.08-DEV,
-2026-09-17, master at the time; includes gpac/gpac#3669, which flushes
-IAMF samples as SAP 1 so the muxed IAMF track no longer carries a
-spec-forbidden empty `stss` box).
+import lib). Bazel's `cc_import` in `BUILD.bazel` picks them up. Pinned in
+`engine/deps/versions.env` to GPAC commit
+`1b47f9e82a7cad2de292f5ce1e9517fa8c1fc5e2` (`abi-16.29`).
 
-Both scripts apply the patches in `patches/` to the checkout before
-configuring it; `patches/README.md` lists what each one changes and its
-upstream status. The build scripts' freshness stamp covers the recipe and
-the patches, so adding or editing a patch rebuilds the library on the next
-`./build.sh` / `.\build.ps1`; run `build_gpac.sh` by hand to rebuild sooner. The shipped libgpac is therefore the pinned commit plus
-those patches, which `third_party/gpac/NOTICE` states for the LGPL
-section 6 source offer.
+Both scripts apply any patches in `patches/` to the checkout before
+configuring it; `patches/README.md` describes the convention.
 
 The Windows recipe mirrors the macOS one: it configures GPAC the same way
 (`--static-bin --use-curl=no`) under MSYS2/mingw-w64, links the static

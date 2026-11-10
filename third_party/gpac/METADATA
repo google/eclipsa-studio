@@ -6,8 +6,7 @@ third_party {
     type: GIT
     value: "https://github.com/gpac/gpac.git"
   }
-  version: "9edee648038ff542530b7a9f0392801ae88ea915"
+  version: "1b47f9e82a7cad2de292f5ce1e9517fa8c1fc5e2"
   license_type: RESTRICTED
-  last_upgrade_date { year: 2026 month: 9 day: 17 }
-  local_modifications: "Built with the patches in engine/deps/gpac/patches/ applied; see engine/deps/gpac/patches/README.md."
+  last_upgrade_date { year: 2026 month: 11 day: 10 }
 }
