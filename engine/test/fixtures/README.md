@@ -29,4 +29,4 @@ Generated here, not vendored.
 
 | File | Generator | Notes |
 |---|---|---|
-| `stts_zero_tail_h264.mp4` | `engine/tools/generate_stts_fixture.py` | 12 frames of ffmpeg's `testsrc` at 64x64, H.264, whose `stts` box ends with an entry of 2 samples at duration 0, the table VLC 4.0's stream output writes (ES-742). Unpatched GPAC rejects it; `iamf_muxer_test.cc` checks the patched libgpac (`engine/deps/gpac/patches/0001-*.patch`) accepts it. Regenerate with the script; it needs ffmpeg on PATH. |
+| `stts_zero_tail_h264.mp4` | `engine/tools/generate_stts_fixture.py` | 12 frames of ffmpeg's `testsrc` at 64x64, H.264, whose `stts` box ends with an entry of 2 samples at duration 0, the table VLC 4.0's stream output writes (ES-742), covered by `iamf_muxer_test.cc`. Regenerate with the script; it needs ffmpeg on PATH. |
