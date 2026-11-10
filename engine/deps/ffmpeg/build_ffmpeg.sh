@@ -54,21 +54,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 # ── Build tools ──────────────────────────────────────────────────────────
-# nasm: FFmpeg + dav1d x86/arm SIMD. meson/ninja: dav1d build system.
-# pkg-config: FFmpeg's --enable-libdav1d discovery.
-missing=()
-for tool in nasm meson ninja pkg-config; do
-  command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
-done
-if [[ ${#missing[@]} -gt 0 ]]; then
-  if command -v brew >/dev/null 2>&1; then
-    echo "Installing build tools: ${missing[*]} …"
-    brew install "${missing[@]}"
-  else
-    echo "ERROR: missing build tools: ${missing[*]} (brew install them)" >&2
-    exit 1
-  fi
-fi
+python3 -m venv "$work/venv"
+"$work/venv/bin/pip" install --quiet --require-hashes --only-binary=:all: \
+  -r "$here/requirements.txt"
+export PATH="$work/venv/bin:$PATH"
 
 prefix="$work/install"
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"

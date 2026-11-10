@@ -61,3 +61,15 @@ updates:
       bundler:
         patterns:
           - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/engine/deps/ffmpeg"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    cooldown:
+      default-days: 7
+    groups:
+      pip:
+        patterns:
+          - "*"

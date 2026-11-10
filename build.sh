@@ -597,9 +597,10 @@ ensure_gpac() {
 # runner. Delete engine/deps/ffmpeg/lib to force a rebuild by hand.
 ensure_ffmpeg() {
   local recipe="$FFMPEG_DIR/build_ffmpeg.sh"
+  local reqs="$FFMPEG_DIR/requirements.txt"
   local stamp="$FFMPEG_DIR/lib/.build_id"
   local want_id
-  want_id="$(shasum -a 256 "$recipe" | awk '{print $1}')"
+  want_id="$(cat "$recipe" "$reqs" 2>/dev/null | shasum -a 256 | awk '{print $1}')"
   local have_id=""
   if [[ -f "$stamp" ]]; then have_id="$(tr -d '[:space:]' < "$stamp")"; fi
   local have=true
