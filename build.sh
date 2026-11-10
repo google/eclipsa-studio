@@ -571,7 +571,7 @@ ensure_gpac() {
   local recipe="$GPAC_DIR/build_gpac.sh"
   local stamp="$GPAC_DIR/lib/.build_id"
   local want_id
-  want_id="$(cat "$recipe" "$ENGINE_SRC/deps/versions.env" "$GPAC_DIR"/patches/*.patch 2>/dev/null \
+  want_id="$({ cat "$recipe" "$ENGINE_SRC/deps/versions.env"; cat "$GPAC_DIR"/patches/*.patch 2>/dev/null || true; } \
     | shasum -a 256 | awk '{print $1}')"
   local have_id=""
   if [[ -f "$stamp" ]]; then have_id="$(tr -d '[:space:]' < "$stamp")"; fi
