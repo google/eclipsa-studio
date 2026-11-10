@@ -34,6 +34,10 @@ flutter_macos_podfile_setup
 target 'Runner' do
   use_frameworks!
 
+  pod 'FlutterAngle',
+      :git => 'https://github.com/Knightro63/FlutterAngle.git',
+      :commit => 'e6001d7426102f284f7fa771743bcd501921d7c8'
+
   flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do
     inherit! :search_paths
