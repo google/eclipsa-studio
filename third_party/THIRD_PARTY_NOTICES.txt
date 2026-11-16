@@ -1631,7 +1631,7 @@ IAMF-in-ISOBMFF .mp4 file (engine/iamf/iamf_muxer.cc).
 
   Project:    GPAC — https://gpac.io  (https://github.com/gpac/gpac)
   Mirror:     https://third-party-mirror.googlesource.com/gpac
-  Version:    commit 1b47f9e82a7cad2de292f5ce1e9517fa8c1fc5e2 (abi-16.29)
+  Version:    commit 6c9831f611e3794dbc441297464061e6617c2b21 (abi-16.31)
   Copyright:  © Telecom Paris and the GPAC authors
   License:    GNU Lesser General Public License, version 2.1 or later
               (LGPL-2.1-or-later)

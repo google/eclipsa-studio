@@ -41,7 +41,7 @@ Windows produces `lib/libgpac.dll` **and** `lib/gpac.lib` (the MSVC import
 library the engine links against — a Unix `.dylib`/`.so` needs no separate
 import lib). Bazel's `cc_import` in `BUILD.bazel` picks them up. Pinned in
 `engine/deps/versions.env` to GPAC commit
-`1b47f9e82a7cad2de292f5ce1e9517fa8c1fc5e2` (`abi-16.29`).
+`6c9831f611e3794dbc441297464061e6617c2b21` (`abi-16.31`).
 
 Both scripts apply any patches in `patches/` to the checkout before
 configuring it; `patches/README.md` describes the convention.
